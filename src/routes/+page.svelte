@@ -22,7 +22,7 @@
   let isOptimizing = false;
   let showAddForm = false;
   let clickMarker: any = null;
-  let notification = { show: false, message: '', type: 'success' as 'success' | 'error' };
+  let notification = { show: false, message: '', type: 'success' as 'success' | 'error' | 'warning' };
   let activeTab: 'points' | 'route' = 'points';
   let activePointId: number | null = null;
 
@@ -314,27 +314,36 @@
       // Sort points by nearest neighbor algorithm
       const sortedPoints = sortByNearestNeighbor(startPoint, [...deliveryPoints]);
       
-      const res = await fetch(`${API_URL}/optimize-route`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          points: sortedPoints,
-          start_point: startPoint
-        })
-      });
+      // Build waypoints for OSRM: start -> all sorted points (including last one)
+      const waypoints = [
+        `${startPoint.lng},${startPoint.lat}`,
+        ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
+      ].join(';');
 
+      // Call OSRM directly to get route through ALL points
+      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${waypoints}?overview=full&geometries=geojson`;
+      const res = await fetch(osrmUrl);
       const data = await res.json();
-      if (data.error || !res.ok) throw new Error(data.error || data.message || 'คำนวณไม่สำเร็จ');
 
-      // Use our sorted order instead of API's order
-      data.optimized_order = [
-        { ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ' },
-        ...sortedPoints
-      ];
+      if (data.code !== 'Ok' || !data.routes?.[0]) {
+        throw new Error('ไม่สามารถคำนวณเส้นทางได้');
+      }
 
-      optimizedRoute = data;
-      remainingDistance = data.total_distance;
-      remainingTime = data.total_time;
+      // Build optimized route data
+      optimizedRoute = {
+        route: {
+          geometry: data.routes[0].geometry
+        },
+        total_distance: data.routes[0].distance,
+        total_time: data.routes[0].duration,
+        optimized_order: [
+          { ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ' },
+          ...sortedPoints
+        ]
+      };
+
+      remainingDistance = data.routes[0].distance;
+      remainingTime = data.routes[0].duration;
       displayOptimizedRoute();
       activeTab = 'route';
       showNotification('คำนวณเส้นทางสำเร็จ', 'success');
@@ -523,7 +532,7 @@
       updateStatistics();
     }, 1000);
 
-     speak('เริ่มนำทาง');
+    speak('เริ่มนำทาง');
     addAlert('navigation', 'เริ่มการนำทาง');
     showNotification('เริ่มนำทางแล้ว', 'success');
     
@@ -783,19 +792,20 @@
 
   async function skipToNextPoint() {
     if (currentTargetIndex >= optimizedRoute.optimized_order.length - 1) {
-      // ถ้าอยู่ที่จุดสุดท้ายแล้ว ให้ mark as arrived
+      // ถ้าอยู่ที่จุดสุดท้ายแล้ว ให้ข้าม
       if (!arrivedPoints.includes(currentTargetIndex)) {
         arrivedPoints = [...arrivedPoints, currentTargetIndex];
-        markAsDelivered(optimizedRoute.optimized_order[currentTargetIndex].id);
-        showNotification('ถึงจุดหมายปลายทางแล้ว! 🎉', 'success');
-        speak('ถึงจุดหมายปลายทางแล้ว');
+        showNotification('ข้ามจุดสุดท้ายแล้ว', 'warning');
+        speak('ข้ามจุดสุดท้ายแล้ว');
+        addAlert('navigation', 'ข้ามจุดหมายสุดท้าย');
       }
       return;
     }
     
-    // Mark current point as arrived
+    const skippedPoint = optimizedRoute.optimized_order[currentTargetIndex];
+    
+    // Mark current point as skipped (not delivered)
     arrivedPoints = [...arrivedPoints, currentTargetIndex];
-    markAsDelivered(optimizedRoute.optimized_order[currentTargetIndex].id);
     currentTargetIndex++;
     
     // Just update the display - no need to recalculate, use existing route
@@ -808,7 +818,8 @@
       map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true });
     }
     
-    showNotification('ข้ามไปจุดถัดไป', 'success');
+    showNotification(`ข้าม ${skippedPoint.name}`, 'warning');
+    addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
   }
 
   function updateRouteDisplayForNavigation() {
@@ -1450,7 +1461,7 @@
     return labels[p] || 'ปกติ';
   }
 
-  function showNotification(msg: string, type: 'success' | 'error') {
+  function showNotification(msg: string, type: 'success' | 'error' | 'warning') {
     notification = { show: true, message: msg, type };
     setTimeout(() => notification.show = false, 3500);
   }
@@ -1577,7 +1588,7 @@
 
   <!-- Notification Toast -->
   {#if notification.show}
-    <div class="toast" class:toast-success={notification.type === 'success'} class:toast-error={notification.type === 'error'}>
+    <div class="toast" class:toast-success={notification.type === 'success'} class:toast-error={notification.type === 'error'} class:toast-warning={notification.type === 'warning'}>
       <div class="toast-icon">
         {#if notification.type === 'success'}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1816,25 +1827,27 @@
           </button>
         {/if}
 
-        <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 5v14M5 12h14"/>
-          </svg>
-          <span>เพิ่มจุดส่ง</span>
-        </button>
+        {#if !optimizedRoute}
+          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            <span>เพิ่มจุดส่ง</span>
+          </button>
 
-        <button class="btn btn-ghost" on:click={toggleMultiSelect}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="7" height="7"/>
-            <rect x="14" y="3" width="7" height="7"/>
-            <rect x="14" y="14" width="7" height="7"/>
-            <rect x="3" y="14" width="7" height="7"/>
-          </svg>
-          <span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span>
-        </button>
+          <button class="btn btn-ghost" on:click={toggleMultiSelect}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7"/>
+              <rect x="14" y="3" width="7" height="7"/>
+              <rect x="14" y="14" width="7" height="7"/>
+              <rect x="3" y="14" width="7" height="7"/>
+            </svg>
+            <span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span>
+          </button>
+        {/if}
       </div>
 
-      {#if showAddForm}
+      {#if showAddForm && !optimizedRoute}
         <div class="add-form glass-card">
           <div class="form-header">
             <h3>เพิ่มจุดส่งใหม่</h3>
@@ -2019,6 +2032,18 @@
                 <div class="stat-value">{optimizedRoute.optimized_order.length}</div>
                 <div class="stat-label">จุดแวะ</div>
               </div>
+              <div class="stat-card fuel">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 22V8a2 2 0 012-2h8a2 2 0 012 2v14"/>
+                    <path d="M15 12h2a2 2 0 012 2v2a2 2 0 002 2h0a2 2 0 002-2V9.83a2 2 0 00-.59-1.42L18 4"/>
+                    <path d="M18 4v4"/>
+                    <rect x="5" y="10" width="6" height="4"/>
+                  </svg>
+                </div>
+                <div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div>
+                <div class="stat-label">ค่าน้ำมัน (ประมาณ)</div>
+              </div>
             </div>
 
             <div class="route-timeline">
@@ -2086,7 +2111,7 @@
       </div>
     {/if}
     
-    {#if !isNavigating}
+    {#if !isNavigating && !optimizedRoute}
       <div class="map-info glass-card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="10"/>
@@ -2314,7 +2339,7 @@
   .settings-actions { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
 
   /* Alerts Panel */
-  .alerts-panel { position: fixed; top: 16px; right: 24px; width: 350px; max-height: 400px; z-index: 1500; overflow: hidden; display: flex; flex-direction: column; }
+  .alerts-panel { position: fixed; top: 36px; right: 24px; width: 350px; max-height: 400px; z-index: 1500; overflow: hidden; display: flex; flex-direction: column; }
   .alerts-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
   .alerts-header h3 { font-size: 16px; }
   .alerts-actions { display: flex; gap: 12px; align-items: center; }
@@ -2411,6 +2436,7 @@
   @keyframes toastIn { from { opacity: 0; transform: translateX(100px); } to { opacity: 1; transform: translateX(0); } }
   .toast-success { background: rgba(0, 255, 136, 0.15); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88; }
   .toast-error { background: rgba(255, 107, 107, 0.15); border: 1px solid rgba(255, 107, 107, 0.3); color: #ff6b6b; }
+  .toast-warning { background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; }
   .toast-icon { width: 24px; height: 24px; }
   .toast-icon svg { width: 100%; height: 100%; }
 
