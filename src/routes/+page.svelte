@@ -99,6 +99,21 @@
   // Route history
   let routeHistory: any[] = [];
   
+  // Delivery history - เก็บประวัติการส่ง
+  interface DeliveryRecord {
+    id: number;
+    pointId: number;
+    pointName: string;
+    address: string;
+    status: 'success' | 'skipped';
+    timestamp: Date;
+    lat: number;
+    lng: number;
+  }
+  let deliveryHistory: DeliveryRecord[] = [];
+  let showHistory = false;
+  let skippedPoints: number[] = []; // เก็บ index ของจุดที่ข้าม (ไม่ใช่ส่งสำเร็จ)
+  
   // Offline mode indicator
   let isOffline = false;
   
@@ -144,12 +159,29 @@
 
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
+      // ใช้ tile layer หลายตัว fallback
+      const tileLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
         attribution: '© Stadia Maps © OpenMapTiles © OSM',
-        maxZoom: 19
+        maxZoom: 19,
+        errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
       }).addTo(map);
 
-      setTimeout(() => map.invalidateSize(), 200);
+      // Retry loading tiles on error
+      tileLayer.on('tileerror', function(error: any) {
+        setTimeout(() => {
+          error.tile.src = error.tile.src;
+        }, 1000);
+      });
+
+      // invalidateSize หลายครั้งเพื่อให้แน่ใจว่า map โหลดครบ
+      setTimeout(() => map.invalidateSize(), 100);
+      setTimeout(() => map.invalidateSize(), 500);
+      setTimeout(() => map.invalidateSize(), 1000);
+      
+      // เมื่อ window resize ให้ invalidateSize
+      window.addEventListener('resize', () => {
+        setTimeout(() => map.invalidateSize(), 100);
+      });
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
@@ -406,7 +438,7 @@
         {
           enableHighAccuracy: true,
           timeout: 10000,
-          maximumAge: 60000
+          maximumAge: 0
         }
       );
     });
@@ -791,24 +823,38 @@
   }
 
   async function skipToNextPoint() {
+    const skippedPoint = optimizedRoute.optimized_order[currentTargetIndex];
+    
+    // บันทึกประวัติว่าข้าม
+    if (skippedPoint && skippedPoint.name !== 'ตำแหน่งปัจจุบัน') {
+      const record: DeliveryRecord = {
+        id: Date.now(),
+        pointId: skippedPoint.id,
+        pointName: skippedPoint.name,
+        address: skippedPoint.address,
+        status: 'skipped',
+        timestamp: new Date(),
+        lat: skippedPoint.lat,
+        lng: skippedPoint.lng
+      };
+      deliveryHistory = [...deliveryHistory, record];
+      skippedPoints = [...skippedPoints, currentTargetIndex];
+    }
+    
     if (currentTargetIndex >= optimizedRoute.optimized_order.length - 1) {
-      // ถ้าอยู่ที่จุดสุดท้ายแล้ว ให้ข้าม
-      if (!arrivedPoints.includes(currentTargetIndex)) {
-        arrivedPoints = [...arrivedPoints, currentTargetIndex];
-        showNotification('ข้ามจุดสุดท้ายแล้ว', 'warning');
-        speak('ข้ามจุดสุดท้ายแล้ว');
-        addAlert('navigation', 'ข้ามจุดหมายสุดท้าย');
-      }
+      // ถ้าอยู่ที่จุดสุดท้ายแล้ว
+      arrivedPoints = [...arrivedPoints, currentTargetIndex];
+      showNotification(`ข้าม ${skippedPoint.name}`, 'warning');
+      speak('ข้ามจุดสุดท้ายแล้ว');
+      addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
       return;
     }
     
-    const skippedPoint = optimizedRoute.optimized_order[currentTargetIndex];
-    
-    // Mark current point as skipped (not delivered)
+    // Mark current point as skipped
     arrivedPoints = [...arrivedPoints, currentTargetIndex];
     currentTargetIndex++;
     
-    // Just update the display - no need to recalculate, use existing route
+    // Just update the display
     updateRouteDisplayForNavigation();
     updateNavigationMarkers();
     
@@ -820,6 +866,65 @@
     
     showNotification(`ข้าม ${skippedPoint.name}`, 'warning');
     addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
+  }
+
+  async function markDeliverySuccess() {
+    const deliveredPoint = optimizedRoute.optimized_order[currentTargetIndex];
+    
+    // บันทึกประวัติว่าส่งสำเร็จ
+    if (deliveredPoint && deliveredPoint.name !== 'ตำแหน่งปัจจุบัน') {
+      const record: DeliveryRecord = {
+        id: Date.now(),
+        pointId: deliveredPoint.id,
+        pointName: deliveredPoint.name,
+        address: deliveredPoint.address,
+        status: 'success',
+        timestamp: new Date(),
+        lat: deliveredPoint.lat,
+        lng: deliveredPoint.lng
+      };
+      deliveryHistory = [...deliveryHistory, record];
+      completedDeliveries++;
+    }
+    
+    if (currentTargetIndex >= optimizedRoute.optimized_order.length - 1) {
+      // จุดสุดท้าย
+      arrivedPoints = [...arrivedPoints, currentTargetIndex];
+      showNotification(`ส่ง ${deliveredPoint.name} สำเร็จ! 🎉`, 'success');
+      speak('ส่งครบทุกจุดแล้ว');
+      addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+      return;
+    }
+    
+    // Mark current point as delivered
+    arrivedPoints = [...arrivedPoints, currentTargetIndex];
+    currentTargetIndex++;
+    
+    // Update display
+    updateRouteDisplayForNavigation();
+    updateNavigationMarkers();
+    
+    // Center on next target
+    const nextTarget = optimizedRoute.optimized_order[currentTargetIndex];
+    if (nextTarget) {
+      map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true });
+    }
+    
+    showNotification(`ส่ง ${deliveredPoint.name} สำเร็จ ✅`, 'success');
+    speak(`ส่ง ${deliveredPoint.name} สำเร็จ`);
+    addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+  }
+
+  function formatHistoryTime(date: Date): string {
+    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function getSuccessCount(): number {
+    return deliveryHistory.filter(d => d.status === 'success').length;
+  }
+
+  function getSkippedCount(): number {
+    return deliveryHistory.filter(d => d.status === 'skipped').length;
   }
 
   function updateRouteDisplayForNavigation() {
@@ -1078,14 +1183,60 @@
 
   // ==================== VOICE NAVIGATION ====================
   
+  let thaiVoice: SpeechSynthesisVoice | null = null;
+  
+  function loadThaiVoice() {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    
+    const voices = speechSynthesis.getVoices();
+    thaiVoice = voices.find(v => v.lang === 'th-TH') || 
+                voices.find(v => v.lang.startsWith('th')) || 
+                voices.find(v => v.name.toLowerCase().includes('thai')) ||
+                null;
+    
+    if (thaiVoice) {
+      console.log('✅ Thai voice loaded:', thaiVoice.name);
+    } else {
+      console.log('⚠️ No Thai voice found. Available voices:', voices.map(v => `${v.name} (${v.lang})`));
+    }
+  }
+
   function speak(text: string) {
     if (!voiceEnabled || typeof window === 'undefined') return;
-    if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'th-TH';
-      utterance.rate = 1;
-      speechSynthesis.speak(utterance);
+    if (!('speechSynthesis' in window)) return;
+    
+    // หยุดเสียงก่อนหน้า
+    speechSynthesis.cancel();
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'th-TH';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    
+    // ใช้เสียงไทยถ้ามี
+    if (thaiVoice) {
+      utterance.voice = thaiVoice;
+    } else {
+      // ลองโหลดอีกครั้ง
+      loadThaiVoice();
+      if (thaiVoice) {
+        utterance.voice = thaiVoice;
+      }
     }
+    
+    speechSynthesis.speak(utterance);
+  }
+  
+  // โหลด voices เมื่อพร้อม
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    // บาง browser โหลด voices ทันที
+    loadThaiVoice();
+    
+    // บาง browser ต้องรอ event
+    speechSynthesis.onvoiceschanged = () => {
+      loadThaiVoice();
+    };
   }
   
   function announceNextTurn() {
@@ -1654,7 +1805,7 @@
         <div class="speed-max">สูงสุด: {Math.round(maxSpeed)} km/h</div>
       </div>
 
-      <div class="nav-bottom-panel glass-card">
+      <div class="nav-bottom-panel glass-card" class:hide-on-history={showHistory}>
         <div class="nav-stats">
           <div class="nav-stat">
             <div class="nav-stat-icon">
@@ -1709,11 +1860,26 @@
         </div>
 
         <div class="nav-actions">
-          <button class="nav-btn nav-btn-secondary" on:click={skipToNextPoint} disabled={arrivedPoints.length >= (optimizedRoute?.optimized_order?.length || 0)}>
+          <button class="nav-btn nav-btn-success" on:click={markDeliverySuccess} disabled={arrivedPoints.length >= (optimizedRoute?.optimized_order?.length || 0)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 6L9 17l-5-5"/>
+            </svg>
+            ส่งสำเร็จ
+          </button>
+          <button class="nav-btn nav-btn-skip" on:click={skipToNextPoint} disabled={arrivedPoints.length >= (optimizedRoute?.optimized_order?.length || 0)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M13 5l7 7-7 7M5 5l7 7-7 7"/>
             </svg>
             ข้าม
+          </button>
+          <button class="nav-btn nav-btn-history" on:click={() => showHistory = !showHistory}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2"/>
+            </svg>
+            {#if deliveryHistory.length > 0}
+              <span class="history-badge">{deliveryHistory.length}</span>
+            {/if}
           </button>
           <button class="nav-btn nav-btn-voice" class:active={voiceEnabled} on:click={toggleVoice}>
             {#if voiceEnabled}
@@ -1727,12 +1893,6 @@
               <circle cx="12" cy="12" r="3"/>
               <path d="M12 2v4m0 12v4m10-10h-4M6 12H2"/>
             </svg>
-          </button>
-          <button class="nav-btn nav-btn-share" on:click={shareCurrentLocation}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8M16 6l-4-4-4 4M12 2v13"/></svg>
-          </button>
-          <button class="nav-btn nav-btn-break" class:active={isOnBreak} on:click={isOnBreak ? endBreak : startBreak}>
-            ☕
           </button>
           <button class="nav-btn nav-btn-stop" on:click={stopNavigation}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1749,6 +1909,40 @@
           </div>
         {/if}
       </div>
+
+      <!-- Delivery History Panel - Outside card, right side -->
+      {#if showHistory}
+        <div class="history-panel glass-card">
+          <div class="history-header">
+            <h4>📋 ประวัติการส่ง</h4>
+            <div class="history-stats">
+              <span class="history-stat success">✅ {getSuccessCount()}</span>
+              <span class="history-stat skipped">⏭️ {getSkippedCount()}</span>
+            </div>
+            <button class="close-btn" on:click={() => showHistory = false}>×</button>
+          </div>
+          <div class="history-list">
+            {#if deliveryHistory.length === 0}
+              <div class="history-empty">ยังไม่มีประวัติการส่ง</div>
+            {:else}
+              {#each [...deliveryHistory].reverse() as record}
+                <div class="history-item" class:success={record.status === 'success'} class:skipped={record.status === 'skipped'}>
+                  <div class="history-icon">
+                    {record.status === 'success' ? '✅' : '⏭️'}
+                  </div>
+                  <div class="history-info">
+                    <div class="history-name">{record.pointName}</div>
+                    <div class="history-address">{record.address}</div>
+                  </div>
+                  <div class="history-time">
+                    {formatHistoryTime(record.timestamp)}
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        </div>
+      {/if}
 
       <!-- Emergency Button -->
       <button class="emergency-btn" on:click={emergencyStop}>
@@ -1848,73 +2042,75 @@
       </div>
 
       {#if showAddForm && !optimizedRoute}
-        <div class="add-form glass-card">
-          <div class="form-header">
-            <h3>เพิ่มจุดส่งใหม่</h3>
-            <button class="close-btn" on:click={cancelAddForm}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M6 18L18 6M6 6l12 12"/>
-              </svg>
-            </button>
-          </div>
-          <p class="form-hint">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/>
-            </svg>
-            คลิกบนแผนที่เพื่อเลือกตำแหน่ง
-          </p>
-
-          <form on:submit|preventDefault={addDeliveryPoint}>
-            <div class="form-group">
-              <label>ชื่อสถานที่</label>
-              <input type="text" bind:value={newPoint.name} placeholder="เช่น บ้านลูกค้า A" required />
-            </div>
-
-            <div class="form-group">
-              <label>ที่อยู่</label>
-              <textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea>
-            </div>
-
-            <div class="form-group coords-group">
-              <div class="coord-input">
-                <label>Latitude</label>
-                <input type="text" value={newPoint.lat} readonly />
-              </div>
-              <div class="coord-input">
-                <label>Longitude</label>
-                <input type="text" value={newPoint.lng} readonly />
-              </div>
-            </div>
-
-            <div class="form-group">
-              <label>ระดับความสำคัญ</label>
-              <div class="priority-selector">
-                {#each [1,2,3,4,5] as p}
-                  {@const colors = getPriorityGradient(p)}
-                  <button 
-                    type="button"
-                    class="priority-btn"
-                    class:active={newPoint.priority === p}
-                    style="--btn-bg: {colors.bg}; --btn-glow: {colors.glow}"
-                    on:click={() => newPoint.priority = p}
-                  >
-                    <span class="priority-num">{p}</span>
-                    <span class="priority-label">{getPriorityLabel(p)}</span>
-                  </button>
-                {/each}
-              </div>
-            </div>
-
-            <div class="form-actions">
-              <button type="submit" class="btn btn-primary">
+        <div class="add-form-overlay">
+          <div class="add-form glass-card">
+            <div class="form-header">
+              <h3>เพิ่มจุดส่งใหม่</h3>
+              <button class="close-btn" on:click={cancelAddForm}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M5 13l4 4L19 7"/>
+                  <path d="M6 18L18 6M6 6l12 12"/>
                 </svg>
-                บันทึก
               </button>
-              <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
             </div>
-          </form>
+            <p class="form-hint">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/>
+              </svg>
+              คลิกบนแผนที่เพื่อเลือกตำแหน่ง
+            </p>
+
+            <form on:submit|preventDefault={addDeliveryPoint}>
+              <div class="form-group">
+                <label>ชื่อสถานที่</label>
+                <input type="text" bind:value={newPoint.name} placeholder="เช่น บ้านลูกค้า A" required />
+              </div>
+
+              <div class="form-group">
+                <label>ที่อยู่</label>
+                <textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea>
+              </div>
+
+              <div class="form-group coords-group">
+                <div class="coord-input">
+                  <label>Latitude</label>
+                  <input type="text" value={newPoint.lat} readonly />
+                </div>
+                <div class="coord-input">
+                  <label>Longitude</label>
+                  <input type="text" value={newPoint.lng} readonly />
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>ระดับความสำคัญ</label>
+                <div class="priority-selector">
+                  {#each [1,2,3,4,5] as p}
+                    {@const colors = getPriorityGradient(p)}
+                    <button 
+                      type="button"
+                      class="priority-btn"
+                      class:active={newPoint.priority === p}
+                      style="--btn-bg: {colors.bg}; --btn-glow: {colors.glow}"
+                      on:click={() => newPoint.priority = p}
+                    >
+                      <span class="priority-num">{p}</span>
+                      <span class="priority-label">{getPriorityLabel(p)}</span>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M5 13l4 4L19 7"/>
+                  </svg>
+                  บันทึก
+                </button>
+                <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
+              </div>
+            </form>
+          </div>
         </div>
       {/if}
 
@@ -2096,6 +2292,7 @@
       </div>
       
       <!-- Filter & Sort - Below Stats -->
+      {#if !optimizedRoute}
       <div class="map-filters glass-card">
         <select bind:value={sortBy} on:change={sortPoints}>
           <option value="priority">เรียงตามความสำคัญ</option>
@@ -2109,6 +2306,7 @@
           <button class="filter-chip priority-3" class:active={filterPriority === 3} on:click={() => filterByPriority(3)}>ปกติ</button>
         </div>
       </div>
+      {/if}
     {/if}
     
     {#if !isNavigating && !optimizedRoute}
@@ -2161,7 +2359,8 @@
 
   .glass-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; }
 
-  .add-form { margin: 0 24px 20px; padding: 20px; animation: slideIn 0.3s ease; }
+  .add-form { margin: 0 16px 16px; padding: 16px; animation: slideIn 0.3s ease; }
+  .add-form-overlay { display: contents; }
   @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   .form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .form-header h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; }
@@ -2177,8 +2376,8 @@
   .form-group input::placeholder, .form-group textarea::placeholder { color: #52525b; }
   .coords-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .coord-input input { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: rgba(0, 0, 0, 0.5); color: #71717a; }
-  .priority-selector { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-  .priority-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.05); border: 2px solid transparent; cursor: pointer; transition: all 0.2s; }
+  .priority-selector { display: flex; flex-wrap: wrap; gap: 8px; }
+  .priority-btn { flex: 1 1 auto; min-width: 50px; max-width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.05); border: 2px solid transparent; cursor: pointer; transition: all 0.2s; }
   .priority-btn:hover { background: rgba(255, 255, 255, 0.1); }
   .priority-btn.active { background: var(--btn-bg); border-color: rgba(255, 255, 255, 0.3); box-shadow: 0 0 20px color-mix(in srgb, var(--btn-glow) 40%, transparent); }
   .priority-num { font-size: 18px; font-weight: 700; color: #e4e4e7; }
@@ -2410,14 +2609,14 @@
   .nav-distance-badge { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 10px 20px; border-radius: 12px; }
   .nav-distance-value { font-size: 20px; font-weight: 700; color: white; font-family: 'JetBrains Mono', monospace; }
 
-  .nav-bottom-panel { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: calc(100% - 40px); max-width: 600px; padding: 20px; pointer-events: auto; }
-  .nav-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
-  .nav-stat { display: flex; align-items: center; gap: 12px; }
-  .nav-stat-icon { width: 44px; height: 44px; background: rgba(0, 255, 136, 0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .nav-stat-icon svg { width: 22px; height: 22px; color: #00ff88; }
+  .nav-bottom-panel { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: calc(100% - 40px); max-width: 1200px; padding: 20px; pointer-events: auto; }
+  .nav-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .nav-stat { display: flex; align-items: center; gap: 12px; padding: 14px; background: rgba(255, 255, 255, 0.03); border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.06); }
+  .nav-stat-icon { width: 50px; height: 50px; background: rgba(0, 255, 136, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .nav-stat-icon svg { width: 26px; height: 26px; color: #00ff88; }
   .nav-stat-content { flex: 1; }
-  .nav-stat-value { font-size: 18px; font-weight: 700; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; }
-  .nav-stat-label { font-size: 11px; color: #71717a; }
+  .nav-stat-value { font-size: 20px; font-weight: 700; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; }
+  .nav-stat-label { font-size: 12px; color: #71717a; margin-top: 2px; }
   .nav-progress { margin-bottom: 16px; }
   .nav-progress-bar { height: 6px; background: rgba(255, 255, 255, 0.1); border-radius: 3px; overflow: hidden; }
   .nav-progress-fill { height: 100%; background: linear-gradient(90deg, #00ff88, #00cc6a); border-radius: 3px; transition: width 0.5s ease; }
@@ -2427,6 +2626,40 @@
   .nav-btn-secondary { background: rgba(255, 255, 255, 0.1); color: #a1a1aa; }
   .nav-btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); color: #e4e4e7; }
   .nav-btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+  /* Success Button */
+  .nav-btn-success { background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); color: #000; font-weight: 600; }
+  .nav-btn-success:hover:not(:disabled) { background: linear-gradient(135deg, #00ff99 0%, #00dd7a 100%); transform: scale(1.05); }
+  .nav-btn-success:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+  /* Skip Button */
+  .nav-btn-skip { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+  .nav-btn-skip:hover:not(:disabled) { background: rgba(245, 158, 11, 0.3); }
+  .nav-btn-skip:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+  /* History Button */
+  .nav-btn-history { background: rgba(139, 92, 246, 0.2); color: #a78bfa; position: relative; }
+  .nav-btn-history:hover { background: rgba(139, 92, 246, 0.3); }
+  .history-badge { position: absolute; top: -5px; right: -5px; background: #8b5cf6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 10px; font-weight: 600; }
+  
+  /* History Panel - Right side, outside card */
+  .history-panel { position: fixed; top: 50%; right: 20px; transform: translateY(-50%); width: 320px; max-height: 450px; z-index: 1100; pointer-events: auto; display: flex; flex-direction: column; }
+  .history-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+  .history-header h4 { margin: 0; font-size: 14px; color: #e4e4e7; flex: 1; }
+  .history-stats { display: flex; gap: 12px; }
+  .history-stat { font-size: 12px; padding: 4px 8px; border-radius: 12px; }
+  .history-stat.success { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+  .history-stat.skipped { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+  .history-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .history-empty { text-align: center; color: #71717a; padding: 24px; font-size: 13px; }
+  .history-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; margin-bottom: 6px; background: rgba(255,255,255,0.03); }
+  .history-item.success { border-left: 3px solid #00ff88; }
+  .history-item.skipped { border-left: 3px solid #f59e0b; }
+  .history-icon { font-size: 18px; }
+  .history-info { flex: 1; min-width: 0; }
+  .history-name { font-size: 13px; font-weight: 500; color: #e4e4e7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .history-address { font-size: 11px; color: #71717a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .history-time { font-size: 11px; color: #a1a1aa; font-family: 'JetBrains Mono', monospace; }
   .nav-btn-center { background: rgba(59, 130, 246, 0.2); color: #60a5fa; flex: 0 0 auto; width: 56px; }
   .nav-btn-center:hover { background: rgba(59, 130, 246, 0.3); }
   .nav-btn-stop { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
@@ -2478,4 +2711,201 @@
   :global(.popup-content p) { font-size: 12px; color: #71717a; line-height: 1.5; font-family: 'Kanit', sans-serif; }
   :global(.leaflet-popup-close-button) { color: rgba(255, 255, 255, 0.5) !important; top: 8px !important; right: 8px !important; width: 24px !important; height: 24px !important; font-size: 18px !important; }
   :global(.leaflet-popup-close-button:hover) { color: white !important; }
+
+  /* ==================== RESPONSIVE ==================== */
+  
+  /* Tablet */
+  @media (max-width: 1024px) {
+    .app-container { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; max-height: 40vh; min-height: 200px; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.1); overflow-y: auto; }
+    .map-container { flex: 1; height: 60vh; min-height: 300px; position: relative; overflow: hidden; }
+    #map { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .sidebar-content { padding: 12px; }
+    .point-card { padding: 12px; }
+    .nav-bottom-panel { max-width: 95%; padding: 16px; }
+    .nav-stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .nav-stat { padding: 10px; }
+    .nav-stat-value { font-size: 16px; }
+    .nav-stat-icon { width: 40px; height: 40px; }
+    .history-panel { width: 280px; }
+    .map-stats { flex-wrap: wrap; gap: 8px; padding: 10px; }
+    .map-filters { flex-direction: column; gap: 8px; }
+  }
+  
+  /* Mobile */
+  @media (max-width: 768px) {
+    .app-container { flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+    .sidebar { width: 100%; height: auto; max-height: 35vh; min-height: 150px; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.1); overflow-y: auto; flex-shrink: 0; }
+    .map-container { flex: 1; width: 100%; position: relative; overflow: hidden; min-height: 0; }
+    #map { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+    
+    .sidebar-header { padding: 12px 16px; }
+    .sidebar-header .logo h1 { font-size: 18px; }
+    .sidebar-header .logo span { font-size: 10px; }
+    .logo-icon { width: 36px; height: 36px; }
+    .action-buttons { flex-direction: column; gap: 8px; padding: 12px 16px; }
+    .action-buttons .btn { width: 100%; justify-content: center; }
+    .tabs { gap: 4px; }
+    .tab { padding: 10px 12px; font-size: 12px; }
+    .point-card { padding: 10px; }
+    .point-name { font-size: 14px; }
+    .point-address { font-size: 11px; }
+    .summary-stats { grid-template-columns: repeat(2, 1fr); }
+    .stat-card { padding: 14px; }
+    .stat-value { font-size: 22px; }
+    
+    /* Add Form Mobile - Keep in sidebar */
+    .add-form-overlay { display: contents; }
+    .add-form { margin: 0 10px 12px; padding: 12px; }
+    .add-form .form-header { margin-bottom: 10px; }
+    .add-form .form-header h3 { font-size: 15px; }
+    .add-form .close-btn { width: 30px; height: 30px; }
+    .add-form .form-hint { font-size: 11px; padding: 8px; margin-bottom: 10px; }
+    .add-form .form-hint svg { width: 14px; height: 14px; }
+    .add-form .form-group { margin-bottom: 10px; }
+    .add-form .form-group label { font-size: 11px; margin-bottom: 4px; }
+    .add-form .form-group input, .add-form .form-group textarea { padding: 8px 10px; font-size: 13px; }
+    .add-form .form-group textarea { min-height: 40px; }
+    .add-form .coords-group { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .add-form .priority-selector { gap: 4px; justify-content: center; }
+    .add-form .priority-btn { min-width: 50px; max-width: 60px; padding: 6px 2px; }
+    .add-form .priority-num { font-size: 14px; }
+    .add-form .priority-label { font-size: 7px; }
+    .add-form .form-actions { flex-direction: row; gap: 8px; margin-top: 10px; }
+    .add-form .form-actions .btn { flex: 1; padding: 10px; font-size: 12px; }
+    .add-form .form-actions .btn svg { width: 14px; height: 14px; }
+    
+    /* Filter Sort Mobile - moved down 30px */
+    .map-filters { position: absolute; top: 100px; left: 10px; right: auto; width: auto; max-width: calc(100% - 20px); padding: 10px; z-index: 1000; }
+    .map-filters select { width: auto; min-width: 120px; padding: 8px 10px; font-size: 12px; }
+    .map-filters .filter-chips { flex-wrap: wrap; justify-content: flex-start; gap: 4px; }
+    .filter-chip { padding: 6px 10px; font-size: 11px; }
+    
+    /* Map Stats Mobile */
+    .map-stats { position: absolute; top: 10px; left: 10px; right: auto; width: auto; max-width: calc(100% - 20px); flex-wrap: wrap; gap: 6px; padding: 8px 10px; z-index: 1000; }
+    .map-stat { padding: 2px 6px; }
+    .map-stat-value { font-size: 14px; }
+    .map-stat-label { font-size: 8px; }
+    
+    /* Map Info Mobile */
+    .map-info { position: absolute; bottom: 10px; left: 10px; right: auto; width: auto; max-width: calc(100% - 20px); padding: 8px 12px; font-size: 11px; z-index: 1000; }
+    
+    /* Navigation Mode Mobile */
+    .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
+    .nav-top-panel { position: absolute; top: 10px; left: 10px; right: 10px; width: auto; transform: none; padding: 12px; }
+    .nav-target-name { font-size: 14px; }
+    .nav-distance-value { font-size: 16px; }
+    .nav-distance-badge { padding: 8px 14px; }
+    .nav-bottom-panel { position: absolute; padding: 12px; left: 10px; right: 10px; width: auto; transform: none; max-width: none; bottom: 10px; }
+    .nav-bottom-panel.hide-on-history { display: none; }
+    .nav-stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .nav-stat { padding: 8px; gap: 8px; }
+    .nav-stat-icon { width: 36px; height: 36px; }
+    .nav-stat-icon svg { width: 18px; height: 18px; }
+    .nav-stat-value { font-size: 14px; }
+    .nav-stat-label { font-size: 10px; }
+    .nav-actions { flex-wrap: wrap; gap: 8px; }
+    .nav-btn { padding: 10px; font-size: 11px; flex: 1 1 auto; min-width: 60px; }
+    .nav-btn svg { width: 16px; height: 16px; }
+    .nav-btn-success, .nav-btn-skip { flex: 1 1 45%; }
+    .nav-btn-history, .nav-btn-voice, .nav-btn-center, .nav-btn-stop { flex: 0 0 auto; min-width: 50px; }
+    
+    /* Emergency Button Mobile */
+    .emergency-btn { position: fixed; bottom: auto; top: 170px; right: 10px; left: auto; padding: 8px 12px; font-size: 11px; z-index: 1600; }
+    
+    /* History Panel Mobile */
+    .history-panel { position: fixed; width: calc(100% - 20px); right: 10px; left: 10px; top: auto; bottom: 220px; transform: none; max-height: 200px; z-index: 1550; }
+    .history-header { padding: 10px 12px; }
+    .history-header h4 { font-size: 13px; }
+    .history-stats { gap: 8px; }
+    .history-stat { font-size: 11px; padding: 3px 6px; }
+    .history-list { padding: 6px; }
+    .history-item { padding: 8px 10px; gap: 8px; }
+    .history-icon { font-size: 14px; }
+    .history-name { font-size: 12px; }
+    .history-address { font-size: 10px; }
+    .history-time { font-size: 10px; }
+    
+    /* Alerts Panel Mobile */
+    .alerts-panel { position: fixed; width: calc(100% - 20px); right: 10px; left: 10px; top: 60px; max-height: 300px; z-index: 1100; }
+    
+    /* Settings Panel Mobile */
+    .settings-panel { width: calc(100% - 40px); max-width: none; }
+  }
+  
+  /* Small Mobile */
+  @media (max-width: 480px) {
+    .app-container { height: 100vh; height: 100dvh; }
+    .sidebar { max-height: 30vh; min-height: 120px; }
+    .map-container { flex: 1; min-height: 0; }
+    .sidebar-header { padding: 10px 12px; }
+    .logo-text h1 { font-size: 16px; }
+    .header-actions { gap: 4px; }
+    .icon-btn { width: 32px; height: 32px; font-size: 14px; }
+    .tabs { padding: 0 8px; }
+    .tab { padding: 8px 10px; font-size: 11px; gap: 4px; }
+    .tab svg { width: 14px; height: 14px; }
+    .point-card { margin-bottom: 8px; }
+    
+    /* Add Form Small Mobile */
+    .add-form-overlay { padding: 12px; }
+    .add-form { padding: 16px; max-height: 80vh; }
+    .add-form .form-header h3 { font-size: 16px; }
+    .add-form .form-hint { font-size: 11px; padding: 8px; }
+    .add-form .form-group { margin-bottom: 12px; }
+    .add-form .form-group label { font-size: 11px; }
+    .add-form .form-group input, .add-form .form-group textarea { padding: 10px; font-size: 13px; }
+    .add-form .coords-group { gap: 8px; }
+    .add-form .priority-selector { gap: 4px; }
+    .add-form .priority-btn { min-width: 48px; max-width: 58px; padding: 8px 2px; }
+    .add-form .priority-num { font-size: 14px; }
+    .add-form .priority-label { font-size: 7px; }
+    .add-form .form-actions { gap: 8px; margin-top: 14px; }
+    .add-form .form-actions .btn { padding: 12px; font-size: 13px; }
+    
+    /* Filter Sort Small Mobile - moved down 30px */
+    .map-filters { top: 90px; padding: 8px; }
+    .map-filters select { font-size: 11px; padding: 6px 8px; min-width: 100px; }
+    .map-filters .filter-chips { gap: 3px; }
+    .filter-chip { padding: 4px 6px; font-size: 9px; }
+    
+    /* Map Stats Small Mobile */
+    .map-stats { padding: 6px 8px; gap: 4px; }
+    .map-stat { padding: 2px 4px; }
+    .map-stat-value { font-size: 12px; }
+    .map-stat-label { font-size: 7px; }
+    
+    /* Navigation Small Mobile */
+    .nav-stats { grid-template-columns: 1fr 1fr; }
+    .nav-actions { gap: 6px; }
+    .nav-btn { padding: 8px; font-size: 10px; min-width: 50px; }
+    .nav-btn-success, .nav-btn-skip { flex: 1 1 48%; }
+    
+    /* Emergency Button Small Mobile */
+    .emergency-btn { top: 160px; right: 8px; padding: 6px 10px; font-size: 10px; }
+    
+    /* History Panel Small Mobile */
+    .history-panel { bottom: 200px; max-height: 180px; }
+    .history-item { padding: 6px 8px; }
+    .history-name { font-size: 11px; }
+    .history-address { font-size: 9px; }
+    
+    .quick-stats { flex-direction: column; gap: 4px; }
+    .quick-stat { flex-direction: row; justify-content: space-between; }
+  }
+  
+  /* Landscape Mobile */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .app-container { flex-direction: row; }
+    .sidebar { width: 280px; height: 100vh; max-height: 100vh; border-right: 1px solid rgba(255,255,255,0.1); border-bottom: none; }
+    .map-container { height: 100vh; flex: 1; }
+    .nav-bottom-panel { bottom: 10px; padding: 10px; }
+    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    .nav-stat { padding: 6px; }
+    .nav-stat-icon { width: 30px; height: 30px; }
+    .nav-stat-value { font-size: 12px; }
+    .nav-actions { gap: 6px; }
+    .nav-btn { padding: 8px; }
+    .history-panel { top: 10px; bottom: auto; max-height: 80vh; }
+  }
 </style>
