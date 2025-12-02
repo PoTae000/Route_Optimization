@@ -632,6 +632,9 @@
     currentLocation = { lat: latitude, lng: longitude };
     accuracy = acc;
 
+    // แจ้งเตือนเมื่อ GPS ไม่แม่น
+    checkGPSAccuracy(acc);
+
     // Calculate speed
     calculateSpeed(latitude, longitude);
 
@@ -642,6 +645,66 @@
 
     if (isNavigating) {
       map.setView([latitude, longitude], map.getZoom(), { animate: true });
+    }
+  }
+
+  // ตัวแปรสำหรับติดตาม GPS warning
+  let lastGPSWarningTime = 0;
+  let gpsStatus: 'excellent' | 'good' | 'weak' | 'poor' = 'good';
+
+  function checkGPSAccuracy(acc: number) {
+    const now = Date.now();
+    
+    // อัปเดต GPS status
+    if (acc < 10) {
+      gpsStatus = 'excellent';
+    } else if (acc < 30) {
+      gpsStatus = 'good';
+    } else if (acc < 50) {
+      gpsStatus = 'weak';
+    } else {
+      gpsStatus = 'poor';
+    }
+
+    // เตือนทุก 30 วินาที ถ้า GPS อ่อน
+    if (acc > 50 && now - lastGPSWarningTime > 30000) {
+      lastGPSWarningTime = now;
+      showNotification(`⚠️ สัญญาณ GPS อ่อน (${Math.round(acc)}m) - ลองออกไปที่โล่ง`, 'warning');
+      
+      // พูดเตือนถ้าเปิดเสียง
+      if (voiceEnabled) {
+        speak('สัญญาณ GPS อ่อน กรุณาออกไปที่โล่ง');
+      }
+    }
+  }
+
+  function getGPSStatusColor(): string {
+    switch (gpsStatus) {
+      case 'excellent': return '#00ff88';
+      case 'good': return '#ffd93d';
+      case 'weak': return '#ffa502';
+      case 'poor': return '#ff6b6b';
+      default: return '#71717a';
+    }
+  }
+
+  function getGPSStatusText(): string {
+    switch (gpsStatus) {
+      case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`;
+      case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`;
+      case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`;
+      case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`;
+      default: return 'กำลังค้นหา GPS...';
+    }
+  }
+
+  function getGPSIcon(): string {
+    switch (gpsStatus) {
+      case 'excellent': return '📡';
+      case 'good': return '📶';
+      case 'weak': return '📉';
+      case 'poor': return '⚠️';
+      default: return '🔍';
     }
   }
 
@@ -1773,9 +1836,9 @@
           <span class="status-icon">{isCharging ? '⚡' : '🔋'}</span>
           <span>{batteryLevel}%</span>
         </div>
-        <div class="status-item">
-          <span class="status-icon">📡</span>
-          <span>{accuracy < 10 ? 'GPS แม่นยำ' : accuracy < 30 ? 'GPS ปกติ' : 'GPS อ่อน'}</span>
+        <div class="status-item" style="color: {getGPSStatusColor()}">
+          <span class="status-icon">{getGPSIcon()}</span>
+          <span>{getGPSStatusText()}</span>
         </div>
       </div>
 
@@ -1962,8 +2025,9 @@
             </svg>
           </div>
           <div class="logo-text">
-            <h1>RouteFlow</h1>
-            <span>Delivery Optimizer</span>
+            <h1>Route Optimization</h1>
+            <span>ระบบคำนวณระยะทางสุดเจ๋ง
+            </span>
           </div>
         </div>
         <div class="header-actions">
@@ -1976,8 +2040,6 @@
           <button class="icon-btn" on:click={() => showSettings = true} title="ตั้งค่า">⚙️</button>
         </div>
       </div>
-
-      <!-- Multi-select toolbar -->
       {#if isMultiSelectMode}
         <div class="multi-select-toolbar">
           <span>{selectedPoints.length} รายการที่เลือก</span>
@@ -2171,8 +2233,8 @@
                   {/if}
                   <div class="point-number" style="background: {colors.bg}; box-shadow: 0 0 15px {colors.glow}40;">{i + 1}</div>
                   <div class="point-info">
-                    <h4>{point.name}</h4>
-                    <p>{point.address}</p>
+                    <h4 class="point-name">{point.name}</h4>
+                    <p class="point-address">{point.address}</p>
                     <div class="point-meta">
                       <span class="priority-tag" style="background: {colors.bg}">P{point.priority} · {getPriorityLabel(point.priority)}</span>
                       {#if currentLocation}
@@ -2665,7 +2727,7 @@
   .nav-btn-stop { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
   .nav-btn-stop:hover { background: rgba(255, 107, 107, 0.3); }
 
-  .toast { position: fixed; top: 24px; right: 24px; display: flex; align-items: center; gap: 12px; padding: 16px 24px; border-radius: 14px; font-size: 14px; font-weight: 500; z-index: 9999; animation: toastIn 0.4s ease; backdrop-filter: blur(20px); }
+  .toast { position: fixed; top: 50px; right: 24px; display: flex; align-items: center; gap: 12px; padding: 16px 24px; border-radius: 14px; font-size: 14px; font-weight: 500; z-index: 9999; animation: toastIn 0.4s ease; backdrop-filter: blur(20px); }
   @keyframes toastIn { from { opacity: 0; transform: translateX(100px); } to { opacity: 1; transform: translateX(0); } }
   .toast-success { background: rgba(0, 255, 136, 0.15); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88; }
   .toast-error { background: rgba(255, 107, 107, 0.15); border: 1px solid rgba(255, 107, 107, 0.3); color: #ff6b6b; }
