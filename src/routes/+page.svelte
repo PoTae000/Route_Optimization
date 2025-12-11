@@ -44,8 +44,11 @@
           localStorage.removeItem('rememberMe');
         }
         
+        // 🆕 Redirect ตาม role
         if (data.user.role === 'admin') {
           goto(`/Admin/${data.user.id}`);
+        } else if (data.user.role === 'customer') {
+          goto(`/factory/${data.user.id}`);
         } else {
           goto(`/Home/${data.user.id}`);
         }
@@ -75,6 +78,8 @@
       const user = JSON.parse(userStr);
       if (user.role === 'admin') {
         goto(`/Admin/${user.id}`);
+      } else if (user.role === 'customer') {
+        goto(`/Customer/${user.id}`);
       } else {
         goto(`/Home/${user.id}`);
       }
@@ -165,6 +170,7 @@
       </button>
     </form>
     
+    <!-- 🆕 Demo Accounts - เพิ่ม Customer -->
     <div class="demo-accounts">
       <p>🔑 บัญชีทดสอบ</p>
       <div class="demo-list">
@@ -180,6 +186,13 @@
           <div class="demo-info">
             <span class="demo-role">Driver</span>
             <span class="demo-cred">driver1 / 1234</span>
+          </div>
+        </button>
+        <button class="demo-btn customer" on:click={() => { username = 'customer1'; password = '1234'; }}>
+          <div class="demo-icon">🛒</div>
+          <div class="demo-info">
+            <span class="demo-role">Customer</span>
+            <span class="demo-cred">customer1 / 1234</span>
           </div>
         </button>
       </div>
@@ -215,7 +228,6 @@
             <li><span>📊</span> ดูภาพรวมสถิติแบบ Real-time</li>
             <li><span>👥</span> มอบหมายงานให้ Driver</li>
             <li><span>📍</span> ติดตามตำแหน่งทุกคัน</li>
-            <li><span>📋</span> ดูประวัติการจัดส่งทั้งหมด</li>
           </ul>
         </div>
         
@@ -233,8 +245,25 @@
           <ul class="feature-list">
             <li><span>🗺️</span> คำนวณเส้นทางที่ดีที่สุด</li>
             <li><span>📡</span> นำทาง GPS แบบ Real-time</li>
-            <li><span>✅</span> บันทึกสถานะการส่ง</li>
-            <li><span>🔊</span> แจ้งเตือนด้วยเสียงภาษาไทย</li>
+            <li><span>📦</span> รับงานจากลูกค้า</li>
+          </ul>
+        </div>
+        
+        <!-- 🆕 Customer Feature Card -->
+        <div class="feature-card customer-card">
+          <div class="feature-glow"></div>
+          <div class="feature-header">
+            <div class="feature-icon-wrapper customer">
+              <span class="feature-emoji">🛒</span>
+            </div>
+            <div class="feature-badge">Customer</div>
+          </div>
+          <h3>Customer App</h3>
+          <p>สั่งงานและติดตามได้ง่ายๆ</p>
+          <ul class="feature-list">
+            <li><span>📍</span> ปักหมุดที่อยู่ของคุณ</li>
+            <li><span>🚗</span> เลือกคนขับที่ต้องการ</li>
+            <li><span>📱</span> ติดตามสถานะงาน</li>
           </ul>
         </div>
       </div>
@@ -299,7 +328,7 @@
   
   /* Login Card */
   .login-card { 
-    width: 100%; max-width: 480px; padding: 48px; 
+    width: 100%; max-width: 500px; padding: 48px; 
     display: flex; flex-direction: column; justify-content: center; 
     position: relative; z-index: 10; 
     background: rgba(15, 15, 25, 0.9); 
@@ -349,16 +378,8 @@
   .form-group { display: flex; flex-direction: column; gap: 8px; }
   .form-group label { font-size: 14px; font-weight: 500; color: #a1a1aa; }
   
-  .input-wrapper { 
-    position: relative; 
-    display: flex; 
-    align-items: center;
-  }
-  .input-icon { 
-    position: absolute; left: 16px; 
-    font-size: 16px; 
-    z-index: 1;
-  }
+  .input-wrapper { position: relative; display: flex; align-items: center; }
+  .input-icon { position: absolute; left: 16px; font-size: 16px; z-index: 1; }
   .form-group input { 
     width: 100%; padding: 14px 16px 14px 48px; 
     background: rgba(0, 0, 0, 0.4); 
@@ -368,8 +389,7 @@
     transition: all 0.3s ease; 
   }
   .form-group input:focus { 
-    outline: none; 
-    border-color: #00ff88; 
+    outline: none; border-color: #00ff88; 
     box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1); 
     background: rgba(0, 255, 136, 0.05);
   }
@@ -377,170 +397,111 @@
   .form-group input:disabled { opacity: 0.6; cursor: not-allowed; }
   
   .toggle-password { 
-    position: absolute; right: 14px; 
-    background: none; border: none; 
-    cursor: pointer; font-size: 18px;
-    transition: transform 0.2s;
+    position: absolute; right: 14px; background: none; border: none; 
+    cursor: pointer; font-size: 18px; transition: transform 0.2s;
   }
   .toggle-password:hover { transform: scale(1.1); }
   
   .form-options { display: flex; justify-content: space-between; align-items: center; }
-  .checkbox-label { 
-    display: flex; align-items: center; gap: 10px; 
-    cursor: pointer; font-size: 14px; color: #a1a1aa; 
-  }
+  .checkbox-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; color: #a1a1aa; }
   .checkbox-label input { display: none; }
   .checkmark { 
-    width: 20px; height: 20px; 
-    border: 2px solid rgba(255, 255, 255, 0.2); 
-    border-radius: 6px; position: relative; 
-    transition: all 0.2s; 
+    width: 20px; height: 20px; border: 2px solid rgba(255, 255, 255, 0.2); 
+    border-radius: 6px; position: relative; transition: all 0.2s; 
   }
   .checkbox-label input:checked + .checkmark { background: #00ff88; border-color: #00ff88; }
   .checkbox-label input:checked + .checkmark::after { 
-    content: '✓'; position: absolute; 
-    top: 50%; left: 50%; transform: translate(-50%, -50%); 
+    content: '✓'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
     color: #0a0a0f; font-size: 12px; font-weight: bold; 
   }
   
   .login-btn { 
-    display: flex; align-items: center; justify-content: center; gap: 10px; 
-    padding: 16px; 
+    display: flex; align-items: center; justify-content: center; gap: 10px; padding: 16px; 
     background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); 
-    border: none; border-radius: 12px; 
-    color: #0a0a0f; font-family: 'Kanit', sans-serif; 
-    font-size: 16px; font-weight: 600; 
+    border: none; border-radius: 12px; color: #0a0a0f; 
+    font-family: 'Kanit', sans-serif; font-size: 16px; font-weight: 600; 
     cursor: pointer; transition: all 0.3s ease; 
     box-shadow: 0 4px 20px rgba(0, 255, 136, 0.3);
   }
   .login-btn svg { width: 20px; height: 20px; transition: transform 0.3s; }
-  .login-btn:hover:not(:disabled) { 
-    transform: translateY(-2px); 
-    box-shadow: 0 6px 30px rgba(0, 255, 136, 0.4); 
-  }
+  .login-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 30px rgba(0, 255, 136, 0.4); }
   .login-btn:hover:not(:disabled) svg { transform: translateX(4px); }
   .login-btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
   
   .spinner { 
-    width: 20px; height: 20px; 
-    border: 2px solid rgba(10, 10, 15, 0.3); 
-    border-top-color: #0a0a0f; 
-    border-radius: 50%; 
-    animation: spin 0.8s linear infinite; 
+    width: 20px; height: 20px; border: 2px solid rgba(10, 10, 15, 0.3); 
+    border-top-color: #0a0a0f; border-radius: 50%; animation: spin 0.8s linear infinite; 
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   
-  /* Demo Accounts */
-  .demo-accounts { 
-    margin-top: 32px; padding-top: 24px; 
-    border-top: 1px solid rgba(255, 255, 255, 0.05); 
-  }
+  /* Demo Accounts - 3 columns */
+  .demo-accounts { margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.05); }
   .demo-accounts > p { 
-    font-size: 12px; color: #71717a; 
-    text-transform: uppercase; letter-spacing: 1px; 
-    margin-bottom: 12px; text-align: center;
+    font-size: 12px; color: #71717a; text-transform: uppercase; 
+    letter-spacing: 1px; margin-bottom: 12px; text-align: center;
   }
-  .demo-list { display: flex; gap: 12px; }
+  .demo-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .demo-btn { 
-    flex: 1; display: flex; align-items: center; gap: 12px; 
-    padding: 14px 16px; 
-    background: rgba(255, 255, 255, 0.03); 
-    border: 1px solid rgba(255, 255, 255, 0.08); 
-    border-radius: 12px; cursor: pointer; 
-    transition: all 0.3s ease;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; 
+    padding: 12px 8px; background: rgba(255, 255, 255, 0.03); 
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; 
+    cursor: pointer; transition: all 0.3s ease;
   }
-  .demo-icon { font-size: 28px; }
-  .demo-info { display: flex; flex-direction: column; align-items: flex-start; }
-  .demo-role { font-size: 14px; font-weight: 600; color: #e4e4e7; }
-  .demo-cred { font-size: 11px; color: #71717a; font-family: monospace; }
+  .demo-icon { font-size: 24px; }
+  .demo-info { display: flex; flex-direction: column; align-items: center; }
+  .demo-role { font-size: 12px; font-weight: 600; color: #e4e4e7; }
+  .demo-cred { font-size: 9px; color: #71717a; font-family: monospace; }
   
-  .demo-btn.admin:hover { 
-    background: rgba(255, 217, 61, 0.1); 
-    border-color: rgba(255, 217, 61, 0.3);
-    transform: translateY(-2px);
-  }
-  .demo-btn.driver:hover { 
-    background: rgba(0, 255, 136, 0.1); 
-    border-color: rgba(0, 255, 136, 0.3);
-    transform: translateY(-2px);
-  }
+  .demo-btn.admin:hover { background: rgba(255, 217, 61, 0.1); border-color: rgba(255, 217, 61, 0.3); transform: translateY(-2px); }
+  .demo-btn.driver:hover { background: rgba(0, 255, 136, 0.1); border-color: rgba(0, 255, 136, 0.3); transform: translateY(-2px); }
+  .demo-btn.customer:hover { background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3); transform: translateY(-2px); }
   
   .login-footer { margin-top: 32px; text-align: center; font-size: 12px; color: #52525b; }
   
   /* Side Info */
-  .side-info { 
-    flex: 1; display: flex; flex-direction: column; 
-    justify-content: center; padding: 60px; 
-    position: relative; z-index: 5; 
-  }
-  .info-content { max-width: 600px; }
+  .side-info { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 60px; position: relative; z-index: 5; }
+  .info-content { max-width: 700px; }
   
   .welcome-badge {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 8px 16px;
-    background: rgba(0, 255, 136, 0.1);
-    border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 30px;
-    font-size: 13px;
-    color: #00ff88;
-    margin-bottom: 24px;
+    display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px;
+    background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2);
+    border-radius: 30px; font-size: 13px; color: #00ff88; margin-bottom: 24px;
   }
   
   .info-content h2 { 
     font-size: 52px; font-weight: 700; margin-bottom: 16px; 
     background: linear-gradient(135deg, #ffffff 0%, #a1a1aa 100%); 
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
-    background-clip: text;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
   }
-  .info-content > p { 
-    font-size: 18px; color: #71717a; 
-    margin-bottom: 48px; line-height: 1.6;
-  }
+  .info-content > p { font-size: 18px; color: #71717a; margin-bottom: 48px; line-height: 1.6; }
   
-  /* Feature Cards */
-  .features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-bottom: 48px; }
+  /* Feature Cards - 3 columns */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 48px; }
   
   .feature-card { 
-    position: relative;
-    padding: 24px; 
-    background: rgba(255, 255, 255, 0.02); 
-    border: 1px solid rgba(255, 255, 255, 0.05); 
-    border-radius: 20px; 
-    transition: all 0.4s ease;
-    overflow: hidden;
+    position: relative; padding: 20px; background: rgba(255, 255, 255, 0.02); 
+    border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 20px; 
+    transition: all 0.4s ease; overflow: hidden;
   }
   .feature-glow {
-    position: absolute;
-    top: -50%;
-    left: -50%;
-    width: 200%;
-    height: 200%;
-    opacity: 0;
-    transition: opacity 0.4s ease;
-    pointer-events: none;
+    position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+    opacity: 0; transition: opacity 0.4s ease; pointer-events: none;
   }
   .admin-card .feature-glow { background: radial-gradient(circle, rgba(255, 217, 61, 0.15) 0%, transparent 50%); }
   .driver-card .feature-glow { background: radial-gradient(circle, rgba(0, 255, 136, 0.15) 0%, transparent 50%); }
+  .customer-card .feature-glow { background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, transparent 50%); }
   
-  .feature-card:hover { 
-    transform: translateY(-8px);
-    border-color: rgba(255, 255, 255, 0.1);
-  }
+  .feature-card:hover { transform: translateY(-8px); border-color: rgba(255, 255, 255, 0.1); }
   .feature-card:hover .feature-glow { opacity: 1; }
   
   .admin-card:hover { border-color: rgba(255, 217, 61, 0.3); }
   .driver-card:hover { border-color: rgba(0, 255, 136, 0.3); }
+  .customer-card:hover { border-color: rgba(139, 92, 246, 0.3); }
   
-  .feature-header { 
-    display: flex; align-items: center; 
-    justify-content: space-between; 
-    margin-bottom: 16px; 
-  }
+  .feature-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .feature-icon-wrapper { 
-    width: 56px; height: 56px; 
-    border-radius: 16px; 
-    display: flex; align-items: center; justify-content: center;
-    position: relative;
+    width: 48px; height: 48px; border-radius: 14px; 
+    display: flex; align-items: center; justify-content: center; position: relative;
   }
   .feature-icon-wrapper.admin { 
     background: linear-gradient(135deg, rgba(255, 217, 61, 0.2) 0%, rgba(255, 165, 2, 0.2) 100%);
@@ -550,79 +511,49 @@
     background: linear-gradient(135deg, rgba(0, 255, 136, 0.2) 0%, rgba(0, 204, 106, 0.2) 100%);
     box-shadow: 0 8px 32px rgba(0, 255, 136, 0.2);
   }
-  .feature-emoji { font-size: 28px; }
+  .feature-icon-wrapper.customer { 
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2) 0%, rgba(109, 40, 217, 0.2) 100%);
+    box-shadow: 0 8px 32px rgba(139, 92, 246, 0.2);
+  }
+  .feature-emoji { font-size: 24px; }
   
   .feature-badge {
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
   }
-  .admin-card .feature-badge { 
-    background: rgba(255, 217, 61, 0.15); 
-    color: #ffd93d; 
-  }
-  .driver-card .feature-badge { 
-    background: rgba(0, 255, 136, 0.15); 
-    color: #00ff88; 
-  }
+  .admin-card .feature-badge { background: rgba(255, 217, 61, 0.15); color: #ffd93d; }
+  .driver-card .feature-badge { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+  .customer-card .feature-badge { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
   
-  .feature-card h3 { 
-    font-size: 20px; font-weight: 600; 
-    color: #e4e4e7; margin-bottom: 8px; 
-  }
-  .feature-card > p { 
-    font-size: 14px; color: #71717a; 
-    margin-bottom: 16px; 
-  }
+  .feature-card h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; margin-bottom: 6px; }
+  .feature-card > p { font-size: 12px; color: #71717a; margin-bottom: 12px; }
   
-  .feature-list { 
-    list-style: none; 
-    display: flex; flex-direction: column; 
-    gap: 10px; 
-  }
+  .feature-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
   .feature-list li { 
-    display: flex; align-items: center; gap: 10px; 
-    font-size: 13px; color: #a1a1aa;
-    padding: 8px 12px;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-    transition: all 0.2s;
+    display: flex; align-items: center; gap: 8px; font-size: 11px; color: #a1a1aa;
+    padding: 6px 10px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; transition: all 0.2s;
   }
-  .feature-list li:hover {
-    background: rgba(255, 255, 255, 0.05);
-    transform: translateX(4px);
-  }
-  .feature-list li span { font-size: 14px; }
+  .feature-list li:hover { background: rgba(255, 255, 255, 0.05); transform: translateX(4px); }
+  .feature-list li span { font-size: 12px; }
   
   /* Stats Preview */
   .stats-preview {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 32px;
-    padding: 24px 32px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: 16px;
+    display: flex; align-items: center; justify-content: center; gap: 32px;
+    padding: 24px 32px; background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px;
   }
   .stat-item { text-align: center; }
   .stat-number { 
     font-size: 32px; font-weight: 700; 
     background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    background-clip: text;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
   }
   .stat-label { font-size: 13px; color: #71717a; margin-top: 4px; }
   .stat-divider { width: 1px; height: 40px; background: rgba(255, 255, 255, 0.1); }
   
   /* Responsive */
-  @media (max-width: 1200px) { 
+  @media (max-width: 1400px) { 
     .features { grid-template-columns: 1fr; }
-    .stats-preview { flex-wrap: wrap; gap: 20px; }
-    .stat-divider { display: none; }
   }
   @media (max-width: 1024px) { 
     .side-info { display: none; } 
@@ -632,6 +563,6 @@
     .login-card { padding: 32px 24px; } 
     .logo-icon { width: 64px; height: 64px; } 
     .logo-section h1 { font-size: 24px; } 
-    .demo-list { flex-direction: column; } 
+    .demo-list { grid-template-columns: 1fr; } 
   }
 </style>

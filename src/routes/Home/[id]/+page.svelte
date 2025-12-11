@@ -5,6 +5,11 @@
 
 let currentUser: any = null;
 
+let customerOrders: any[] = [];  // Orders จากลูกค้าที่เลือก driver นี้
+let customerMarkers: any[] = []; // Markers ของลูกค้าบนแผนที่
+let showCustomerOrders = true;   // Toggle แสดง/ซ่อนหมุดลูกค้า
+let includeCustomersInRoute = true; // Toggle รวม customer orders ใน route
+
 function logout() {
   localStorage.removeItem('user');
   goto('/');
@@ -32,7 +37,7 @@ function logout() {
   let showAddForm = false;
   let clickMarker: any = null;
   let notification = { show: false, message: '', type: 'success' as 'success' | 'error' | 'warning' };
-  let activeTab: 'points' | 'route' = 'points';
+  let activeTab: 'points' | 'customers' | 'route' = 'points';
   let activePointId: number | null = null;
   let isNavigating = false;
   let currentLocation: { lat: number; lng: number } | null = null;
@@ -113,13 +118,14 @@ function logout() {
   // Delivery history - เก็บประวัติการส่ง
   interface DeliveryRecord {
     id: number;
-    pointId: number;
+    pointId: number | string;
     pointName: string;
     address: string;
     status: 'success' | 'skipped';
     timestamp: Date;
     lat: number;
     lng: number;
+    isCustomerOrder?: boolean;
   }
   let deliveryHistory: DeliveryRecord[] = [];
   let showHistory = false;
@@ -165,9 +171,88 @@ $: driverInfo = currentUser ? {
   let totalBreakTime = 0;
   $: filteredPoints = filterPriority === null ? deliveryPoints : deliveryPoints.filter(p => p.priority === filterPriority);
   
+  // ==================== REACTIVE: รวม delivery points กับ customer orders ====================
+  $: allDeliveryPoints = [
+  ...deliveryPoints.map(p => ({ ...p, isCustomerOrder: false })),
+  ...(includeCustomersInRoute ? customerOrders
+    .filter(o => o.status === 'accepted')
+    .map(o => ({
+      id: `customer-${o.id}`,
+      name: `🛒 ${o.customer_name}`,
+      address: o.address,
+      lat: o.lat,
+      lng: o.lng,
+      priority: 1,
+      isCustomerOrder: true,
+      orderId: o.id,
+      customer_name: o.customer_name,
+      customer_phone: o.customer_phone,
+      customer_avatar: o.customer_avatar,
+      notes: o.notes,
+      // 🆕 เพิ่ม Payment fields
+      total_amount: o.total_amount || 50,
+      payment_method: o.payment_method || 'cash',
+      payment_status: o.payment_status || 'pending'
+    })) : [])
+];
+  
   // Alert system
   let alerts: { id: number; type: string; message: string; time: Date }[] = [];
   let showAlerts = false;
+
+  // ==================== HELPER FUNCTIONS ====================
+  function getAcceptedCustomerOrdersCount(): number {
+    return customerOrders.filter(o => o.status === 'accepted').length;
+  }
+  function getPaymentMethodText(method: string): string {
+  const methods: Record<string, string> = {
+    'cash': '💵 เงินสด',
+    'promptpay': '📱 พร้อมเพย์',
+    'transfer': '🏦 โอนเงิน',
+    'credit_card': '💳 บัตรเครดิต'
+  };
+  return methods[method] || method;
+}
+
+function getPaymentStatusText(status: string): string {
+  const statuses: Record<string, string> = {
+    'pending': '⏳ รอชำระ',
+    'paid': '✅ ชำระแล้ว',
+    'verified': '✓ ยืนยันแล้ว',
+    'failed': '❌ ไม่สำเร็จ'
+  };
+  return statuses[status] || status;
+}
+async function confirmCashPayment(orderId: number) {
+  try {
+    const res = await fetch(`${API_URL}/driver/confirm-cash/${orderId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: currentUser.id })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    
+    showNotification('ยืนยันรับเงินสดสำเร็จ! 💵', 'success');
+    speak('รับเงินสดเรียบร้อย');
+    await loadCustomerOrders();
+  } catch (err: any) {
+    showNotification(err.message || 'ยืนยันไม่สำเร็จ', 'error');
+  }
+}
+
+function getPaymentStatusColor(status: string): string {
+  const colors: Record<string, string> = {
+    'pending': '#ffc107',
+    'paid': '#00ff88',
+    'verified': '#3b82f6',
+    'failed': '#ef4444'
+  };
+  return colors[status] || '#71717a';
+}
+  function getPendingCustomerOrdersCount(): number {
+    return customerOrders.filter(o => o.status === 'pending').length;
+  }
 
   onMount(async () => {
 
@@ -195,7 +280,7 @@ $: driverInfo = currentUser ? {
 
       // ใช้ tile layer หลายตัว fallback
       const tileLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
-        attribution: '© Stadia Maps © OpenMapTiles © OSM',
+        attribution: '© CartoDB © OSM',
         maxZoom: 19,
         errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
       }).addTo(map);
@@ -235,11 +320,18 @@ $: driverInfo = currentUser ? {
 
         showAddForm = true;
       });
+      
 
       await loadDeliveryPoints();
+      await loadCustomerOrders();
       await loadTodayStats();
       await loadDeliveryHistory();
       initExtraFeatures();
+
+      setInterval(() => {
+  loadCustomerOrders();
+}, 30000);
+
     } catch (error) {
       console.error('Map init error:', error);
       showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
@@ -249,6 +341,130 @@ $: driverInfo = currentUser ? {
   onDestroy(() => {
     stopNavigation();
   });
+
+  async function loadCustomerOrders() {
+  if (!currentUser?.id) return;
+  
+  try {
+    const res = await fetch(`${API_URL}/driver/customer-orders?driver_id=${currentUser.id}`);
+    const data = await res.json();
+    
+    if (!data.error && Array.isArray(data)) {
+      customerOrders = data;
+      displayCustomerMarkers();
+      console.log(`📍 Loaded ${customerOrders.length} customer orders`);
+    }
+  } catch (err) {
+    console.error('Error loading customer orders:', err);
+  }
+}
+
+function displayCustomerMarkers() {
+  if (!L || !map) return;
+  
+  // ลบ markers เก่า
+  customerMarkers.forEach(m => {
+    try { map.removeLayer(m); } catch(e) {}
+  });
+  customerMarkers = [];
+  
+  // ไม่แสดงเมื่อ navigate หรือปิด toggle
+  if (!showCustomerOrders || isNavigating) return;
+  
+  // สร้าง markers ใหม่ - เฉพาะที่ยังไม่เสร็จ
+  customerOrders.filter(o => o.status !== 'completed').forEach((order, i) => {
+    const marker = L.marker([order.lat, order.lng], {
+      icon: L.divIcon({
+        className: 'customer-order-marker',
+        html: `
+          <div class="customer-pin ${order.status === 'accepted' ? 'accepted' : 'pending'}">
+            <span>🛒</span>
+            <div class="customer-info">
+              <div class="customer-name">${order.customer_name}</div>
+              <div class="order-status">${order.status === 'accepted' ? '✅ รับแล้ว' : '⏳ รอรับงาน'}</div>
+            </div>
+          </div>
+        `,
+        iconSize: [120, 60],
+        iconAnchor: [60, 30]
+      })
+    }).addTo(map);
+
+    // Popup with details
+    marker.bindPopup(`
+      <div class="customer-popup">
+        <div class="popup-header customer-header">
+          <span class="popup-icon">${order.customer_avatar || '👤'}</span>
+          <span class="popup-status">${order.status === 'accepted' ? 'รับงานแล้ว' : 'รอรับงาน'}</span>
+        </div>
+        <div class="popup-content">
+          <h4>${order.customer_name}</h4>
+          <p class="popup-phone">📞 ${order.customer_phone || '-'}</p>
+          <p class="popup-address">📍 ${order.address}</p>
+          ${order.notes ? `<p class="popup-notes">📝 ${order.notes}</p>` : ''}
+        </div>
+      </div>
+    `, { className: 'dark-popup customer-dark-popup' });
+
+    customerMarkers.push(marker);
+  });
+}
+
+async function acceptCustomerOrder(orderId: number) {
+  try {
+    const res = await fetch(`${API_URL}/driver/accept-order/${orderId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: currentUser.id })
+    });
+    
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    
+    showNotification('รับงานสำเร็จ!', 'success');
+    await loadCustomerOrders();
+  } catch (err: any) {
+    showNotification(err.message || 'รับงานไม่สำเร็จ', 'error');
+  }
+}
+
+async function completeCustomerOrder(orderId: number, orderName?: string) {
+  try {
+    const res = await fetch(`${API_URL}/driver/complete-order/${orderId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: currentUser.id })
+    });
+    
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    
+    // เพิ่มลง history
+    const order = customerOrders.find(o => o.id === orderId);
+    if (order) {
+      const record: DeliveryRecord = {
+        id: data.id || Date.now(),
+        pointId: `customer-${orderId}`,
+        pointName: `🛒 ${order.customer_name}`,
+        address: order.address || '',
+        status: 'success',
+        timestamp: new Date(),
+        lat: order.lat,
+        lng: order.lng,
+        isCustomerOrder: true
+      };
+      deliveryHistory = [...deliveryHistory, record];
+      completedDeliveries++;
+    }
+    
+    showNotification('เสร็จงานสำเร็จ!', 'success');
+    speak(`ส่ง ${orderName || order?.customer_name || 'ลูกค้า'} สำเร็จ`);
+    await loadCustomerOrders();
+  } catch (err: any) {
+    showNotification(err.message || 'บันทึกไม่สำเร็จ', 'error');
+  }
+}
+
 
   async function loadTodayStats() {
   try {
@@ -431,7 +647,8 @@ async function loadDeliveryHistory() {
 
 
   async function optimizeRoute() {
-    if (deliveryPoints.length < 1) {
+    // ใช้ allDeliveryPoints แทน deliveryPoints เพื่อรวม customer orders
+    if (allDeliveryPoints.length < 1) {
       showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error');
       return;
     }
@@ -442,8 +659,8 @@ async function loadDeliveryHistory() {
       // Get current location as start point
       const startPoint = await getCurrentLocationAsStart();
       
-      // Sort points by nearest neighbor algorithm
-      const sortedPoints = sortByNearestNeighbor(startPoint, [...deliveryPoints]);
+      // Sort points by nearest neighbor algorithm with priority
+      const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
       
       // Build waypoints for OSRM: start -> all sorted points (including last one)
       const waypoints = [
@@ -485,7 +702,7 @@ async function loadDeliveryHistory() {
     }
   }
 
-  // Nearest Neighbor Algorithm - เริ่มจากจุดใกล้สุดไปเรื่อยๆ
+  // Nearest Neighbor Algorithm with Priority - customer orders get higher priority
   function sortByNearestNeighbor(start: { lat: number; lng: number }, points: any[]): any[] {
     const sorted: any[] = [];
     const remaining = [...points];
@@ -493,13 +710,17 @@ async function loadDeliveryHistory() {
 
     while (remaining.length > 0) {
       let nearestIndex = 0;
-      let nearestDist = Infinity;
+      let nearestScore = Infinity;
 
-      // Find nearest point from current position
+      // Find nearest point from current position considering priority
       remaining.forEach((point, index) => {
         const dist = getDistance(currentPos.lat, currentPos.lng, point.lat, point.lng);
-        if (dist < nearestDist) {
-          nearestDist = dist;
+        // Apply priority bonus: customer orders get -500, regular points get -(priority * 100)
+        const priorityBonus = point.isCustomerOrder ? 500 : (point.priority ? (6 - point.priority) * 100 : 0);
+        const score = dist - priorityBonus;
+        
+        if (score < nearestScore) {
+          nearestScore = score;
           nearestIndex = index;
         }
       });
@@ -572,14 +793,24 @@ async function loadDeliveryHistory() {
     markers.forEach(m => m.remove());
     markers = [];
 
+    // ซ่อน customer markers เมื่อแสดง route
+    customerMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch(e) {}
+    });
+    customerMarkers = [];
+
     optimizedRoute.optimized_order.forEach((point: any, i: number) => {
       const isStart = i === 0;
       const isCurrentLocation = isStart && point.id === -1;
+      const isCustomer = point.isCustomerOrder;
       
       let gradient, glow;
       if (isCurrentLocation) {
         gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)';
         glow = '#3b82f6';
+      } else if (isCustomer) {
+        gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)';
+        glow = '#8b5cf6';
       } else {
         gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
         glow = '#667eea';
@@ -588,8 +819,8 @@ async function loadDeliveryHistory() {
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: 'route-marker',
-          html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};">
-            <span>${isCurrentLocation ? '📍' : i}</span>
+          html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''} ${isCustomer ? 'customer-route' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};">
+            <span>${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>
             ${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}
           </div>`,
           iconSize: [52, 52],
@@ -600,12 +831,13 @@ async function loadDeliveryHistory() {
       marker.bindPopup(`
         <div class="custom-popup">
           <div class="popup-header" style="background: ${gradient}">
-            <span class="popup-number">${isCurrentLocation ? '📍' : i}</span>
-            <span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดส่ง'}</span>
+            <span class="popup-number">${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>
+            <span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : isCustomer ? 'ลูกค้า' : 'จุดส่ง'}</span>
           </div>
           <div class="popup-content">
             <h4>${point.name}</h4>
             <p>${point.address}</p>
+            ${point.customer_phone ? `<p>📞 ${point.customer_phone}</p>` : ''}
           </div>
         </div>
       `, { className: 'dark-popup' });
@@ -665,6 +897,7 @@ async function loadDeliveryHistory() {
   currentTargetIndex = 0;
   
   displayPoints();
+  displayCustomerMarkers();
 
   console.log('✅ clearRoute complete');
 }
@@ -687,6 +920,12 @@ async function loadDeliveryHistory() {
     elapsedTime = 0;
     speedHistory = [];
     maxSpeed = 0;
+
+    // ซ่อน customer markers เมื่อเริ่ม navigate
+    customerMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch(e) {}
+    });
+    customerMarkers = [];
 
     watchId = navigator.geolocation.watchPosition(
       updatePosition,
@@ -764,6 +1003,9 @@ async function loadDeliveryHistory() {
     if (optimizedRoute) {
       displayOptimizedRoute();
     }
+    
+    // แสดง customer markers กลับมา
+    displayCustomerMarkers();
 
     showNotification('หยุดนำทางแล้ว', 'success');
   }
@@ -932,6 +1174,7 @@ async function loadDeliveryHistory() {
     const isArrived = arrivedPoints.includes(i);
     const isCurrent = i === currentTargetIndex;
     const isStart = point.id === -1;
+    const isCustomer = point.isCustomerOrder;
 
     let gradient, glow;
     if (isArrived) {
@@ -943,12 +1186,15 @@ async function loadDeliveryHistory() {
     } else if (isStart) {
       gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)';
       glow = '#00ff88';
+    } else if (isCustomer) {
+      gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)';
+      glow = '#8b5cf6';
     } else {
       gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
       glow = '#667eea';
     }
 
-    const displayNumber = isStart ? '📍' : (isArrived ? '✓' : i);
+    const displayNumber = isStart ? '📍' : (isArrived ? '✓' : (isCustomer ? '🛒' : i));
 
     const marker = L.marker([point.lat, point.lng], {
       icon: L.divIcon({
@@ -1046,7 +1292,7 @@ async function skipToNextPoint() {
     return;
   }
   
-  // 🔧 FIX: หาจุดแรกที่ไม่ใช่ start point (id !== -1)
+  // หาจุดแรกที่ไม่ใช่ start point (id !== -1)
   const skippedPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
   
   console.log('⏭️ skippedPoint:', skippedPoint?.name, 'ID:', skippedPoint?.id);
@@ -1057,11 +1303,17 @@ async function skipToNextPoint() {
     return;
   }
 
+  // ไม่อนุญาตให้ skip customer orders
+  if (skippedPoint.isCustomerOrder) {
+    showNotification('ไม่สามารถข้ามงานลูกค้าได้ - กรุณาส่งให้เสร็จ', 'error');
+    return;
+  }
+
   isProcessingDelivery = true;
   console.log('✅ Processing skip for:', skippedPoint.name);
 
   try {
-    // 🔧 FIX: สร้าง payload โดยไม่ใส่ field ที่เป็น null
+    // สร้าง payload โดยไม่ใส่ field ที่เป็น null
     const payload: any = {
       point_id: Number(skippedPoint.id),
       point_name: String(skippedPoint.name),
@@ -1141,6 +1393,7 @@ async function skipToNextPoint() {
       clearAllMarkersAndLayers();
       optimizedRoute = null;
       await loadDeliveryPoints();
+      await loadCustomerOrders();
       await loadTodayStats();
     } else {
       showNotification(`⏭️ ข้าม ${skippedPoint.name}`, 'warning');
@@ -1179,7 +1432,7 @@ async function markDeliverySuccess() {
     return;
   }
   
-  // 🔧 FIX: หาจุดแรกที่ไม่ใช่ start point (id !== -1)
+  // หาจุดแรกที่ไม่ใช่ start point (id !== -1)
   const deliveredPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
   
   console.log('📦 deliveredPoint:', deliveredPoint?.name, 'ID:', deliveredPoint?.id);
@@ -1194,7 +1447,49 @@ async function markDeliverySuccess() {
   console.log('✅ Processing delivery for:', deliveredPoint.name);
 
   try {
-    // 🔧 FIX: สร้าง payload โดยไม่ใส่ field ที่เป็น null
+    // ถ้าเป็น customer order ให้ใช้ completeCustomerOrder
+    if (deliveredPoint.isCustomerOrder) {
+      console.log('🛒 This is a customer order, using completeCustomerOrder');
+      
+      await completeCustomerOrder(deliveredPoint.orderId, deliveredPoint.name);
+      
+      // ลบจุดออกจาก route
+      const pointIdToRemove = deliveredPoint.id;
+      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter(
+        (p: any) => p.id !== pointIdToRemove
+      );
+      
+      // ตรวจสอบว่าเหลือจุดอีกไหม
+      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter(
+        (p: any) => p.id !== -1
+      );
+
+      if (remainingDeliveryPoints.length === 0) {
+        showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success');
+        speak('ส่งครบทุกจุดแล้ว');
+        stopNavigation();
+        clearAllMarkersAndLayers();
+        optimizedRoute = null;
+        await loadDeliveryPoints();
+        await loadCustomerOrders();
+        await loadTodayStats();
+      } else {
+        addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+        currentTargetIndex = 1;
+        arrivedPoints = [0];
+        
+        if (currentLocation) {
+          await recalculateRouteFromCurrentPosition();
+        } else {
+          updateNavigationMarkers();
+        }
+      }
+      
+      isProcessingDelivery = false;
+      return;
+    }
+
+    // Regular delivery point
     const payload: any = {
       point_id: Number(deliveredPoint.id),
       point_name: String(deliveredPoint.name),
@@ -1275,6 +1570,7 @@ async function markDeliverySuccess() {
       clearAllMarkersAndLayers();
       optimizedRoute = null;
       await loadDeliveryPoints();
+      await loadCustomerOrders();
       await loadTodayStats();
     } else {
       showNotification(`✅ ส่ง ${deliveredPoint.name} สำเร็จ`, 'success');
@@ -1473,7 +1769,7 @@ function clearAllMarkersAndLayers() {
   }
 }
   function getRemainingPointsCount(): number {
-    if (!optimizedRoute) return deliveryPoints.length;
+    if (!optimizedRoute) return allDeliveryPoints.length;
     return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length;
   }
 
@@ -2262,13 +2558,20 @@ function clearAllMarkersAndLayers() {
               </button>
             </label>
           </div>
-          
+
           <div class="settings-section">
-            <h4>🌙 การแสดงผล</h4>
+            <h4>🛒 งานลูกค้า</h4>
             <label class="toggle-setting">
-              <span>โหมดกลางคืน</span>
-                <!-- svelte-ignore a11y_consider_explicit_label -->
-              <button class="toggle-btn" class:active={isNightMode} on:click={toggleNightMode}>
+              <span>แสดงหมุดลูกค้าบนแผนที่</span>
+              <!-- svelte-ignore a11y_consider_explicit_label -->
+              <button class="toggle-btn" class:active={showCustomerOrders} on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}>
+                <div class="toggle-knob"></div>
+              </button>
+            </label>
+            <label class="toggle-setting">
+              <span>รวมลูกค้าในเส้นทาง</span>
+              <!-- svelte-ignore a11y_consider_explicit_label -->
+              <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}>
                 <div class="toggle-knob"></div>
               </button>
             </label>
@@ -2289,19 +2592,19 @@ function clearAllMarkersAndLayers() {
           </div>
                 
           <div class="settings-actions">
-        <button class="btn btn-secondary" on:click={exportRouteData}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-          </svg>
-          ส่งออกข้อมูล
-        </button>
-        <button class="btn btn-danger" on:click={logout}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
-          </svg>
-          ออกจากระบบ
-        </button>
-      </div>
+            <button class="btn btn-secondary" on:click={exportRouteData}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+              ส่งออกข้อมูล
+            </button>
+            <button class="btn btn-danger" on:click={logout}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
+              </svg>
+              ออกจากระบบ
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2314,6 +2617,7 @@ function clearAllMarkersAndLayers() {
         <h3>🔔 การแจ้งเตือน</h3>
         <div class="alerts-actions">
           <button class="text-btn" on:click={clearAlerts}>ล้างทั้งหมด</button>
+          <!-- svelte-ignore a11y_consider_explicit_label -->
           <button class="close-btn" on:click={() => showAlerts = false}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
@@ -2531,7 +2835,6 @@ function clearAllMarkersAndLayers() {
           </button>
         </div>
 
-        <!-- Break indicator -->
         {#if isOnBreak}
           <div class="break-indicator">
             ☕ กำลังพักเบรค ({formatBreakTime()})
@@ -2539,7 +2842,6 @@ function clearAllMarkersAndLayers() {
         {/if}
       </div>
 
-      <!-- Delivery History Panel - Outside card, right side -->
       {#if showHistory}
         <div class="history-panel glass-card">
           <div class="history-header">
@@ -2573,14 +2875,13 @@ function clearAllMarkersAndLayers() {
         </div>
       {/if}
 
-      <!-- Emergency Button -->
       <button class="emergency-btn" on:click={emergencyStop}>
         🚨 ฉุกเฉิน
       </button>
     </div>
   {/if}
 
-  <!-- Sidebar (hidden during navigation) -->
+  <!-- Sidebar -->
   {#if !isNavigating}
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -2596,7 +2897,7 @@ function clearAllMarkersAndLayers() {
           </div>
         </div>
         <div class="header-actions">
-              <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">
+          <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">
             🔔
             {#if alerts.length > 0}
               <span class="badge">{alerts.length}</span>
@@ -2605,6 +2906,7 @@ function clearAllMarkersAndLayers() {
           <button class="icon-btn" on:click={() => showSettings = true} title="ตั้งค่า">⚙️</button>
         </div>
       </div>
+      
       {#if isMultiSelectMode}
         <div class="multi-select-toolbar">
           <span>{selectedPoints.length} รายการที่เลือก</span>
@@ -2620,7 +2922,7 @@ function clearAllMarkersAndLayers() {
         <button 
           class="btn btn-primary"
           on:click={optimizeRoute}
-          disabled={isOptimizing || deliveryPoints.length < 1}
+          disabled={isOptimizing || allDeliveryPoints.length < 1}
         >
           {#if isOptimizing}
             <div class="spinner"></div>
@@ -2629,7 +2931,7 @@ function clearAllMarkersAndLayers() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
             </svg>
-            <span>คำนวณเส้นทาง</span>
+            <span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>
           {/if}
         </button>
 
@@ -2747,7 +3049,10 @@ function clearAllMarkersAndLayers() {
             <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
             <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
           </svg>
-          จุดส่ง
+          จุดส่ง ({deliveryPoints.length})
+        </button>
+        <button class="tab" class:active={activeTab === 'customers'} on:click={() => activeTab = 'customers'}>
+          🛒 ลูกค้า ({customerOrders.length})
         </button>
         <button class="tab" class:active={activeTab === 'route'} on:click={() => activeTab = 'route'} disabled={!optimizedRoute}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2760,7 +3065,7 @@ function clearAllMarkersAndLayers() {
       <div class="content-area">
         {#if activeTab === 'points'}
           <div class="points-list">
-        {#if filteredPoints.length === 0}
+            {#if filteredPoints.length === 0}
               <div class="empty-state">
                 <div class="empty-icon">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
@@ -2772,7 +3077,7 @@ function clearAllMarkersAndLayers() {
                 <p>คลิกบนแผนที่หรือกดปุ่ม "เพิ่มจุดส่ง"</p>
               </div>
             {:else}
-            {#each filteredPoints as point, i}
+              {#each filteredPoints as point, i}
                 {@const colors = getPriorityGradient(point.priority)}
                 <div 
                   id="point-{point.id}"
@@ -2818,6 +3123,98 @@ function clearAllMarkersAndLayers() {
               {/each}
             {/if}
           </div>
+        {:else if activeTab === 'customers'}
+          <div class="customer-orders-section">
+            <div class="section-header">
+              <h3>🛒 งานจากลูกค้า ({customerOrders.length})</h3>
+              <button class="toggle-btn-small" on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}>
+                {showCustomerOrders ? '👁️' : '🙈'}
+              </button>
+            </div>
+            
+            {#if customerOrders.length === 0}
+              <div class="empty-state">
+                <div class="empty-icon">🛒</div>
+                <h4>ยังไม่มีงานจากลูกค้า</h4>
+                <p>รอลูกค้าส่งคำสั่งซื้อ</p>
+              </div>
+            {:else}
+              <div class="customer-orders-list">
+                {#each customerOrders as order}
+                    <div class="customer-order-card" class:accepted={order.status === 'accepted'}>
+                      <!-- Customer Info -->
+                      <div class="order-customer">
+                        <span class="avatar">{order.customer_avatar || '👤'}</span>
+                        <div class="info">
+                          <div class="name">{order.customer_name}</div>
+                          <div class="phone">📞 {order.customer_phone || '-'}</div>
+                        </div>
+                        <span class="order-status-badge" class:pending={order.status === 'pending'} class:accepted={order.status === 'accepted'}>
+                          {order.status === 'pending' ? '⏳ รอรับ' : order.status === 'accepted' ? '✅ รับแล้ว' : '🎉 เสร็จ'}
+                        </span>
+                      </div>
+                      
+                      <!-- Address -->
+                      <div class="order-address">{order.address}</div>
+                      
+                      <!-- Notes -->
+                      {#if order.notes}
+                        <div class="order-notes">📝 {order.notes}</div>
+                      {/if}
+                      
+                      <!-- 🆕 PAYMENT INFO SECTION -->
+                      <div class="order-payment">
+                        <div class="payment-amount">
+                          <span class="amount-label">ยอดเงิน</span>
+                          <span class="amount-value">฿{(order.total_amount || 50).toLocaleString()}</span>
+                        </div>
+                        <div class="payment-details">
+                          <span class="payment-method">{getPaymentMethodText(order.payment_method || 'cash')}</span>
+                          <span class="payment-status" style="color: {getPaymentStatusColor(order.payment_status || 'pending')}">
+                            {getPaymentStatusText(order.payment_status || 'pending')}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <!-- Actions -->
+                      <div class="order-actions">
+                        {#if order.status === 'pending'}
+                          <button class="btn-accept" on:click={() => acceptCustomerOrder(order.id)}>
+                            ✅ รับงาน
+                          </button>
+                        {:else if order.status === 'accepted'}
+                          <!-- 🆕 CASH PAYMENT BUTTON -->
+                          {#if order.payment_method === 'cash' && (order.payment_status === 'pending' || !order.payment_status)}
+                            <button class="btn-cash" on:click={() => confirmCashPayment(order.id)}>
+                              💵 รับเงินแล้ว
+                            </button>
+                          {/if}
+                          <button class="btn-complete" on:click={() => completeCustomerOrder(order.id)}>
+                            🎉 เสร็จงาน
+                          </button>
+                        {:else}
+                          <span class="completed-text">✅ เสร็จแล้ว</span>
+                        {/if}
+                        <button class="btn-locate" on:click={() => focusOnPoint(order.lat, order.lng)}>
+                          📍 ดูบนแผนที่
+                        </button>
+                      </div>
+                    </div>
+                {/each}
+              </div>
+            {/if}
+
+            {#if getAcceptedCustomerOrdersCount() > 0}
+              <div class="customer-route-toggle">
+                <label class="toggle-setting">
+                  <span>รวมลูกค้า ({getAcceptedCustomerOrdersCount()}) ในเส้นทาง</span>
+                  <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}>
+                    <div class="toggle-knob"></div>
+                  </button>
+                </label>
+              </div>
+            {/if}
+          </div>
         {:else if activeTab === 'route' && optimizedRoute}
           <div class="route-summary">
             <div class="summary-header">
@@ -2856,16 +3253,9 @@ function clearAllMarkersAndLayers() {
                 <div class="stat-label">จุดส่ง</div>
               </div>
               <div class="stat-card fuel">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M3 22V8a2 2 0 012-2h8a2 2 0 012 2v14"/>
-                    <path d="M15 12h2a2 2 0 012 2v2a2 2 0 002 2h0a2 2 0 002-2V9.83a2 2 0 00-.59-1.42L18 4"/>
-                    <path d="M18 4v4"/>
-                    <rect x="5" y="10" width="6" height="4"/>
-                  </svg>
-                </div>
+                <div class="stat-icon">⛽</div>
                 <div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div>
-                <div class="stat-label">ค่าน้ำมัน (ประมาณ)</div>
+                <div class="stat-label">ค่าน้ำมัน</div>
               </div>
             </div>
 
@@ -2873,10 +3263,11 @@ function clearAllMarkersAndLayers() {
               <h4>ลำดับการเดินทาง</h4>
               {#each optimizedRoute.optimized_order as point, i}
                 {@const isStart = point.id === -1}
-                <div class="timeline-item" class:start={isStart} on:click={() => focusOnPoint(point.lat, point.lng)} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
-                  <div class="timeline-marker"><span>{isStart ? '📍' : i}</span></div>
+                {@const isCustomer = point.isCustomerOrder}
+                <div class="timeline-item" class:start={isStart} class:customer={isCustomer} on:click={() => focusOnPoint(point.lat, point.lng)} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
+                  <div class="timeline-marker"><span>{isStart ? '📍' : isCustomer ? '🛒' : i}</span></div>
                   <div class="timeline-content">
-                    <div class="timeline-label">{isStart ? 'ตำแหน่งของคุณ' : `จุดที่ ${i}`}</div>
+                    <div class="timeline-label">{isStart ? 'ตำแหน่งของคุณ' : isCustomer ? 'ลูกค้า' : `จุดที่ ${i}`}</div>
                     <div class="timeline-name">{point.name}</div>
                   </div>
                 </div>
@@ -2896,7 +3287,6 @@ function clearAllMarkersAndLayers() {
   <div class="map-container" class:fullscreen={isNavigating}>
     <div id="map"></div>
     
-    <!-- Quick Stats - Top Right Corner -->
     {#if !isNavigating}
       <div class="map-stats glass-card">
         <div class="map-stat">
@@ -2904,12 +3294,12 @@ function clearAllMarkersAndLayers() {
           <span class="map-stat-label">จุดส่ง</span>
         </div>
         <div class="map-stat">
-          <span class="map-stat-value">{getSuccessCount()}</span>
-          <span class="map-stat-label">เสร็จแล้ว</span>
+          <span class="map-stat-value">{getAcceptedCustomerOrdersCount()}</span>
+          <span class="map-stat-label">ลูกค้า</span>
         </div>
         <div class="map-stat">
-          <span class="map-stat-value">{getCompletionRate()}%</span>
-          <span class="map-stat-label">ความคืบหน้า</span>
+          <span class="map-stat-value">{getSuccessCount()}</span>
+          <span class="map-stat-label">เสร็จแล้ว</span>
         </div>
         <div class="map-stat weather">
           <span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span>
@@ -2917,21 +3307,20 @@ function clearAllMarkersAndLayers() {
         </div>
       </div>
       
-      <!-- Filter & Sort - Below Stats -->
       {#if !optimizedRoute}
-      <div class="map-filters glass-card">
-        <select bind:value={sortBy} on:change={sortPoints}>
-          <option value="priority">เรียงตามความสำคัญ</option>
-          <option value="distance">เรียงตามระยะทาง</option>
-          <option value="name">เรียงตามชื่อ</option>
-        </select>
-        <div class="filter-chips">
-          <button class="filter-chip" class:active={filterPriority === null} on:click={() => filterByPriority(null)}>ทั้งหมด</button>
-          <button class="filter-chip priority-1" class:active={filterPriority === 1} on:click={() => filterByPriority(1)}>ด่วนมาก</button>
-          <button class="filter-chip priority-2" class:active={filterPriority === 2} on:click={() => filterByPriority(2)}>ด่วน</button>
-          <button class="filter-chip priority-3" class:active={filterPriority === 3} on:click={() => filterByPriority(3)}>ปกติ</button>
+        <div class="map-filters glass-card">
+          <select bind:value={sortBy} on:change={sortPoints}>
+            <option value="priority">เรียงตามความสำคัญ</option>
+            <option value="distance">เรียงตามระยะทาง</option>
+            <option value="name">เรียงตามชื่อ</option>
+          </select>
+          <div class="filter-chips">
+            <button class="filter-chip" class:active={filterPriority === null} on:click={() => filterByPriority(null)}>ทั้งหมด</button>
+            <button class="filter-chip priority-1" class:active={filterPriority === 1} on:click={() => filterByPriority(1)}>ด่วนมาก</button>
+            <button class="filter-chip priority-2" class:active={filterPriority === 2} on:click={() => filterByPriority(2)}>ด่วน</button>
+            <button class="filter-chip priority-3" class:active={filterPriority === 3} on:click={() => filterByPriority(3)}>ปกติ</button>
+          </div>
         </div>
-      </div>
       {/if}
     {/if}
     
@@ -2953,7 +3342,7 @@ function clearAllMarkersAndLayers() {
 
   .app-container { display: flex; height: 100vh; width: 100vw; background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%); }
 
-  .sidebar { width: 420px; background: rgba(15, 15, 25, 0.95); backdrop-filter: blur(20px); border-right: 1px solid rgba(255, 255, 255, 0.05); display: flex; flex-direction: column; z-index: 10; }
+  .sidebar { width: 500px; background: rgba(15, 15, 25, 0.95); backdrop-filter: blur(20px); border-right: 1px solid rgba(255, 255, 255, 0.05); display: flex; flex-direction: column; z-index: 10; }
   .sidebar-header { padding: 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; }
 
   .logo { display: flex; align-items: center; gap: 14px; }
@@ -3142,7 +3531,7 @@ function clearAllMarkersAndLayers() {
 
   /* Settings Panel */
   .settings-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; }
-  .settings-panel { width: 90%; max-width: 450px; max-height: 80vh; overflow-y: auto; padding: 24px; }
+  .settings-panel { width: 90%; max-width: 600px; max-height: 100vh; overflow-y: auto; padding: 24px; }
   .settings-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
   .settings-header h3 { font-size: 20px; font-weight: 600; }
   .settings-content { display: flex; flex-direction: column; gap: 24px; }
@@ -3217,7 +3606,190 @@ function clearAllMarkersAndLayers() {
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  
+  .customer-orders-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.customer-orders-section .section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.customer-orders-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #8b5cf6;
+}
+
+.customer-orders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.customer-order-card {
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.customer-order-card.accepted {
+  background: rgba(0, 255, 136, 0.1);
+  border-color: rgba(0, 255, 136, 0.3);
+}
+
+.order-customer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.order-customer .avatar {
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+
+.order-customer .name {
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.order-customer .phone {
+  font-size: 12px;
+  color: #71717a;
+}
+
+.order-address {
+  font-size: 13px;
+  color: #a1a1aa;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.order-notes {
+  font-size: 12px;
+  color: #71717a;
+  font-style: italic;
+  margin-bottom: 10px;
+}
+
+.order-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.order-actions button {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+}
+
+.btn-accept {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  color: white;
+}
+
+.btn-accept:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(139, 92, 246, 0.4);
+}
+
+.btn-complete {
+  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  color: #000;
+}
+
+.btn-complete:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(0, 255, 136, 0.4);
+}
+
+.btn-navigate {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.btn-navigate:hover {
+  background: rgba(59, 130, 246, 0.3);
+}
+
+/* Leaflet Customer Marker Styles */
+:global(.customer-pin) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0px;
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  border-radius: 12px;
+  border: 3px solid white;
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.5);
+  animation: pulse-customer 2s ease-in-out infinite;
+}
+
+:global(.customer-pin.accepted) {
+  background: linear-gradient(135deg, #00ff88, #00cc6a);
+  box-shadow: 0 4px 20px rgba(0, 255, 136, 0.5);
+}
+
+:global(.customer-pin span) {
+  font-size: 20px;
+}
+
+:global(.customer-info) {
+  display: flex;
+  flex-direction: column;
+}
+
+:global(.customer-name) {
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+}
+
+:global(.order-status) {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+@keyframes pulse-customer {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+:global(.customer-dark-popup .leaflet-popup-content-wrapper) {
+  background: rgba(139, 92, 246, 0.95);
+}
+
+:global(.customer-header) {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9) !important;
+}
+
+:global(.popup-phone), :global(.popup-notes) {
+  font-size: 12px;
+  color: #a1a1aa;
+  margin-top: 4px;
+}
   /* Map Filters - Below Stats */
   .map-filters { position: absolute; top: 120px; left: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; }
   .map-filters select { padding: 8px 12px; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #e4e4e7; font-family: 'Kanit', sans-serif; font-size: 12px; cursor: pointer; }
@@ -3653,5 +4225,85 @@ function clearAllMarkersAndLayers() {
   font-size: 12px;
   color: #00ff88;
   margin-top: 4px;
+}
+.order-payment {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: rgba(0, 255, 136, 0.05);
+  border: 1px solid rgba(0, 255, 136, 0.15);
+  border-radius: 10px;
+}
+
+.payment-amount {
+  display: flex;
+  flex-direction: column;
+}
+
+.amount-label {
+  font-size: 10px;
+  color: #71717a;
+  text-transform: uppercase;
+}
+
+.amount-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #00ff88;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.payment-details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.payment-method {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.payment-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 🆕 Cash Payment Button */
+.btn-cash {
+  background: linear-gradient(135deg, #ffc107, #ff9800);
+  color: #000;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+}
+
+.btn-cash:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(255, 193, 7, 0.4);
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+  .order-payment {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  
+  .payment-details {
+    align-items: flex-start;
+  }
+  
+  .amount-value {
+    font-size: 18px;
+  }
 }
 </style>
