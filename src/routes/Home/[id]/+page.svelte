@@ -3,17 +3,16 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores'; 
 
-let currentUser: any = null;
+  let currentUser: any = null;
+  let customerOrders: any[] = [];
+  let customerMarkers: any[] = [];
+  let showCustomerOrders = true;
+  let includeCustomersInRoute = true;
 
-let customerOrders: any[] = [];  // Orders จากลูกค้าที่เลือก driver นี้
-let customerMarkers: any[] = []; // Markers ของลูกค้าบนแผนที่
-let showCustomerOrders = true;   // Toggle แสดง/ซ่อนหมุดลูกค้า
-let includeCustomersInRoute = true; // Toggle รวม customer orders ใน route
-
-function logout() {
-  localStorage.removeItem('user');
-  goto('/');
-}
+  function logout() {
+    localStorage.removeItem('user');
+    goto('/');
+  }
 
   let map: any;
   let L: any;
@@ -25,13 +24,7 @@ function logout() {
 
   const API_URL = 'http://localhost:3000/api';
 
-  let newPoint = {
-    name: '',
-    address: '',
-    lat: 13.7563,
-    lng: 100.5018,
-    priority: 3
-  };
+  let newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
 
   let isOptimizing = false;
   let showAddForm = false;
@@ -54,18 +47,14 @@ function logout() {
   let navigationInterval: any = null;
   let arrivedPoints: number[] = [];
   let accuracy = 0;
-
-  // ==================== NEW STATE FOR DATABASE ====================
   let currentRouteId: number | null = null;
   let isProcessingDelivery = false;
 
-  // ==================== NEW FEATURES STATE ====================
-  
   // Statistics
   let totalDeliveriesToday = 0;
   let completedDeliveries = 0;
   let averageDeliveryTime = 0;
-  let totalDistanceTraveled = 0;
+  
   
   // Speed tracking
   let currentSpeed = 0;
@@ -85,37 +74,57 @@ function logout() {
   let trafficStatus: 'smooth' | 'moderate' | 'heavy' = 'smooth';
   
   // Fuel estimation
-  let fuelConsumption = 0; // liters
-  let fuelCostEstimate = 0; // baht
-  const FUEL_PRICE_PER_LITER = 42; // baht
+  let fuelConsumption = 0;
+  let fuelCostEstimate = 0;
+  const FUEL_PRICE_PER_LITER = 42;
   const KM_PER_LITER = 15;
+
+  type VehicleType = 'fuel' | 'ev';
+  let vehicleType: VehicleType = 'fuel';
+  const ELECTRICITY_PRICE_PER_KWH = 4.5; // ค่าไฟต่อหน่วย
+  const KWH_PER_100KM = 15; // กินไฟ 15 kWh ต่อ 100 km
+  let evBatteryCapacity = 60; // kWh - ความจุแบตเตอรี่
+  let evCurrentCharge = 80; // % - ระดับแบตปัจจุบัน
+  let evRangePerCharge = 400; // km - ระยะทางต่อการชาร์จเต็ม
+
+  // Calculated values
+  let evEnergyConsumption = 0; // kWh
+  let evCostEstimate = 0;
+  let evRemainingRange = 0; // km
+  let evBatteryAfterTrip = 0; // %
   
   // Voice navigation
   let voiceEnabled = true;
   
-  // Night mode
-  let isNightMode = false;
-  
   // Settings panel
   let showSettings = false;
-  
-  // Search
-  let searchQuery = '';
-  let searchResults: any[] = [];
-  let showSearchResults = false;
   
   // Filter & Sort
   let sortBy: 'priority' | 'distance' | 'name' = 'priority';
   let filterPriority: number | null = null;
   
-  // Multi-select for batch operations
+  // Multi-select
   let selectedPoints: number[] = [];
   let isMultiSelectMode = false;
   
-  // Route history
-  let routeHistory: any[] = [];
-  
-  // Delivery history - เก็บประวัติการส่ง
+  interface ChargingStation {
+    id: number;
+    name: string;
+    address: string;
+    lat: number;
+    lng: number;
+    distance?: number;
+    operator?: string;
+    connectionTypes?: string[];
+    powerKW?: number;
+    numberOfPoints?: number;
+    status?: string;
+    usageCost?: string;
+    isOperational?: boolean;
+    stopNumber?: number;
+    estimatedChargingTime?: number;
+  }
+  // Delivery history
   interface DeliveryRecord {
     id: number;
     pointId: number | string;
@@ -129,198 +138,138 @@ function logout() {
   }
   let deliveryHistory: DeliveryRecord[] = [];
   let showHistory = false;
-  let skippedPoints: number[] = []; // เก็บ index ของจุดที่ข้าม (ไม่ใช่ส่งสำเร็จ)
-  
-  // Offline mode indicator
-  let isOffline = false;
   
   // Battery status
   let batteryLevel = 100;
   let isCharging = false;
+
+  let chargingStations: ChargingStation[] = [];
+  let chargingStationMarkers: any[] = [];
+  let showChargingStations = true;
+  let isLoadingStations = false;
+  let selectedChargingStation: ChargingStation | null = null;
+  let routeChargingStops: ChargingStation[] = [];
  
-$: driverInfo = currentUser ? {
-  name: currentUser.name || 'ไม่ระบุชื่อ',
-  id: `DRV-${currentUser.id}`,
-  vehicle: currentUser.vehicle || 'ไม่ระบุ',
-  plateNumber: currentUser.plateNumber || '-',
-  phone: currentUser.phone || '-',
-  avatar: currentUser.avatar || '👤',
-  role: currentUser.role || 'driver'
-} : {
-  name: 'กำลังโหลด...',
-  id: '-',
-  vehicle: '-',
-  plateNumber: '-',
-  phone: '-',
-  avatar: '👤',
-  role: 'driver'
-};
-  // Delivery notes
-  let deliveryNotes: Record<number, string> = {};
-  
-  // Photo proof
-  let deliveryPhotos: Record<number, string[]> = {};
-  
-  // Customer contact
-  let showContactModal = false;
-  let selectedCustomer: any = null;
-  
+  $: driverInfo = currentUser ? {
+    name: currentUser.name || 'ไม่ระบุชื่อ',
+    id: `DRV-${currentUser.id}`,
+    vehicle: currentUser.vehicle || 'ไม่ระบุ',
+    plateNumber: currentUser.plateNumber || '-',
+    phone: currentUser.phone || '-',
+    avatar: currentUser.avatar || '👤',
+    role: currentUser.role || 'driver'
+  } : { name: 'กำลังโหลด...', id: '-', vehicle: '-', plateNumber: '-', phone: '-', avatar: '👤', role: 'driver' };
+
   // Break time tracking
   let isOnBreak = false;
   let breakStartTime: Date | null = null;
   let totalBreakTime = 0;
-  $: filteredPoints = filterPriority === null ? deliveryPoints : deliveryPoints.filter(p => p.priority === filterPriority);
   
-  // ==================== REACTIVE: รวม delivery points กับ customer orders ====================
+  $: filteredPoints = filterPriority === null ? deliveryPoints : deliveryPoints.filter(p => p.priority === filterPriority);
+  $: {
+  const distanceKm = remainingDistance / 1000;
+  if (vehicleType === 'fuel') {
+    fuelConsumption = distanceKm / KM_PER_LITER;
+    fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER;
+  } else {
+    evEnergyConsumption = (distanceKm / 100) * KWH_PER_100KM;
+    evCostEstimate = evEnergyConsumption * ELECTRICITY_PRICE_PER_KWH;
+    evRemainingRange = (evCurrentCharge / 100) * evRangePerCharge;
+    const energyUsedPercent = (evEnergyConsumption / evBatteryCapacity) * 100;
+    evBatteryAfterTrip = Math.max(0, evCurrentCharge - energyUsedPercent);
+  }
+}
+  
   $: allDeliveryPoints = [
-  ...deliveryPoints.map(p => ({ ...p, isCustomerOrder: false })),
-  ...(includeCustomersInRoute ? customerOrders
-    .filter(o => o.status === 'accepted')
-    .map(o => ({
-      id: `customer-${o.id}`,
-      name: `🛒 ${o.customer_name}`,
-      address: o.address,
-      lat: o.lat,
-      lng: o.lng,
-      priority: 1,
-      isCustomerOrder: true,
-      orderId: o.id,
-      customer_name: o.customer_name,
-      customer_phone: o.customer_phone,
-      customer_avatar: o.customer_avatar,
-      notes: o.notes,
-      // 🆕 เพิ่ม Payment fields
-      total_amount: o.total_amount || 50,
-      payment_method: o.payment_method || 'cash',
-      payment_status: o.payment_status || 'pending'
+    ...deliveryPoints.map(p => ({ ...p, isCustomerOrder: false })),
+    ...(includeCustomersInRoute ? customerOrders.filter(o => o.status === 'accepted').map(o => ({
+      id: `customer-${o.id}`, name: `🛒 ${o.customer_name}`, address: o.address, lat: o.lat, lng: o.lng, priority: 1,
+      isCustomerOrder: true, orderId: o.id, customer_name: o.customer_name, customer_phone: o.customer_phone,
+      customer_avatar: o.customer_avatar, notes: o.notes, total_amount: o.total_amount || 50,
+      payment_method: o.payment_method || 'cash', payment_status: o.payment_status || 'pending'
     })) : [])
-];
+  ];
   
   // Alert system
   let alerts: { id: number; type: string; message: string; time: Date }[] = [];
   let showAlerts = false;
 
+  // GPS status
+  let lastGPSWarningTime = 0;
+  let gpsStatus: 'excellent' | 'good' | 'weak' | 'poor' = 'good';
+
   // ==================== HELPER FUNCTIONS ====================
-  function getAcceptedCustomerOrdersCount(): number {
-    return customerOrders.filter(o => o.status === 'accepted').length;
-  }
+  function getAcceptedCustomerOrdersCount(): number { return customerOrders.filter(o => o.status === 'accepted').length; }
+  function getPendingCustomerOrdersCount(): number { return customerOrders.filter(o => o.status === 'pending').length; }
+  
   function getPaymentMethodText(method: string): string {
-  const methods: Record<string, string> = {
-    'cash': '💵 เงินสด',
-    'promptpay': '📱 พร้อมเพย์',
-    'transfer': '🏦 โอนเงิน',
-    'credit_card': '💳 บัตรเครดิต'
-  };
-  return methods[method] || method;
-}
-
-function getPaymentStatusText(status: string): string {
-  const statuses: Record<string, string> = {
-    'pending': '⏳ รอชำระ',
-    'paid': '✅ ชำระแล้ว',
-    'verified': '✓ ยืนยันแล้ว',
-    'failed': '❌ ไม่สำเร็จ'
-  };
-  return statuses[status] || status;
-}
-async function confirmCashPayment(orderId: number) {
-  try {
-    const res = await fetch(`${API_URL}/driver/confirm-cash/${orderId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driver_id: currentUser.id })
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    
-    showNotification('ยืนยันรับเงินสดสำเร็จ! 💵', 'success');
-    speak('รับเงินสดเรียบร้อย');
-    await loadCustomerOrders();
-  } catch (err: any) {
-    showNotification(err.message || 'ยืนยันไม่สำเร็จ', 'error');
+    const m: Record<string, string> = { 'cash': '💵 เงินสด', 'promptpay': '📱 พร้อมเพย์', 'transfer': '🏦 โอนเงิน', 'credit_card': '💳 บัตรเครดิต' };
+    return m[method] || method;
   }
-}
+  function getPaymentStatusText(status: string): string {
+    const s: Record<string, string> = { 'pending': '⏳ รอชำระ', 'paid': '✅ ชำระแล้ว', 'verified': '✓ ยืนยันแล้ว', 'failed': '❌ ไม่สำเร็จ' };
+    return s[status] || status;
+  }
+  function getPaymentStatusColor(status: string): string {
+    const c: Record<string, string> = { 'pending': '#ffc107', 'paid': '#00ff88', 'verified': '#3b82f6', 'failed': '#ef4444' };
+    return c[status] || '#71717a';
+  }
 
-function getPaymentStatusColor(status: string): string {
-  const colors: Record<string, string> = {
-    'pending': '#ffc107',
-    'paid': '#00ff88',
-    'verified': '#3b82f6',
-    'failed': '#ef4444'
-  };
-  return colors[status] || '#71717a';
-}
-  function getPendingCustomerOrdersCount(): number {
-    return customerOrders.filter(o => o.status === 'pending').length;
+  async function confirmCashPayment(orderId: number) {
+    try {
+      const res = await fetch(`${API_URL}/driver/confirm-cash/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showNotification('ยืนยันรับเงินสดสำเร็จ! 💵', 'success');
+      speak('รับเงินสดเรียบร้อย');
+      await loadCustomerOrders();
+    } catch (err: any) { showNotification(err.message || 'ยืนยันไม่สำเร็จ', 'error'); }
   }
 
   onMount(async () => {
-
     const userStr = localStorage.getItem('user');
-    if (!userStr) {
-      goto('/');
-    return;
-    }
+    if (!userStr) { goto('/'); return; }
 
-  currentUser = JSON.parse(userStr);
-  const urlId = $page.params.id;
-    if (Number(urlId) !== currentUser.id) {
-      goto(`/Home/${currentUser.id}`);
-      return;
+    currentUser = JSON.parse(userStr);
+    const savedVehicleType = localStorage.getItem('vehicleType');
+    if (savedVehicleType === 'ev' || savedVehicleType === 'fuel') {
+      vehicleType = savedVehicleType;
     }
+    const savedEVCharge = localStorage.getItem('evCurrentCharge');
+    if (savedEVCharge) evCurrentCharge = parseFloat(savedEVCharge);
+    const urlId = $page.params.id;
+    if (Number(urlId) !== currentUser.id) { goto(`/Home/${currentUser.id}`); return; }
+    
     try {
       L = await import('leaflet');
       await import('leaflet/dist/leaflet.css');
 
-      map = L.map('map', {
-        zoomControl: false
-      }).setView([13.7465, 100.5348], 12);
-
+      map = L.map('map', { zoomControl: false }).setView([13.7465, 100.5348], 12);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // ใช้ tile layer หลายตัว fallback
       const tileLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
-        attribution: '© CartoDB © OSM',
-        maxZoom: 19,
+        attribution: '© CartoDB © OSM', maxZoom: 19,
         errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
       }).addTo(map);
 
-      // Retry loading tiles on error
-      tileLayer.on('tileerror', function(error: any) {
-        setTimeout(() => {
-          error.tile.src = error.tile.src;
-        }, 1000);
-      });
+      tileLayer.on('tileerror', (error: any) => { setTimeout(() => { error.tile.src = error.tile.src; }, 1000); });
 
-      // invalidateSize หลายครั้งเพื่อให้แน่ใจว่า map โหลดครบ
       setTimeout(() => map.invalidateSize(), 100);
       setTimeout(() => map.invalidateSize(), 500);
       setTimeout(() => map.invalidateSize(), 1000);
       
-      // เมื่อ window resize ให้ invalidateSize
-      window.addEventListener('resize', () => {
-        setTimeout(() => map.invalidateSize(), 100);
-      });
+      window.addEventListener('resize', () => { setTimeout(() => map.invalidateSize(), 100); });
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
         if (clickMarker) clickMarker.remove();
-
         newPoint.lat = parseFloat(e.latlng.lat.toFixed(6));
         newPoint.lng = parseFloat(e.latlng.lng.toFixed(6));
-
         clickMarker = L.marker([e.latlng.lat, e.latlng.lng], {
-          icon: L.divIcon({
-            className: 'click-marker',
-            html: `<div class="pulse-marker"></div>`,
-            iconSize: [48, 48],
-            iconAnchor: [24, 24]
-          })
+          icon: L.divIcon({ className: 'click-marker', html: `<div class="pulse-marker"></div>`, iconSize: [48, 48], iconAnchor: [24, 24] })
         }).addTo(map);
-
         showAddForm = true;
       });
-      
 
       await loadDeliveryPoints();
       await loadCustomerOrders();
@@ -328,426 +277,462 @@ function getPaymentStatusColor(status: string): string {
       await loadDeliveryHistory();
       initExtraFeatures();
 
-      setInterval(() => {
-  loadCustomerOrders();
-}, 30000);
-
+      setInterval(() => { loadCustomerOrders(); }, 30000);
     } catch (error) {
       console.error('Map init error:', error);
       showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
     }
   });
 
-  onDestroy(() => {
-    stopNavigation();
-  });
+  onDestroy(() => { stopNavigation(); });
 
-  async function loadCustomerOrders() {
-  if (!currentUser?.id) return;
-  
-  try {
-    const res = await fetch(`${API_URL}/driver/customer-orders?driver_id=${currentUser.id}`);
-    const data = await res.json();
-    
-    if (!data.error && Array.isArray(data)) {
-      customerOrders = data;
-      displayCustomerMarkers();
-      console.log(`📍 Loaded ${customerOrders.length} customer orders`);
+  function getCostEstimate(): number {
+  return vehicleType === 'fuel' ? fuelCostEstimate : evCostEstimate;
+}
+
+function getCostLabel(): string {
+  return vehicleType === 'fuel' ? 'ค่าน้ำมัน' : 'ค่าไฟฟ้า';
+}
+
+function getCostIcon(): string {
+  return vehicleType === 'fuel' ? '⛽' : '🔋';
+}
+
+function getVehicleIcon(): string {
+  return vehicleType === 'fuel' ? '🚗' : '🚙';
+}
+
+function toggleVehicleType() {
+  vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
+  localStorage.setItem('vehicleType', vehicleType);
+  showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
+}
+async function loadNearbyChargingStations() {
+    if (!currentLocation) {
+      showNotification('กรุณาเปิด GPS ก่อน', 'warning');
+      return;
     }
-  } catch (err) {
-    console.error('Error loading customer orders:', err);
-  }
-}
 
-function displayCustomerMarkers() {
-  if (!L || !map) return;
-  
-  // ลบ markers เก่า
-  customerMarkers.forEach(m => {
-    try { map.removeLayer(m); } catch(e) {}
-  });
-  customerMarkers = [];
-  
-  // ไม่แสดงเมื่อ navigate หรือปิด toggle
-  if (!showCustomerOrders || isNavigating) return;
-  
-  // สร้าง markers ใหม่ - เฉพาะที่ยังไม่เสร็จ
-  customerOrders.filter(o => o.status !== 'completed').forEach((order, i) => {
-    const marker = L.marker([order.lat, order.lng], {
-      icon: L.divIcon({
-        className: 'customer-order-marker',
-        html: `
-          <div class="customer-pin ${order.status === 'accepted' ? 'accepted' : 'pending'}">
-            <span>🛒</span>
-            <div class="customer-info">
-              <div class="customer-name">${order.customer_name}</div>
-              <div class="order-status">${order.status === 'accepted' ? '✅ รับแล้ว' : '⏳ รอรับงาน'}</div>
-            </div>
-          </div>
-        `,
-        iconSize: [120, 60],
-        iconAnchor: [60, 30]
-      })
-    }).addTo(map);
-
-    // Popup with details
-    marker.bindPopup(`
-      <div class="customer-popup">
-        <div class="popup-header customer-header">
-          <span class="popup-icon">${order.customer_avatar || '👤'}</span>
-          <span class="popup-status">${order.status === 'accepted' ? 'รับงานแล้ว' : 'รอรับงาน'}</span>
-        </div>
-        <div class="popup-content">
-          <h4>${order.customer_name}</h4>
-          <p class="popup-phone">📞 ${order.customer_phone || '-'}</p>
-          <p class="popup-address">📍 ${order.address}</p>
-          ${order.notes ? `<p class="popup-notes">📝 ${order.notes}</p>` : ''}
-        </div>
-      </div>
-    `, { className: 'dark-popup customer-dark-popup' });
-
-    customerMarkers.push(marker);
-  });
-}
-
-async function acceptCustomerOrder(orderId: number) {
-  try {
-    const res = await fetch(`${API_URL}/driver/accept-order/${orderId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driver_id: currentUser.id })
-    });
-    
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    
-    showNotification('รับงานสำเร็จ!', 'success');
-    await loadCustomerOrders();
-  } catch (err: any) {
-    showNotification(err.message || 'รับงานไม่สำเร็จ', 'error');
-  }
-}
-
-async function completeCustomerOrder(orderId: number, orderName?: string) {
-  try {
-    const res = await fetch(`${API_URL}/driver/complete-order/${orderId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driver_id: currentUser.id })
-    });
-    
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    
-    // เพิ่มลง history
-    const order = customerOrders.find(o => o.id === orderId);
-    if (order) {
-      const record: DeliveryRecord = {
-        id: data.id || Date.now(),
-        pointId: `customer-${orderId}`,
-        pointName: `🛒 ${order.customer_name}`,
-        address: order.address || '',
-        status: 'success',
-        timestamp: new Date(),
-        lat: order.lat,
-        lng: order.lng,
-        isCustomerOrder: true
-      };
-      deliveryHistory = [...deliveryHistory, record];
-      completedDeliveries++;
+    isLoadingStations = true;
+    try {
+      const res = await fetch(
+        `${API_URL}/ev-stations/nearby?lat=${currentLocation.lat}&lng=${currentLocation.lng}&radius=15&limit=20`
+      );
+      const data = await res.json();
+      
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      
+      chargingStations = data;
+      displayChargingStationMarkers();
+      showNotification(`พบ ${chargingStations.length} สถานีชาร์จใกล้เคียง`, 'success');
+    } catch (err: any) {
+      console.error('Error loading charging stations:', err);
+      showNotification('ไม่สามารถโหลดสถานีชาร์จได้', 'error');
+    } finally {
+      isLoadingStations = false;
     }
-    
-    showNotification('เสร็จงานสำเร็จ!', 'success');
-    speak(`ส่ง ${orderName || order?.customer_name || 'ลูกค้า'} สำเร็จ`);
-    await loadCustomerOrders();
-  } catch (err: any) {
-    showNotification(err.message || 'บันทึกไม่สำเร็จ', 'error');
   }
-}
-
-
-  async function loadTodayStats() {
-  try {
-    const params = new URLSearchParams();
-    if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-    if (currentUser?.role) params.append('role', currentUser.role);
-
-    const res = await fetch(`${API_URL}/deliveries/stats/today?${params.toString()}`);
-    if (!res.ok) return;
-    
-    const data = await res.json();
-    if (data.error) return;
-    
-    completedDeliveries = data.completed || 0;
-    totalDeliveriesToday = (data.completed || 0) + (data.pending || 0);
-  } catch (err) {
-    console.error('Load stats error:', err);
-  }
-}
-
-async function loadDeliveryHistory() {
-  try {
-    const params = new URLSearchParams();
-    params.append('limit', '50');
-    if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-    if (currentUser?.role) params.append('role', currentUser.role);
-
-    const res = await fetch(`${API_URL}/deliveries/history?${params.toString()}`);
-    if (!res.ok) return;
-    
-    const data = await res.json();
-    if (data.error || !Array.isArray(data)) return;
-    
-    deliveryHistory = data.map((d: any) => ({
-      id: d.id,
-      pointId: d.point_id,
-      pointName: d.point_name,
-      address: d.address || '',
-      status: d.status === 'completed' ? 'success' : 'skipped',
-      timestamp: new Date(d.delivered_at),
-      lat: parseFloat(d.lat),
-      lng: parseFloat(d.lng)
-    }));
-  } catch (err) {
-    console.error('Load history error:', err);
-  }
-}
-
- async function loadDeliveryPoints() {
-  try {
-    const params = new URLSearchParams();
-    if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-    if (currentUser?.role) params.append('role', currentUser.role);
-    
-    const res = await fetch(`${API_URL}/points?${params.toString()}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-
-    deliveryPoints = Array.isArray(data)
-      ? data.map((p: any) => ({
-          id: Number(p.id),
-          name: p.name || 'ไม่มีชื่อ',
-          address: p.address || 'ไม่มีที่อยู่',
-          lat: Number(p.lat),
-          lng: Number(p.lng),
-          priority: Number(p.priority || 3),
-          driver_id: p.driver_id ? Number(p.driver_id) : null,
-          driver_name: p.driver_name || null
-        }))
-      : [];
-
-    displayPoints();
-  } catch (err) {
-    console.error(err);
-    showNotification('โหลดข้อมูลไม่สำเร็จ', 'error');
-  }
-}
-
-
-  function displayPoints() {
+  function displayChargingStationMarkers() {
     if (!L || !map) return;
+    
+    // ลบ markers เก่า
+    chargingStationMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch(e) {}
+    });
+    chargingStationMarkers = [];
 
-    markers.forEach(m => m.remove());
-    markers = [];
+    if (!showChargingStations) return;
 
-    deliveryPoints.forEach((point, i) => {
-      const colors = getPriorityGradient(point.priority);
-      const marker = L.marker([point.lat, point.lng], {
+    chargingStations.forEach((station) => {
+      const isRouteStop = routeChargingStops.some(s => s.id === station.id);
+      const powerText = station.powerKW ? `${station.powerKW}kW` : '';
+      
+      const marker = L.marker([station.lat, station.lng], {
         icon: L.divIcon({
-          className: 'custom-marker',
-          html: `<div class="marker-pin" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};">
-            <span>${i + 1}</span>
-          </div>`,
-          iconSize: [44, 44],
-          iconAnchor: [22, 22]
+          className: 'ev-station-marker',
+          html: `
+            <div class="ev-pin ${isRouteStop ? 'route-stop' : ''} ${station.isOperational ? 'operational' : 'offline'}">
+              <span class="ev-icon">⚡</span>
+              ${isRouteStop ? `<span class="stop-number">${station.stopNumber}</span>` : ''}
+              ${powerText ? `<span class="power-badge">${powerText}</span>` : ''}
+            </div>
+          `,
+          iconSize: [48, 48],
+          iconAnchor: [24, 48]
         })
       }).addTo(map);
 
       marker.bindPopup(`
-        <div class="custom-popup">
-          <div class="popup-header" style="background: ${colors.bg}">
-            <span class="popup-number">${i + 1}</span>
-            <span class="popup-priority">P${point.priority}</span>
+        <div class="ev-popup">
+          <div class="ev-popup-header">
+            <span class="ev-icon-large">⚡</span>
+            <div class="ev-status ${station.isOperational ? 'online' : 'offline'}">
+              ${station.isOperational ? '🟢 เปิดให้บริการ' : '🔴 ปิดให้บริการ'}
+            </div>
           </div>
-          <div class="popup-content">
-            <h4>${point.name}</h4>
-            <p>${point.address}</p>
+          <div class="ev-popup-content">
+            <h4>${station.name}</h4>
+            <p class="ev-address">📍 ${station.address}</p>
+            ${station.operator ? `<p class="ev-operator">🏢 ${station.operator}</p>` : ''}
+            ${station.powerKW ? `<p class="ev-power">⚡ กำลังไฟ: ${station.powerKW} kW</p>` : ''}
+            ${station.numberOfPoints ? `<p class="ev-points">🔌 หัวชาร์จ: ${station.numberOfPoints} จุด</p>` : ''}
+            ${station.connectionTypes?.length ? `<p class="ev-connectors">🔗 ${station.connectionTypes.join(', ')}</p>` : ''}
+            ${station.usageCost ? `<p class="ev-cost">💰 ${station.usageCost}</p>` : ''}
+            ${station.distance ? `<p class="ev-distance">📏 ระยะทาง: ${(station.distance).toFixed(1)} km</p>` : ''}
           </div>
+          ${isRouteStop ? `
+            <div class="ev-route-stop-info">
+              <span class="stop-badge">🛑 จุดพักชาร์จที่ ${station.stopNumber}</span>
+              <span class="charging-time">⏱️ ~${station.estimatedChargingTime || 30} นาที</span>
+            </div>
+          ` : ''}
         </div>
-      `, { className: 'dark-popup' });
+      `, { className: 'dark-popup ev-dark-popup', maxWidth: 300 });
 
-      markers.push(marker);
+      chargingStationMarkers.push(marker);
     });
   }
 
-  async function addDeliveryPoint() {
-  if (!newPoint.name.trim() || !newPoint.address.trim()) {
-    showNotification('กรุณากรอกข้อมูลให้ครบ', 'error');
-    return;
-  }
-
-  try {
-    const payload = {
-      ...newPoint,
-      driver_id: currentUser?.id || null  // 🆕 เพิ่ม driver_id
-    };
-
-    const res = await fetch(`${API_URL}/points`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await res.json();
-    if (data.error || !res.ok) throw new Error(data.error || 'เพิ่มไม่สำเร็จ');
-
-    await loadDeliveryPoints();
-    
-    if (data.id) {
-      activePointId = data.id;
-      setTimeout(() => {
-        const element = document.getElementById(`point-${data.id}`);
-        if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
-    }
-    
-    showAddForm = false;
-    if (clickMarker) clickMarker.remove();
-    newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
-    showNotification('เพิ่มจุดส่งสำเร็จ', 'success');
-  } catch (err) {
-    showNotification('เพิ่มไม่สำเร็จ', 'error');
-  }
-}
-
- async function deletePoint(id: number, name: string) {
-  if (!confirm(`ลบ "${name}" ใช่หรือไม่?`)) return;
-
-  try {
-    const params = new URLSearchParams();
-    if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-    if (currentUser?.role) params.append('role', currentUser.role);
-
-    const res = await fetch(`${API_URL}/points/${id}?${params.toString()}`, { 
-      method: 'DELETE' 
-    });
-    const data = await res.json();
-
-    if (data.error || !res.ok) throw new Error(data.error || 'ลบไม่สำเร็จ');
-
-    await loadDeliveryPoints();
-    if (optimizedRoute) clearRoute();
-    showNotification('ลบสำเร็จ', 'success');
-  } catch (err) {
-    showNotification('ลบไม่สำเร็จ', 'error');
-  }
-}
-
-
-  async function optimizeRoute() {
-    // ใช้ allDeliveryPoints แทน deliveryPoints เพื่อรวม customer orders
+  // คำนวณเส้นทางสำหรับรถ EV พร้อมสถานีชาร์จ
+  async function optimizeEVRoute() {
     if (allDeliveryPoints.length < 1) {
       showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error');
       return;
     }
 
     isOptimizing = true;
-
     try {
-      // Get current location as start point
       const startPoint = await getCurrentLocationAsStart();
-      
-      // Sort points by nearest neighbor algorithm with priority
       const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
       
-      // Build waypoints for OSRM: start -> all sorted points (including last one)
+      // สร้าง waypoints
       const waypoints = [
-        `${startPoint.lng},${startPoint.lat}`,
-        ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
-      ].join(';');
+        { lat: startPoint.lat, lng: startPoint.lng },
+        ...sortedPoints.map((p: any) => ({ lat: p.lat, lng: p.lng }))
+      ];
 
-      // Call OSRM directly to get route through ALL points
-      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${waypoints}?overview=full&geometries=geojson`;
-      const res = await fetch(osrmUrl);
+      // เรียก EV optimized route API
+      const res = await fetch(`${API_URL}/route/ev-optimized`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          waypoints,
+          currentCharge: evCurrentCharge,
+          batteryCapacity: evBatteryCapacity,
+          rangePerCharge: evRangePerCharge,
+          minChargeAtArrival: 15
+        })
+      });
+
       const data = await res.json();
 
-      if (data.code !== 'Ok' || !data.routes?.[0]) {
-        throw new Error('ไม่สามารถคำนวณเส้นทางได้');
+      if (data.error) {
+        throw new Error(data.error);
       }
 
-      // Build optimized route data
+      // อัพเดทข้อมูลเส้นทาง
       optimizedRoute = {
-        route: {
-          geometry: data.routes[0].geometry
-        },
-        total_distance: data.routes[0].distance,
-        total_time: data.routes[0].duration,
+        route: { geometry: data.route.geometry },
+        total_distance: data.route.distance,
+        total_time: data.route.duration,
         optimized_order: [
           { ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ', id: -1 },
           ...sortedPoints
         ]
       };
 
-      remainingDistance = data.routes[0].distance;
-      remainingTime = data.routes[0].duration;
+      remainingDistance = data.route.distance;
+      remainingTime = data.route.duration;
+
+      // อัพเดทข้อมูล EV
+      evBatteryAfterTrip = data.battery.estimatedChargeAtArrival;
+      
+      // เก็บสถานีชาร์จที่ต้องแวะ
+      routeChargingStops = data.chargingStops || [];
+      
+      if (routeChargingStops.length > 0) {
+        // เพิ่มสถานีชาร์จเข้า chargingStations เพื่อแสดงบนแผนที่
+        const existingIds = new Set(chargingStations.map(s => s.id));
+        for (const stop of routeChargingStops) {
+          if (!existingIds.has(stop.id)) {
+            chargingStations = [...chargingStations, stop];
+          }
+        }
+      }
+
       displayOptimizedRoute();
+      displayChargingStationMarkers();
+      
+      // แสดงข้อความสรุป
+      if (data.battery.needsCharging && routeChargingStops.length > 0) {
+        showNotification(
+          `⚡ ต้องแวะชาร์จ ${routeChargingStops.length} จุด! แบตจะเหลือ ${data.battery.estimatedChargeAtArrival.toFixed(0)}%`,
+          'warning'
+        );
+        speak(`ต้องแวะชาร์จ ${routeChargingStops.length} จุดระหว่างทาง`);
+      } else if (data.battery.warningLevel === 'warning') {
+        showNotification(
+          `⚠️ แบตจะเหลือ ${data.battery.estimatedChargeAtArrival.toFixed(0)}% - ควรพิจารณาชาร์จ`,
+          'warning'
+        );
+      } else {
+        showNotification('คำนวณเส้นทาง EV สำเร็จ', 'success');
+      }
+
       activeTab = 'route';
-      showNotification('คำนวณเส้นทางสำเร็จ', 'success');
+
     } catch (err: any) {
-      showNotification(err.message || 'คำนวณไม่สำเร็จ', 'error');
+      console.error('EV Route error:', err);
+      showNotification(err.message || 'คำนวณเส้นทางไม่สำเร็จ', 'error');
+      
+      // Fallback เป็นเส้นทางปกติ
+      await optimizeRoute();
     } finally {
       isOptimizing = false;
     }
   }
 
-  // Nearest Neighbor Algorithm with Priority - customer orders get higher priority
+  // Toggle แสดง/ซ่อนสถานีชาร์จ
+  function toggleChargingStations() {
+    showChargingStations = !showChargingStations;
+    displayChargingStationMarkers();
+  }
+
+  // ไปยังสถานีชาร์จที่เลือก
+  function navigateToChargingStation(station: ChargingStation) {
+    if (map) {
+      map.flyTo([station.lat, station.lng], 16, { duration: 0.8 });
+    }
+    selectedChargingStation = station;
+  }
+  async function smartOptimizeRoute() {
+    if (vehicleType === 'ev') {
+      await optimizeEVRoute();
+    } else {
+      await optimizeRoute();
+    }
+  }
+
+function getEVBatteryColor(): string {
+  if (evCurrentCharge > 50) return '#00ff88';
+  if (evCurrentCharge > 20) return '#ffa502';
+  return '#ff6b6b';
+}
+
+function isEVRangeSufficient(): boolean {
+  return evRemainingRange >= (remainingDistance / 1000);
+}
+
+function saveVehicleSettings() {
+  localStorage.setItem('vehicleType', vehicleType);
+  localStorage.setItem('evCurrentCharge', String(evCurrentCharge));
+  showNotification('บันทึกการตั้งค่ารถสำเร็จ', 'success');
+}
+  async function loadCustomerOrders() {
+    if (!currentUser?.id) return;
+    try {
+      const res = await fetch(`${API_URL}/driver/customer-orders?driver_id=${currentUser.id}`);
+      const data = await res.json();
+      if (!data.error && Array.isArray(data)) { customerOrders = data; displayCustomerMarkers(); }
+    } catch (err) { console.error('Error loading customer orders:', err); }
+  }
+
+  function displayCustomerMarkers() {
+    if (!L || !map) return;
+    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
+    customerMarkers = [];
+    if (!showCustomerOrders || isNavigating) return;
+    
+    customerOrders.filter(o => o.status !== 'completed').forEach((order) => {
+      const marker = L.marker([order.lat, order.lng], {
+        icon: L.divIcon({
+          className: 'customer-order-marker',
+          html: `<div class="customer-pin ${order.status === 'accepted' ? 'accepted' : 'pending'}"><span>🛒</span><div class="customer-info"><div class="customer-name">${order.customer_name}</div><div class="order-status">${order.status === 'accepted' ? '✅ รับแล้ว' : '⏳ รอรับงาน'}</div></div></div>`,
+          iconSize: [120, 60], iconAnchor: [60, 30]
+        })
+      }).addTo(map);
+
+      marker.bindPopup(`<div class="customer-popup"><div class="popup-header customer-header"><span class="popup-icon">${order.customer_avatar || '👤'}</span><span class="popup-status">${order.status === 'accepted' ? 'รับงานแล้ว' : 'รอรับงาน'}</span></div><div class="popup-content"><h4>${order.customer_name}</h4><p class="popup-phone">📞 ${order.customer_phone || '-'}</p><p class="popup-address">📍 ${order.address}</p>${order.notes ? `<p class="popup-notes">📝 ${order.notes}</p>` : ''}</div></div>`, { className: 'dark-popup customer-dark-popup' });
+      customerMarkers.push(marker);
+    });
+  }
+
+  async function acceptCustomerOrder(orderId: number) {
+    try {
+      const res = await fetch(`${API_URL}/driver/accept-order/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showNotification('รับงานสำเร็จ!', 'success');
+      await loadCustomerOrders();
+    } catch (err: any) { showNotification(err.message || 'รับงานไม่สำเร็จ', 'error'); }
+  }
+
+  async function completeCustomerOrder(orderId: number, orderName?: string) {
+    try {
+      const res = await fetch(`${API_URL}/driver/complete-order/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      
+      const order = customerOrders.find(o => o.id === orderId);
+      if (order) {
+        const record: DeliveryRecord = { id: data.id || Date.now(), pointId: `customer-${orderId}`, pointName: `🛒 ${order.customer_name}`, address: order.address || '', status: 'success', timestamp: new Date(), lat: order.lat, lng: order.lng, isCustomerOrder: true };
+        deliveryHistory = [...deliveryHistory, record];
+        completedDeliveries++;
+      }
+      showNotification('เสร็จงานสำเร็จ!', 'success');
+      speak(`ส่ง ${orderName || order?.customer_name || 'ลูกค้า'} สำเร็จ`);
+      await loadCustomerOrders();
+    } catch (err: any) { showNotification(err.message || 'บันทึกไม่สำเร็จ', 'error'); }
+  }
+
+  async function loadTodayStats() {
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/deliveries/stats/today?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error) return;
+      completedDeliveries = data.completed || 0;
+      totalDeliveriesToday = (data.completed || 0) + (data.pending || 0);
+    } catch (err) { console.error('Load stats error:', err); }
+  }
+
+  async function loadDeliveryHistory() {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', '50');
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/deliveries/history?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error || !Array.isArray(data)) return;
+      deliveryHistory = data.map((d: any) => ({ id: d.id, pointId: d.point_id, pointName: d.point_name, address: d.address || '', status: d.status === 'completed' ? 'success' : 'skipped', timestamp: new Date(d.delivered_at), lat: parseFloat(d.lat), lng: parseFloat(d.lng) }));
+    } catch (err) { console.error('Load history error:', err); }
+  }
+
+  async function loadDeliveryPoints() {
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/points?${params.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      deliveryPoints = Array.isArray(data) ? data.map((p: any) => ({ id: Number(p.id), name: p.name || 'ไม่มีชื่อ', address: p.address || 'ไม่มีที่อยู่', lat: Number(p.lat), lng: Number(p.lng), priority: Number(p.priority || 3), driver_id: p.driver_id ? Number(p.driver_id) : null, driver_name: p.driver_name || null })) : [];
+      displayPoints();
+    } catch (err) { console.error(err); showNotification('โหลดข้อมูลไม่สำเร็จ', 'error'); }
+  }
+
+  function displayPoints() {
+    if (!L || !map) return;
+    markers.forEach(m => m.remove());
+    markers = [];
+    deliveryPoints.forEach((point, i) => {
+      const colors = getPriorityGradient(point.priority);
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({ className: 'custom-marker', html: `<div class="marker-pin" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};"><span>${i + 1}</span></div>`, iconSize: [44, 44], iconAnchor: [22, 22] })
+      }).addTo(map);
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${colors.bg}"><span class="popup-number">${i + 1}</span><span class="popup-priority">P${point.priority}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
+      markers.push(marker);
+    });
+  }
+
+  async function addDeliveryPoint() {
+    if (!newPoint.name.trim() || !newPoint.address.trim()) { showNotification('กรุณากรอกข้อมูลให้ครบ', 'error'); return; }
+    try {
+      const payload = { ...newPoint, driver_id: currentUser?.id || null };
+      const res = await fetch(`${API_URL}/points`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (data.error || !res.ok) throw new Error(data.error || 'เพิ่มไม่สำเร็จ');
+      await loadDeliveryPoints();
+      if (data.id) { activePointId = data.id; setTimeout(() => { const element = document.getElementById(`point-${data.id}`); if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 100); }
+      showAddForm = false;
+      if (clickMarker) clickMarker.remove();
+      newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
+      showNotification('เพิ่มจุดส่งสำเร็จ', 'success');
+    } catch (err) { showNotification('เพิ่มไม่สำเร็จ', 'error'); }
+  }
+
+  async function deletePoint(id: number, name: string) {
+    if (!confirm(`ลบ "${name}" ใช่หรือไม่?`)) return;
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/points/${id}?${params.toString()}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.error || !res.ok) throw new Error(data.error || 'ลบไม่สำเร็จ');
+      await loadDeliveryPoints();
+      if (optimizedRoute) clearRoute();
+      showNotification('ลบสำเร็จ', 'success');
+    } catch (err) { showNotification('ลบไม่สำเร็จ', 'error'); }
+  }
+
+  // ==================== OSRM via Backend Proxy ====================
+  async function callOSRMProxy(waypoints: string): Promise<any> {
+    const res = await fetch(`${API_URL}/route/osrm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (data.code !== 'Ok' || !data.routes?.[0]) throw new Error('ไม่สามารถคำนวณเส้นทางได้');
+    return data;
+  }
+
+  async function optimizeRoute() {
+    if (allDeliveryPoints.length < 1) { showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error'); return; }
+    isOptimizing = true;
+    try {
+      const startPoint = await getCurrentLocationAsStart();
+      const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
+      const waypoints = [`${startPoint.lng},${startPoint.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
+      
+      // ใช้ Backend Proxy
+      const data = await callOSRMProxy(waypoints);
+      
+      optimizedRoute = { route: { geometry: data.routes[0].geometry }, total_distance: data.routes[0].distance, total_time: data.routes[0].duration, optimized_order: [{ ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ', id: -1 }, ...sortedPoints] };
+      remainingDistance = data.routes[0].distance;
+      remainingTime = data.routes[0].duration;
+      displayOptimizedRoute();
+      activeTab = 'route';
+      showNotification('คำนวณเส้นทางสำเร็จ', 'success');
+    } catch (err: any) { showNotification(err.message || 'คำนวณไม่สำเร็จ', 'error'); }
+    finally { isOptimizing = false; }
+  }
+
   function sortByNearestNeighbor(start: { lat: number; lng: number }, points: any[]): any[] {
     const sorted: any[] = [];
     const remaining = [...points];
     let currentPos = start;
-
     while (remaining.length > 0) {
       let nearestIndex = 0;
       let nearestScore = Infinity;
-
-      // Find nearest point from current position considering priority
       remaining.forEach((point, index) => {
         const dist = getDistance(currentPos.lat, currentPos.lng, point.lat, point.lng);
-        // Apply priority bonus: customer orders get -500, regular points get -(priority * 100)
         const priorityBonus = point.isCustomerOrder ? 500 : (point.priority ? (6 - point.priority) * 100 : 0);
         const score = dist - priorityBonus;
-        
-        if (score < nearestScore) {
-          nearestScore = score;
-          nearestIndex = index;
-        }
+        if (score < nearestScore) { nearestScore = score; nearestIndex = index; }
       });
-
-      // Add nearest to sorted and remove from remaining
       const nearest = remaining.splice(nearestIndex, 1)[0];
       sorted.push(nearest);
       currentPos = { lat: nearest.lat, lng: nearest.lng };
     }
-
     return sorted;
   }
 
   function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
     return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        reject(new Error('เบราว์เซอร์ไม่รองรับ GPS'));
-        return;
-      }
-
+      if (!navigator.geolocation) { reject(new Error('เบราว์เซอร์ไม่รองรับ GPS')); return; }
       navigator.geolocation.getCurrentPosition(
-        (position) => {
-          resolve({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
-        },
+        (position) => { resolve({ lat: position.coords.latitude, lng: position.coords.longitude }); },
         (error) => {
           let msg = 'ไม่สามารถระบุตำแหน่งได้';
           if (error.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
@@ -755,48 +740,24 @@ async function loadDeliveryHistory() {
           if (error.code === 3) msg = 'หมดเวลาการระบุตำแหน่ง';
           reject(new Error(msg));
         },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0
-        }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     });
   }
 
   function displayOptimizedRoute() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
-
     if (routeLayer) routeLayer.remove();
     if (glowLayer) glowLayer.remove();
 
     const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-    
-    glowLayer = L.polyline(coords, {
-      color: '#00ff88',
-      weight: 12,
-      opacity: 0.3,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-
-    routeLayer = L.polyline(coords, {
-      color: '#00ff88',
-      weight: 4,
-      opacity: 1,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-
+    glowLayer = L.polyline(coords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    routeLayer = L.polyline(coords, { color: '#00ff88', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
     map.fitBounds(routeLayer.getBounds(), { padding: [80, 80] });
 
     markers.forEach(m => m.remove());
     markers = [];
-
-    // ซ่อน customer markers เมื่อแสดง route
-    customerMarkers.forEach(m => {
-      try { map.removeLayer(m); } catch(e) {}
-    });
+    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
     customerMarkers = [];
 
     optimizedRoute.optimized_order.forEach((point: any, i: number) => {
@@ -805,114 +766,36 @@ async function loadDeliveryHistory() {
       const isCustomer = point.isCustomerOrder;
       
       let gradient, glow;
-      if (isCurrentLocation) {
-        gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)';
-        glow = '#3b82f6';
-      } else if (isCustomer) {
-        gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)';
-        glow = '#8b5cf6';
-      } else {
-        gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-        glow = '#667eea';
-      }
+      if (isCurrentLocation) { gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'; glow = '#3b82f6'; }
+      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
+      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
 
       const marker = L.marker([point.lat, point.lng], {
-        icon: L.divIcon({
-          className: 'route-marker',
-          html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''} ${isCustomer ? 'customer-route' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};">
-            <span>${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>
-            ${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}
-          </div>`,
-          iconSize: [52, 52],
-          iconAnchor: [26, 26]
-        })
+        icon: L.divIcon({ className: 'route-marker', html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''} ${isCustomer ? 'customer-route' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}</div>`, iconSize: [52, 52], iconAnchor: [26, 26] })
       }).addTo(map);
-
-      marker.bindPopup(`
-        <div class="custom-popup">
-          <div class="popup-header" style="background: ${gradient}">
-            <span class="popup-number">${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>
-            <span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : isCustomer ? 'ลูกค้า' : 'จุดส่ง'}</span>
-          </div>
-          <div class="popup-content">
-            <h4>${point.name}</h4>
-            <p>${point.address}</p>
-            ${point.customer_phone ? `<p>📞 ${point.customer_phone}</p>` : ''}
-          </div>
-        </div>
-      `, { className: 'dark-popup' });
-
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${gradient}"><span class="popup-number">${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : isCustomer ? 'ลูกค้า' : 'จุดส่ง'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p>${point.customer_phone ? `<p>📞 ${point.customer_phone}</p>` : ''}</div></div>`, { className: 'dark-popup' });
       markers.push(marker);
     });
   }
 
   function clearRoute() {
-  console.log('🧹 Clearing route and markers...');
-  
-  // 1. ลบ route layer (เส้นทาง)
-  if (routeLayer) {
-    try {
-      map.removeLayer(routeLayer);
-      console.log('✓ Removed routeLayer');
-    } catch (e) { console.log('routeLayer remove error:', e); }
-    routeLayer = null;
+    if (routeLayer) { try { map.removeLayer(routeLayer); } catch (e) {} routeLayer = null; }
+    if (glowLayer) { try { map.removeLayer(glowLayer); } catch (e) {} glowLayer = null; }
+    if (markers && markers.length > 0) { for (let i = 0; i < markers.length; i++) { try { if (markers[i]) map.removeLayer(markers[i]); } catch (e) {} } markers = []; }
+    if (clickMarker) { try { map.removeLayer(clickMarker); } catch (e) {} clickMarker = null; }
+    optimizedRoute = null;
+    arrivedPoints = [];
+    currentTargetIndex = 0;
+    displayPoints();
+    displayCustomerMarkers();
   }
-  
-  // 2. ลบ glow layer
-  if (glowLayer) {
-    try {
-      map.removeLayer(glowLayer);
-      console.log('✓ Removed glowLayer');
-    } catch (e) { console.log('glowLayer remove error:', e); }
-    glowLayer = null;
-  }
-  
-  // 3. ลบ markers ทั้งหมด - สำคัญมาก!
-  if (markers && markers.length > 0) {
-    console.log(`🗑️ Removing ${markers.length} markers...`);
-    for (let i = 0; i < markers.length; i++) {
-      try {
-        if (markers[i]) {
-          map.removeLayer(markers[i]);
-        }
-      } catch (e) { 
-        console.log(`Marker ${i} remove error:`, e); 
-      }
-    }
-    markers = [];
-    console.log('✓ All markers removed');
-  }
-  
-  // 4. ลบ click marker
-  if (clickMarker) {
-    try {
-      map.removeLayer(clickMarker);
-    } catch (e) {}
-    clickMarker = null;
-  }
-  
-  // 5. รีเซ็ต state
-  optimizedRoute = null;
-  arrivedPoints = [];
-  currentTargetIndex = 0;
-  
-  displayPoints();
-  displayCustomerMarkers();
-
-  console.log('✅ clearRoute complete');
-}
 
   function startNavigation() {
     if (!optimizedRoute) return;
-
-    if (!navigator.geolocation) {
-      showNotification('เบราว์เซอร์ไม่รองรับ GPS', 'error');
-      return;
-    }
-
+    if (!navigator.geolocation) { showNotification('เบราว์เซอร์ไม่รองรับ GPS', 'error'); return; }
     isNavigating = true;
-    currentTargetIndex = 1; // เริ่มที่จุดที่ 1 (ข้ามจุดเริ่มต้น index 0)
-    arrivedPoints = [0]; // จุดเริ่มต้นถือว่าผ่านแล้ว
+    currentTargetIndex = 1;
+    arrivedPoints = [0];
     traveledPath = [];
     remainingDistance = optimizedRoute.total_distance;
     remainingTime = optimizedRoute.total_time;
@@ -920,93 +803,33 @@ async function loadDeliveryHistory() {
     elapsedTime = 0;
     speedHistory = [];
     maxSpeed = 0;
-
-    // ซ่อน customer markers เมื่อเริ่ม navigate
-    customerMarkers.forEach(m => {
-      try { map.removeLayer(m); } catch(e) {}
-    });
+    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
     customerMarkers = [];
-
-    watchId = navigator.geolocation.watchPosition(
-      updatePosition,
-      handleGeoError,
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 1000
-      }
-    );
-
-    navigationInterval = setInterval(() => {
-      updateNavigationInfo();
-      updateETA();
-      updateFuelEstimate();
-      updateStatistics();
-    }, 1000);
-
+    watchId = navigator.geolocation.watchPosition(updatePosition, handleGeoError, { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 });
+    navigationInterval = setInterval(() => { updateNavigationInfo(); updateETA(); updateFuelEstimate(); updateStatistics(); }, 1000);
     speak('เริ่มนำทาง');
     addAlert('navigation', 'เริ่มการนำทาง');
     showNotification('เริ่มนำทางแล้ว', 'success');
-    
-    // Update markers to show navigation state
     updateNavigationMarkers();
-    
     const firstTarget = optimizedRoute.optimized_order[currentTargetIndex];
-    if (firstTarget) {
-      map.setView([firstTarget.lat, firstTarget.lng], 16);
-    }
-    
-    // Fix map not loading fully
-    setTimeout(() => {
-      map.invalidateSize();
-    }, 100);
+    if (firstTarget) { map.setView([firstTarget.lat, firstTarget.lng], 16); }
+    setTimeout(() => { map.invalidateSize(); }, 100);
   }
 
   function stopNavigation() {
     isNavigating = false;
-    
-    if (watchId !== null) {
-      navigator.geolocation.clearWatch(watchId);
-      watchId = null;
-    }
-
-    if (navigationInterval) {
-      clearInterval(navigationInterval);
-      navigationInterval = null;
-    }
-
-    if (currentLocationMarker) {
-      currentLocationMarker.remove();
-      currentLocationMarker = null;
-    }
-
-    if (traveledLayer) {
-      traveledLayer.remove();
-      traveledLayer = null;
-    }
-
-    if (remainingRouteLayer) {
-      remainingRouteLayer.remove();
-      remainingRouteLayer = null;
-    }
-
-    if (remainingGlowLayer) {
-      remainingGlowLayer.remove();
-      remainingGlowLayer = null;
-    }
-
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    if (currentLocationMarker) { currentLocationMarker.remove(); currentLocationMarker = null; }
+    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
+    if (remainingRouteLayer) { remainingRouteLayer.remove(); remainingRouteLayer = null; }
+    if (remainingGlowLayer) { remainingGlowLayer.remove(); remainingGlowLayer = null; }
     currentLocation = null;
     currentTargetIndex = 0;
     arrivedPoints = [];
     traveledPath = [];
-
-    if (optimizedRoute) {
-      displayOptimizedRoute();
-    }
-    
-    // แสดง customer markers กลับมา
+    if (optimizedRoute) { displayOptimizedRoute(); }
     displayCustomerMarkers();
-
     showNotification('หยุดนำทางแล้ว', 'success');
   }
 
@@ -1014,81 +837,36 @@ async function loadDeliveryHistory() {
     const { latitude, longitude, accuracy: acc } = position.coords;
     currentLocation = { lat: latitude, lng: longitude };
     accuracy = acc;
-
-    // แจ้งเตือนเมื่อ GPS ไม่แม่น
     checkGPSAccuracy(acc);
-
-    // Calculate speed
     calculateSpeed(latitude, longitude);
-
     updateCurrentLocationMarker();
-    updateRouteDisplay();
+    updateRouteDisplayForNavigation();
     updateNavigationMarkers();
     checkArrival();
-
-    if (isNavigating) {
-      map.setView([latitude, longitude], map.getZoom(), { animate: true });
-    }
+    if (isNavigating) { map.setView([latitude, longitude], map.getZoom(), { animate: true }); }
   }
-
-  // ตัวแปรสำหรับติดตาม GPS warning
-  let lastGPSWarningTime = 0;
-  let gpsStatus: 'excellent' | 'good' | 'weak' | 'poor' = 'good';
 
   function checkGPSAccuracy(acc: number) {
     const now = Date.now();
-    
-    // อัปเดต GPS status
-    if (acc < 10) {
-      gpsStatus = 'excellent';
-    } else if (acc < 30) {
-      gpsStatus = 'good';
-    } else if (acc < 50) {
-      gpsStatus = 'weak';
-    } else {
-      gpsStatus = 'poor';
-    }
-
-    // เตือนทุก 30 วินาที ถ้า GPS อ่อน
+    if (acc < 10) { gpsStatus = 'excellent'; }
+    else if (acc < 30) { gpsStatus = 'good'; }
+    else if (acc < 50) { gpsStatus = 'weak'; }
+    else { gpsStatus = 'poor'; }
     if (acc > 50 && now - lastGPSWarningTime > 30000) {
       lastGPSWarningTime = now;
       showNotification(`⚠️ สัญญาณ GPS อ่อน (${Math.round(acc)}m) - ลองออกไปที่โล่ง`, 'warning');
-      
-      // พูดเตือนถ้าเปิดเสียง
-      if (voiceEnabled) {
-        speak('สัญญาณ GPS อ่อน กรุณาออกไปที่โล่ง');
-      }
+      if (voiceEnabled) { speak('สัญญาณ GPS อ่อน กรุณาออกไปที่โล่ง'); }
     }
   }
 
   function getGPSStatusColor(): string {
-    switch (gpsStatus) {
-      case 'excellent': return '#00ff88';
-      case 'good': return '#ffd93d';
-      case 'weak': return '#ffa502';
-      case 'poor': return '#ff6b6b';
-      default: return '#71717a';
-    }
+    switch (gpsStatus) { case 'excellent': return '#00ff88'; case 'good': return '#ffd93d'; case 'weak': return '#ffa502'; case 'poor': return '#ff6b6b'; default: return '#71717a'; }
   }
-
   function getGPSStatusText(): string {
-    switch (gpsStatus) {
-      case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`;
-      case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`;
-      case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`;
-      case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`;
-      default: return 'กำลังค้นหา GPS...';
-    }
+    switch (gpsStatus) { case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`; case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`; case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`; case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`; default: return 'กำลังค้นหา GPS...'; }
   }
-
   function getGPSIcon(): string {
-    switch (gpsStatus) {
-      case 'excellent': return '📡';
-      case 'good': return '📶';
-      case 'weak': return '📉';
-      case 'poor': return '⚠️';
-      default: return '🔍';
-    }
+    switch (gpsStatus) { case 'excellent': return '📡'; case 'good': return '📶'; case 'weak': return '📉'; case 'poor': return '⚠️'; default: return '🔍'; }
   }
 
   function handleGeoError(error: GeolocationPositionError) {
@@ -1102,143 +880,61 @@ async function loadDeliveryHistory() {
 
   function updateCurrentLocationMarker() {
     if (!L || !map || !currentLocation) return;
-
-    if (currentLocationMarker) {
-      currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
-    } else {
+    if (currentLocationMarker) { currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]); }
+    else {
       currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
-        icon: L.divIcon({
-          className: 'current-location-marker',
-          html: `
-            <div class="location-accuracy" style="width: ${Math.min(accuracy * 2, 100)}px; height: ${Math.min(accuracy * 2, 100)}px;"></div>
-            <div class="location-dot">
-              <div class="location-dot-inner"></div>
-            </div>
-          `,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12]
-        }),
+        icon: L.divIcon({ className: 'current-location-marker', html: `<div class="location-accuracy" style="width: ${Math.min(accuracy * 2, 100)}px; height: ${Math.min(accuracy * 2, 100)}px;"></div><div class="location-dot"><div class="location-dot-inner"></div></div>`, iconSize: [24, 24], iconAnchor: [12, 12] }),
         zIndexOffset: 1000
       }).addTo(map);
     }
   }
 
-  function updateRouteDisplay() {
-    if (!L || !map || !currentLocation || !optimizedRoute?.route?.geometry) return;
-
-    // Use the navigation display function
-    updateRouteDisplayForNavigation();
-  }
-
   function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
     let minDist = Infinity;
     let nearestIndex = 0;
-
-    coords.forEach((coord, index) => {
-      const dist = getDistance(location.lat, location.lng, coord[0], coord[1]);
-      if (dist < minDist) {
-        minDist = dist;
-        nearestIndex = index;
-      }
-    });
-
+    coords.forEach((coord, index) => { const dist = getDistance(location.lat, location.lng, coord[0], coord[1]); if (dist < minDist) { minDist = dist; nearestIndex = index; } });
     return nearestIndex;
   }
 
   function updateNavigationMarkers() {
-  if (!L || !map || !optimizedRoute) {
-    console.log('⚠️ updateNavigationMarkers: missing L, map, or optimizedRoute');
-    return;
-  }
-
-  console.log('🔄 updateNavigationMarkers called');
-  console.log('📍 Points to draw:', optimizedRoute.optimized_order.length);
-
-  // ==================== ลบ markers เก่าก่อน (สำคัญมาก!) ====================
-  if (markers && markers.length > 0) {
-    console.log(`🗑️ Removing ${markers.length} old markers`);
-    markers.forEach((m, i) => {
-      try { 
-        if (m && map) {
-          map.removeLayer(m);
-        }
-      } catch(e) {
-        console.log(`  - Error removing marker ${i}:`, e);
-      }
+    if (!L || !map || !optimizedRoute) return;
+    if (markers && markers.length > 0) { markers.forEach((m) => { try { if (m && map) map.removeLayer(m); } catch(e) {} }); }
+    markers = [];
+    optimizedRoute.optimized_order.forEach((point: any, i: number) => {
+      const isArrived = arrivedPoints.includes(i);
+      const isCurrent = i === currentTargetIndex;
+      const isStart = point.id === -1;
+      const isCustomer = point.isCustomerOrder;
+      let gradient, glow;
+      if (isArrived) { gradient = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'; glow = '#6b7280'; }
+      else if (isCurrent) { gradient = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'; glow = '#f59e0b'; }
+      else if (isStart) { gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)'; glow = '#00ff88'; }
+      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
+      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
+      const displayNumber = isStart ? '📍' : (isArrived ? '✓' : (isCustomer ? '🛒' : i));
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({ className: 'route-marker', html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${displayNumber}</span>${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}</div>`, iconSize: [52, 52], iconAnchor: [26, 26] })
+      }).addTo(map);
+      markers.push(marker);
     });
   }
-  markers = []; // รีเซ็ต array
 
-  // ==================== สร้าง markers ใหม่ ====================
-  optimizedRoute.optimized_order.forEach((point: any, i: number) => {
-    const isArrived = arrivedPoints.includes(i);
-    const isCurrent = i === currentTargetIndex;
-    const isStart = point.id === -1;
-    const isCustomer = point.isCustomerOrder;
-
-    let gradient, glow;
-    if (isArrived) {
-      gradient = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)';
-      glow = '#6b7280';
-    } else if (isCurrent) {
-      gradient = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
-      glow = '#f59e0b';
-    } else if (isStart) {
-      gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)';
-      glow = '#00ff88';
-    } else if (isCustomer) {
-      gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)';
-      glow = '#8b5cf6';
-    } else {
-      gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-      glow = '#667eea';
-    }
-
-    const displayNumber = isStart ? '📍' : (isArrived ? '✓' : (isCustomer ? '🛒' : i));
-
-    const marker = L.marker([point.lat, point.lng], {
-      icon: L.divIcon({
-        className: 'route-marker',
-        html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};">
-          <span>${displayNumber}</span>
-          ${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}
-        </div>`,
-        iconSize: [52, 52],
-        iconAnchor: [26, 26]
-      })
-    }).addTo(map);
-
-    markers.push(marker);
-  });
-
-  console.log(`✅ Created ${markers.length} new markers`);
-}
   function checkArrival() {
     if (!currentLocation || !optimizedRoute) return;
-
     const target = optimizedRoute.optimized_order[currentTargetIndex];
     if (!target) return;
-
     const dist = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
     distanceToNextPoint = dist;
-
-    // Auto-arrival disabled - ต้องกดปุ่มยืนยันเอง
   }
 
   function updateNavigationInfo() {
     if (!currentLocation || !optimizedRoute) return;
-
     const routeCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
     const nearestIndex = findNearestPointIndex(routeCoords, currentLocation);
-    
     let totalRemaining = 0;
-    for (let i = nearestIndex; i < routeCoords.length - 1; i++) {
-      totalRemaining += getDistance(routeCoords[i][0], routeCoords[i][1], routeCoords[i + 1][0], routeCoords[i + 1][1]);
-    }
-    
+    for (let i = nearestIndex; i < routeCoords.length - 1; i++) { totalRemaining += getDistance(routeCoords[i][0], routeCoords[i][1], routeCoords[i + 1][0], routeCoords[i + 1][1]); }
     remainingDistance = totalRemaining;
     remainingTime = (totalRemaining / 1000) / 30 * 3600;
-
     if (currentTargetIndex < optimizedRoute.optimized_order.length) {
       const target = optimizedRoute.optimized_order[currentTargetIndex];
       distanceToNextPoint = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
@@ -1249,1268 +945,242 @@ async function loadDeliveryHistory() {
     const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   }
 
-  function formatDistance(meters: number): string {
-    if (meters < 1000) {
-      return `${Math.round(meters)} ม.`;
-    }
-    return `${(meters / 1000).toFixed(1)} กม.`;
-  }
+  function formatDistance(meters: number): string { if (meters < 1000) { return `${Math.round(meters)} ม.`; } return `${(meters / 1000).toFixed(1)} กม.`; }
+  function formatTime(seconds: number): string { const mins = Math.round(seconds / 60); if (mins < 60) { return `${mins} นาที`; } const hours = Math.floor(mins / 60); const remainMins = mins % 60; return `${hours} ชม. ${remainMins} นาที`; }
+  function centerOnCurrentLocation() { if (currentLocation && map) { map.setView([currentLocation.lat, currentLocation.lng], 17, { animate: true }); } }
 
-  function formatTime(seconds: number): string {
-    const mins = Math.round(seconds / 60);
-    if (mins < 60) {
-      return `${mins} นาที`;
-    }
-    const hours = Math.floor(mins / 60);
-    const remainMins = mins % 60;
-    return `${hours} ชม. ${remainMins} นาที`;
-  }
-
-  function centerOnCurrentLocation() {
-    if (currentLocation && map) {
-      map.setView([currentLocation.lat, currentLocation.lng], 17, { animate: true });
-    }
-  }
-async function skipToNextPoint() {
-  console.log('🔍 skipToNextPoint called');
-
-  if (isProcessingDelivery) {
-    console.log('❌ Blocked: isProcessingDelivery');
-    showNotification('กำลังประมวลผล...', 'warning');
-    return;
-  }
-  if (!optimizedRoute?.optimized_order) {
-    console.log('❌ Blocked: no optimizedRoute');
-    showNotification('ไม่มีเส้นทาง', 'error');
-    return;
-  }
-  
-  // หาจุดแรกที่ไม่ใช่ start point (id !== -1)
-  const skippedPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
-  
-  console.log('⏭️ skippedPoint:', skippedPoint?.name, 'ID:', skippedPoint?.id);
-  
-  if (!skippedPoint) {
-    console.log('❌ No point to skip');
-    showNotification('ไม่พบจุดที่จะข้าม', 'error');
-    return;
-  }
-
-  // ไม่อนุญาตให้ skip customer orders
-  if (skippedPoint.isCustomerOrder) {
-    showNotification('ไม่สามารถข้ามงานลูกค้าได้ - กรุณาส่งให้เสร็จ', 'error');
-    return;
-  }
-
-  isProcessingDelivery = true;
-  console.log('✅ Processing skip for:', skippedPoint.name);
-
-  try {
-    // สร้าง payload โดยไม่ใส่ field ที่เป็น null
-    const payload: any = {
-      point_id: Number(skippedPoint.id),
-      point_name: String(skippedPoint.name),
-      address: skippedPoint.address || '',
-      lat: Number(skippedPoint.lat),
-      lng: Number(skippedPoint.lng),
-      notes: `ข้ามจุดส่ง - ${new Date().toLocaleString('th-TH')}`
-    };
-    
-    // เพิ่ม field เฉพาะที่มีค่า
-    if (currentRouteId) payload.route_id = Number(currentRouteId);
-    if (currentUser?.id) payload.driver_id = Number(currentUser.id);
-    if (currentUser?.name) payload.driver_name = String(currentUser.name);
-
-    console.log('📤 Sending skip payload:', JSON.stringify(payload));
-
-    const res = await fetch(`${API_URL}/deliveries/skip`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    console.log('📥 Response status:', res.status);
-    
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('❌ HTTP Error:', res.status, errorText);
-      throw new Error(`HTTP ${res.status}: ${errorText}`);
-    }
-
-    const data = await res.json();
-    console.log('📥 Response data:', data);
-    
-    if (data.error) {
-      throw new Error(data.error);
-    }
-
-    // ✅ สำเร็จ - อัปเดต UI
-    console.log('✅ API Success! Updating UI...');
-
-    // 1. บันทึกลง local history
-    const record: DeliveryRecord = {
-      id: data.history_id || Date.now(),
-      pointId: skippedPoint.id,
-      pointName: skippedPoint.name,
-      address: skippedPoint.address || '',
-      status: 'skipped',
-      timestamp: new Date(),
-      lat: skippedPoint.lat,
-      lng: skippedPoint.lng
-    };
-    deliveryHistory = [...deliveryHistory, record];
-    console.log('📋 Added to history:', record.pointName);
-
-    // 2. ลบจุดออกโดยใช้ ID
-    const pointIdToRemove = skippedPoint.id;
-    
-    optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter(
-      (p: any) => p.id !== pointIdToRemove
-    );
-    console.log('📦 optimizedRoute after removal:', optimizedRoute.optimized_order.length);
-
-    deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
-    console.log('📦 deliveryPoints after removal:', deliveryPoints.length);
-
-    // 3. ตรวจสอบว่าเหลือจุดอีกไหม
-    const remainingDeliveryPoints = optimizedRoute.optimized_order.filter(
-      (p: any) => p.id !== -1
-    );
-    console.log('📦 Remaining delivery points:', remainingDeliveryPoints.length);
-
-    if (remainingDeliveryPoints.length === 0) {
-      console.log('🎉 All deliveries complete!');
-      showNotification('🎉 ครบทุกจุดแล้ว!', 'success');
-      speak('ครบทุกจุดแล้ว');
-      stopNavigation();
-      clearAllMarkersAndLayers();
-      optimizedRoute = null;
-      await loadDeliveryPoints();
-      await loadCustomerOrders();
-      await loadTodayStats();
-    } else {
-      showNotification(`⏭️ ข้าม ${skippedPoint.name}`, 'warning');
-      addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
-      
-      currentTargetIndex = 1;
-      arrivedPoints = [0];
-      
-      if (currentLocation) {
-        await recalculateRouteFromCurrentPosition();
-      } else {
-        updateNavigationMarkers();
-      }
-    }
-
-  } catch (err: any) {
-    console.error('❌ Error:', err);
-    showNotification(`ข้ามไม่สำเร็จ: ${err.message}`, 'error');
-  } finally {
-    isProcessingDelivery = false;
-    console.log('🔓 isProcessingDelivery reset to false');
-  }
-}
- 
-async function markDeliverySuccess() {
-  console.log('🔍 markDeliverySuccess called');
-
-  if (isProcessingDelivery) {
-    console.log('❌ Blocked: isProcessingDelivery');
-    showNotification('กำลังประมวลผล...', 'warning');
-    return;
-  }
-  if (!optimizedRoute?.optimized_order) {
-    console.log('❌ Blocked: no optimizedRoute');
-    showNotification('ไม่มีเส้นทาง', 'error');
-    return;
-  }
-  
-  // หาจุดแรกที่ไม่ใช่ start point (id !== -1)
-  const deliveredPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
-  
-  console.log('📦 deliveredPoint:', deliveredPoint?.name, 'ID:', deliveredPoint?.id);
-  
-  if (!deliveredPoint) {
-    console.log('❌ No delivery point found');
-    showNotification('ไม่พบจุดส่ง', 'error');
-    return;
-  }
-
-  isProcessingDelivery = true;
-  console.log('✅ Processing delivery for:', deliveredPoint.name);
-
-  try {
-    // ถ้าเป็น customer order ให้ใช้ completeCustomerOrder
-    if (deliveredPoint.isCustomerOrder) {
-      console.log('🛒 This is a customer order, using completeCustomerOrder');
-      
-      await completeCustomerOrder(deliveredPoint.orderId, deliveredPoint.name);
-      
-      // ลบจุดออกจาก route
-      const pointIdToRemove = deliveredPoint.id;
-      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter(
-        (p: any) => p.id !== pointIdToRemove
-      );
-      
-      // ตรวจสอบว่าเหลือจุดอีกไหม
-      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter(
-        (p: any) => p.id !== -1
-      );
-
+  async function skipToNextPoint() {
+    if (isProcessingDelivery) { showNotification('กำลังประมวลผล...', 'warning'); return; }
+    if (!optimizedRoute?.optimized_order) { showNotification('ไม่มีเส้นทาง', 'error'); return; }
+    const skippedPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
+    if (!skippedPoint) { showNotification('ไม่พบจุดที่จะข้าม', 'error'); return; }
+    if (skippedPoint.isCustomerOrder) { showNotification('ไม่สามารถข้ามงานลูกค้าได้ - กรุณาส่งให้เสร็จ', 'error'); return; }
+    isProcessingDelivery = true;
+    try {
+      const payload: any = { point_id: Number(skippedPoint.id), point_name: String(skippedPoint.name), address: skippedPoint.address || '', lat: Number(skippedPoint.lat), lng: Number(skippedPoint.lng), notes: `ข้ามจุดส่ง - ${new Date().toLocaleString('th-TH')}` };
+      if (currentRouteId) payload.route_id = Number(currentRouteId);
+      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
+      if (currentUser?.name) payload.driver_name = String(currentUser.name);
+      const res = await fetch(`${API_URL}/deliveries/skip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) { const errorText = await res.text(); throw new Error(`HTTP ${res.status}: ${errorText}`); }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const record: DeliveryRecord = { id: data.history_id || Date.now(), pointId: skippedPoint.id, pointName: skippedPoint.name, address: skippedPoint.address || '', status: 'skipped', timestamp: new Date(), lat: skippedPoint.lat, lng: skippedPoint.lng };
+      deliveryHistory = [...deliveryHistory, record];
+      const pointIdToRemove = skippedPoint.id;
+      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
+      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
       if (remainingDeliveryPoints.length === 0) {
-        showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success');
-        speak('ส่งครบทุกจุดแล้ว');
-        stopNavigation();
-        clearAllMarkersAndLayers();
-        optimizedRoute = null;
-        await loadDeliveryPoints();
-        await loadCustomerOrders();
-        await loadTodayStats();
+        showNotification('🎉 ครบทุกจุดแล้ว!', 'success'); speak('ครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
+        await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
       } else {
-        addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
-        currentTargetIndex = 1;
-        arrivedPoints = [0];
-        
-        if (currentLocation) {
-          await recalculateRouteFromCurrentPosition();
+        showNotification(`⏭️ ข้าม ${skippedPoint.name}`, 'warning'); addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
+        currentTargetIndex = 1; arrivedPoints = [0];
+        if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
+      }
+    } catch (err: any) { showNotification(`ข้ามไม่สำเร็จ: ${err.message}`, 'error'); }
+    finally { isProcessingDelivery = false; }
+  }
+ 
+  async function markDeliverySuccess() {
+    if (isProcessingDelivery) { showNotification('กำลังประมวลผล...', 'warning'); return; }
+    if (!optimizedRoute?.optimized_order) { showNotification('ไม่มีเส้นทาง', 'error'); return; }
+    const deliveredPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
+    if (!deliveredPoint) { showNotification('ไม่พบจุดส่ง', 'error'); return; }
+    isProcessingDelivery = true;
+    try {
+      if (deliveredPoint.isCustomerOrder) {
+        await completeCustomerOrder(deliveredPoint.orderId, deliveredPoint.name);
+        const pointIdToRemove = deliveredPoint.id;
+        optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+        const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+        if (remainingDeliveryPoints.length === 0) {
+          showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success'); speak('ส่งครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
+          await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
         } else {
-          updateNavigationMarkers();
+          addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+          currentTargetIndex = 1; arrivedPoints = [0];
+          if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
         }
+        isProcessingDelivery = false; return;
       }
-      
-      isProcessingDelivery = false;
-      return;
-    }
-
-    // Regular delivery point
-    const payload: any = {
-      point_id: Number(deliveredPoint.id),
-      point_name: String(deliveredPoint.name),
-      address: deliveredPoint.address || '',
-      lat: Number(deliveredPoint.lat),
-      lng: Number(deliveredPoint.lng),
-      notes: `ส่งสำเร็จ - ${new Date().toLocaleString('th-TH')}`
-    };
-    
-    // เพิ่ม field เฉพาะที่มีค่า
-    if (currentRouteId) payload.route_id = Number(currentRouteId);
-    if (currentUser?.id) payload.driver_id = Number(currentUser.id);
-    if (currentUser?.name) payload.driver_name = String(currentUser.name);
-
-    console.log('📤 Sending payload:', JSON.stringify(payload));
-
-    const res = await fetch(`${API_URL}/deliveries/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    console.log('📥 Response status:', res.status);
-    
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('❌ HTTP Error:', res.status, errorText);
-      throw new Error(`HTTP ${res.status}: ${errorText}`);
-    }
-
-    const data = await res.json();
-    console.log('📥 Response data:', data);
-    
-    if (data.error) {
-      throw new Error(data.error);
-    }
-
-    // ✅ สำเร็จ - อัปเดต UI
-    console.log('✅ API Success! Updating UI...');
-
-    // 1. บันทึกลง local history
-    const record: DeliveryRecord = {
-      id: data.history_id || Date.now(),
-      pointId: deliveredPoint.id,
-      pointName: deliveredPoint.name,
-      address: deliveredPoint.address || '',
-      status: 'success',
-      timestamp: new Date(),
-      lat: deliveredPoint.lat,
-      lng: deliveredPoint.lng
-    };
-    deliveryHistory = [...deliveryHistory, record];
-    completedDeliveries++;
-    console.log('📋 Added to history:', record.pointName);
-
-    // 2. ลบจุดออกโดยใช้ ID
-    const pointIdToRemove = deliveredPoint.id;
-    
-    optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter(
-      (p: any) => p.id !== pointIdToRemove
-    );
-    console.log('📦 optimizedRoute after removal:', optimizedRoute.optimized_order.length);
-
-    deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
-    console.log('📦 deliveryPoints after removal:', deliveryPoints.length);
-
-    // 3. ตรวจสอบว่าเหลือจุดอีกไหม
-    const remainingDeliveryPoints = optimizedRoute.optimized_order.filter(
-      (p: any) => p.id !== -1
-    );
-    console.log('📦 Remaining delivery points:', remainingDeliveryPoints.length);
-
-    if (remainingDeliveryPoints.length === 0) {
-      console.log('🎉 All deliveries complete!');
-      showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success');
-      speak('ส่งครบทุกจุดแล้ว');
-      stopNavigation();
-      clearAllMarkersAndLayers();
-      optimizedRoute = null;
-      await loadDeliveryPoints();
-      await loadCustomerOrders();
-      await loadTodayStats();
-    } else {
-      showNotification(`✅ ส่ง ${deliveredPoint.name} สำเร็จ`, 'success');
-      speak(`ส่ง ${deliveredPoint.name} สำเร็จ`);
-      addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
-      
-      currentTargetIndex = 1;
-      arrivedPoints = [0];
-      
-      if (currentLocation) {
-        await recalculateRouteFromCurrentPosition();
+      const payload: any = { point_id: Number(deliveredPoint.id), point_name: String(deliveredPoint.name), address: deliveredPoint.address || '', lat: Number(deliveredPoint.lat), lng: Number(deliveredPoint.lng), notes: `ส่งสำเร็จ - ${new Date().toLocaleString('th-TH')}` };
+      if (currentRouteId) payload.route_id = Number(currentRouteId);
+      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
+      if (currentUser?.name) payload.driver_name = String(currentUser.name);
+      const res = await fetch(`${API_URL}/deliveries/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) { const errorText = await res.text(); throw new Error(`HTTP ${res.status}: ${errorText}`); }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const record: DeliveryRecord = { id: data.history_id || Date.now(), pointId: deliveredPoint.id, pointName: deliveredPoint.name, address: deliveredPoint.address || '', status: 'success', timestamp: new Date(), lat: deliveredPoint.lat, lng: deliveredPoint.lng };
+      deliveryHistory = [...deliveryHistory, record];
+      completedDeliveries++;
+      const pointIdToRemove = deliveredPoint.id;
+      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
+      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+      if (remainingDeliveryPoints.length === 0) {
+        showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success'); speak('ส่งครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
+        await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
       } else {
-        updateNavigationMarkers();
+        showNotification(`✅ ส่ง ${deliveredPoint.name} สำเร็จ`, 'success'); speak(`ส่ง ${deliveredPoint.name} สำเร็จ`); addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+        currentTargetIndex = 1; arrivedPoints = [0];
+        if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
       }
-    }
-
-  } catch (err: any) {
-    console.error('❌ Error:', err);
-    showNotification(`บันทึกไม่สำเร็จ: ${err.message}`, 'error');
-  } finally {
-    isProcessingDelivery = false;
-    console.log('🔓 isProcessingDelivery reset to false');
+    } catch (err: any) { showNotification(`บันทึกไม่สำเร็จ: ${err.message}`, 'error'); }
+    finally { isProcessingDelivery = false; }
   }
-}
-function clearAllMarkersAndLayers() {
-  console.log('🧹 clearAllMarkersAndLayers called');
-  
-  // ลบ markers ทั้งหมด
-  if (markers && markers.length > 0) {
-    markers.forEach((m, i) => {
-      try { 
-        if (m && map) map.removeLayer(m);
-      } catch(e) {}
-    });
-    markers = [];
-  }
-  
-  // ลบ route layers
-  if (routeLayer && map) { try { map.removeLayer(routeLayer); } catch(e) {} routeLayer = null; }
-  if (glowLayer && map) { try { map.removeLayer(glowLayer); } catch(e) {} glowLayer = null; }
-  if (remainingRouteLayer && map) { try { map.removeLayer(remainingRouteLayer); } catch(e) {} remainingRouteLayer = null; }
-  if (remainingGlowLayer && map) { try { map.removeLayer(remainingGlowLayer); } catch(e) {} remainingGlowLayer = null; }
-  if (traveledLayer && map) { try { map.removeLayer(traveledLayer); } catch(e) {} traveledLayer = null; }
-  if (clickMarker && map) { try { map.removeLayer(clickMarker); } catch(e) {} clickMarker = null; }
-  
-  // ลบ stray markers ด้วย eachLayer
-  if (map && L) {
-    map.eachLayer((layer: any) => {
-      if (layer instanceof L.Marker && layer !== currentLocationMarker) {
-        try { map.removeLayer(layer); } catch(e) {}
-      }
-    });
-  }
-  
-  console.log('✅ All markers and layers cleared');
-}
 
-
+  function clearAllMarkersAndLayers() {
+    if (markers && markers.length > 0) { markers.forEach((m) => { try { if (m && map) map.removeLayer(m); } catch(e) {} }); markers = []; }
+    if (routeLayer && map) { try { map.removeLayer(routeLayer); } catch(e) {} routeLayer = null; }
+    if (glowLayer && map) { try { map.removeLayer(glowLayer); } catch(e) {} glowLayer = null; }
+    if (remainingRouteLayer && map) { try { map.removeLayer(remainingRouteLayer); } catch(e) {} remainingRouteLayer = null; }
+    if (remainingGlowLayer && map) { try { map.removeLayer(remainingGlowLayer); } catch(e) {} remainingGlowLayer = null; }
+    if (traveledLayer && map) { try { map.removeLayer(traveledLayer); } catch(e) {} traveledLayer = null; }
+    if (clickMarker && map) { try { map.removeLayer(clickMarker); } catch(e) {} clickMarker = null; }
+    if (map && L) { map.eachLayer((layer: any) => { if (layer instanceof L.Marker && layer !== currentLocationMarker) { try { map.removeLayer(layer); } catch(e) {} } }); }
+  }
 
   async function recalculateRouteFromCurrentPosition() {
-  if (!currentLocation || !optimizedRoute) {
-    console.log('⚠️ Cannot recalculate: no current location or optimized route');
-    return;
-  }
-
-  console.log('🔄 recalculateRouteFromCurrentPosition called');
-
-  try {
-    // หาจุดที่เหลือ (ไม่รวม start point)
-    const remainingPoints = optimizedRoute.optimized_order.filter(
-      (p: any) => p.id !== -1
-    );
-
-    console.log('📦 Remaining points for recalculation:', remainingPoints.length);
-
-    if (remainingPoints.length === 0) {
-      console.log('🎉 No more points - stopping navigation');
-      showNotification('ส่งครบทุกจุดแล้ว!', 'success');
-      stopNavigation();
-      clearAllMarkersAndLayers(); // เรียกฟังก์ชันใหม่
-      return;
-    }
-
-    // เรียงลำดับใหม่ด้วย Nearest Neighbor จากตำแหน่งปัจจุบัน
-    const sortedPoints = sortByNearestNeighbor(currentLocation, remainingPoints);
-
-    // สร้าง waypoints สำหรับ OSRM
-    const waypoints = [
-      `${currentLocation.lng},${currentLocation.lat}`,
-      ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
-    ].join(';');
-
-    console.log('🛣️ Calling OSRM for new route...');
-
-    // เรียก OSRM
-    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${waypoints}?overview=full&geometries=geojson`;
-    const res = await fetch(osrmUrl);
-    const data = await res.json();
-
-    if (data.code === 'Ok' && data.routes?.[0]) {
-      console.log('✅ OSRM route calculated successfully');
+    if (!currentLocation || !optimizedRoute) return;
+    try {
+      const remainingPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+      if (remainingPoints.length === 0) { showNotification('ส่งครบทุกจุดแล้ว!', 'success'); stopNavigation(); clearAllMarkersAndLayers(); return; }
+      const sortedPoints = sortByNearestNeighbor(currentLocation, remainingPoints);
+      const waypoints = [`${currentLocation.lng},${currentLocation.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
       
-      // อัปเดต optimizedRoute
-      optimizedRoute = {
-        route: { geometry: data.routes[0].geometry },
-        total_distance: data.routes[0].distance,
-        total_time: data.routes[0].duration,
-        optimized_order: [
-          { ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 },
-          ...sortedPoints
-        ]
-      };
-
+      // ใช้ Backend Proxy
+      const data = await callOSRMProxy(waypoints);
+      
+      optimizedRoute = { route: { geometry: data.routes[0].geometry }, total_distance: data.routes[0].distance, total_time: data.routes[0].duration, optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints] };
       remainingDistance = data.routes[0].distance;
       remainingTime = data.routes[0].duration;
-      currentTargetIndex = 1; // รีเซ็ตกลับมาที่จุดแรก (index 1 เพราะ 0 คือ start)
-      arrivedPoints = [0]; // Start point ผ่านแล้ว
-
-      // ลบ layers เก่าก่อน
-      clearAllRouteLayers();
-      
-      updateRouteDisplayForNavigation();
-      updateNavigationMarkers();
-
-      // เลื่อนไปยังเป้าหมายถัดไป
-      const nextTarget = optimizedRoute.optimized_order[currentTargetIndex];
-      if (nextTarget) {
-        map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true });
-      }
-      
-      console.log('✅ Route and markers updated');
-    } else {
-      console.log('⚠️ OSRM failed, using fallback');
-      // ถ้า OSRM ไม่ได้ ใช้ fallback
-      optimizedRoute.optimized_order = [
-        { ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 },
-        ...sortedPoints
-      ];
       currentTargetIndex = 1;
       arrivedPoints = [0];
-      
       clearAllRouteLayers();
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
+      const nextTarget = optimizedRoute.optimized_order[currentTargetIndex];
+      if (nextTarget) { map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true }); }
+    } catch (err) {
+      console.error('Error recalculating route:', err);
+      currentTargetIndex = 1; arrivedPoints = [0];
+      clearAllRouteLayers(); updateRouteDisplayForNavigation(); updateNavigationMarkers();
     }
-  } catch (err) {
-    console.error('❌ Error recalculating route:', err);
-    // Fallback - ใช้ route เดิมแต่ไม่มีจุดที่ลบไป
-    currentTargetIndex = 1;
-    arrivedPoints = [0];
-    
-    clearAllRouteLayers();
-    updateRouteDisplayForNavigation();
-    updateNavigationMarkers();
-  }
-}
-
-  function formatHistoryTime(date: Date): string {
-    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function getSuccessCount(): number {
-    return deliveryHistory.filter(d => d.status === 'success').length;
-  }
-
-  function getSkippedCount(): number {
-    return deliveryHistory.filter(d => d.status === 'skipped').length;
-  }
-  function clearAllMarkers() {
-  // ลบ markers ทั้งหมดออกจากแผนที่
-  if (markers && markers.length > 0) {
-    markers.forEach(marker => {
-      if (marker && map) {
-        map.removeLayer(marker);
-      }
-    });
-    markers = [];
-  }
-  
-  // ลบ route layer
-  if (routeLayer && map) {
-    map.removeLayer(routeLayer);
-    routeLayer = null;
-  }
-  
-  // ลบ glow layer
-  if (glowLayer && map) {
-    map.removeLayer(glowLayer);
-    glowLayer = null;
-  }
-  
-  // ลบ click marker ถ้ามี
-  if (clickMarker && map) {
-    map.removeLayer(clickMarker);
-    clickMarker = null;
-  }
-}
-  function getRemainingPointsCount(): number {
-    if (!optimizedRoute) return allDeliveryPoints.length;
-    return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length;
-  }
+  function formatHistoryTime(date: Date): string { return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }); }
+  function getSuccessCount(): number { return deliveryHistory.filter(d => d.status === 'success').length; }
+  function getSkippedCount(): number { return deliveryHistory.filter(d => d.status === 'skipped').length; }
+  function getRemainingPointsCount(): number { if (!optimizedRoute) return allDeliveryPoints.length; return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length; }
 
   function updateRouteDisplayForNavigation() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
-
-    // Get full route coordinates
     const fullRouteCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-    
-    // Find where current target is on the route
     const currentTarget = optimizedRoute.optimized_order[currentTargetIndex];
     if (!currentTarget) return;
-
-    // Find the index on route closest to current target
-    let targetRouteIndex = 0;
-    let minDist = Infinity;
-    fullRouteCoords.forEach((coord, idx) => {
-      const dist = getDistance(currentTarget.lat, currentTarget.lng, coord[0], coord[1]);
-      if (dist < minDist) {
-        minDist = dist;
-        targetRouteIndex = idx;
-      }
-    });
-
-    // Find start point index (current location or start of route)
     let startIndex = 0;
-    if (currentLocation) {
-      let minStartDist = Infinity;
-      fullRouteCoords.forEach((coord, idx) => {
-        const dist = getDistance(currentLocation.lat, currentLocation.lng, coord[0], coord[1]);
-        if (dist < minStartDist) {
-          minStartDist = dist;
-          startIndex = idx;
-        }
-      });
-    }
-
-    // Clear old layers
+    if (currentLocation) { let minStartDist = Infinity; fullRouteCoords.forEach((coord, idx) => { const dist = getDistance(currentLocation.lat, currentLocation.lng, coord[0], coord[1]); if (dist < minStartDist) { minStartDist = dist; startIndex = idx; } }); }
     clearAllRouteLayers();
-    if (traveledLayer) {
-      traveledLayer.remove();
-      traveledLayer = null;
-    }
-
-    // Draw traveled part (gray) - from route start to current position
-    if (startIndex > 0) {
-      const traveledCoords = fullRouteCoords.slice(0, startIndex + 1);
-      traveledLayer = L.polyline(traveledCoords, {
-        color: '#6b7280',
-        weight: 5,
-        opacity: 0.6,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(map);
-    }
-
-    // Draw remaining part (green) - from current position to end
+    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
+    if (startIndex > 0) { const traveledCoords = fullRouteCoords.slice(0, startIndex + 1); traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: 5, opacity: 0.6, lineCap: 'round', lineJoin: 'round' }).addTo(map); }
     const remainingCoords = fullRouteCoords.slice(startIndex);
     if (remainingCoords.length > 1) {
-      remainingGlowLayer = L.polyline(remainingCoords, {
-        color: '#00ff88',
-        weight: 12,
-        opacity: 0.3,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(map);
-
-      remainingRouteLayer = L.polyline(remainingCoords, {
-        color: '#00ff88',
-        weight: 5,
-        opacity: 1,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(map);
+      remainingGlowLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+      remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 5, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
     }
-
-    // Update remaining distance/time
     let totalRemaining = 0;
-    for (let i = startIndex; i < fullRouteCoords.length - 1; i++) {
-      totalRemaining += getDistance(
-        fullRouteCoords[i][0], fullRouteCoords[i][1],
-        fullRouteCoords[i + 1][0], fullRouteCoords[i + 1][1]
-      );
-    }
+    for (let i = startIndex; i < fullRouteCoords.length - 1; i++) { totalRemaining += getDistance(fullRouteCoords[i][0], fullRouteCoords[i][1], fullRouteCoords[i + 1][0], fullRouteCoords[i + 1][1]); }
     remainingDistance = totalRemaining;
     remainingTime = (totalRemaining / 1000) / 30 * 3600;
   }
 
-  // Keep this for backward compatibility but simplify
-  async function drawRouteFromOSRM(start: {lat: number, lng: number}, points: any[]) {
-    const waypoints = [
-      `${start.lng},${start.lat}`,
-      ...points.map((p: any) => `${p.lng},${p.lat}`)
-    ].join(';');
-
-    try {
-      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${waypoints}?overview=full&geometries=geojson`;
-      const res = await fetch(osrmUrl);
-      const data = await res.json();
-      
-      if (data.code === 'Ok' && data.routes?.[0]?.geometry) {
-        const coords = data.routes[0].geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-
-        remainingGlowLayer = L.polyline(coords, {
-          color: '#00ff88',
-          weight: 14,
-          opacity: 0.3,
-          lineCap: 'round',
-          lineJoin: 'round'
-        }).addTo(map);
-
-        remainingRouteLayer = L.polyline(coords, {
-          color: '#00ff88',
-          weight: 5,
-          opacity: 1,
-          lineCap: 'round',
-          lineJoin: 'round'
-        }).addTo(map);
-
-        optimizedRoute.route.geometry = data.routes[0].geometry;
-        remainingDistance = data.routes[0].distance;
-        remainingTime = data.routes[0].duration;
-
-        map.fitBounds(remainingRouteLayer.getBounds(), { padding: [80, 80] });
-      } else {
-        drawStraightLineRoute(start, points);
-      }
-    } catch (err) {
-      console.error('OSRM error:', err);
-      drawStraightLineRoute(start, points);
-    }
-  }
-
   function clearAllRouteLayers() {
-    // Remove remaining route layers
-    if (remainingRouteLayer && map.hasLayer(remainingRouteLayer)) {
-      map.removeLayer(remainingRouteLayer);
-    }
-    remainingRouteLayer = null;
-    
-    if (remainingGlowLayer && map.hasLayer(remainingGlowLayer)) {
-      map.removeLayer(remainingGlowLayer);
-    }
-    remainingGlowLayer = null;
-    
-    // Remove original route layers
-    if (routeLayer && map.hasLayer(routeLayer)) {
-      map.removeLayer(routeLayer);
-    }
-    routeLayer = null;
-    
-    if (glowLayer && map.hasLayer(glowLayer)) {
-      map.removeLayer(glowLayer);
-    }
-    glowLayer = null;
+    if (remainingRouteLayer && map.hasLayer(remainingRouteLayer)) { map.removeLayer(remainingRouteLayer); } remainingRouteLayer = null;
+    if (remainingGlowLayer && map.hasLayer(remainingGlowLayer)) { map.removeLayer(remainingGlowLayer); } remainingGlowLayer = null;
+    if (routeLayer && map.hasLayer(routeLayer)) { map.removeLayer(routeLayer); } routeLayer = null;
+    if (glowLayer && map.hasLayer(glowLayer)) { map.removeLayer(glowLayer); } glowLayer = null;
   }
 
-  function drawStraightLineRoute(start: {lat: number, lng: number}, points: any[]) {
-    const coords: [number, number][] = [
-      [start.lat, start.lng],
-      ...points.map((p: any) => [p.lat, p.lng] as [number, number])
-    ];
-
-    remainingGlowLayer = L.polyline(coords, {
-      color: '#00ff88',
-      weight: 14,
-      opacity: 0.3,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-
-    remainingRouteLayer = L.polyline(coords, {
-      color: '#00ff88',
-      weight: 5,
-      opacity: 1,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-
-    // Calculate distance
-    let totalDist = 0;
-    for (let i = 0; i < coords.length - 1; i++) {
-      totalDist += getDistance(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
-    }
-    remainingDistance = totalDist;
-    remainingTime = (totalDist / 1000) / 30 * 3600;
-  }
-
-  async function recalculateRouteFromAPI() {
-    if (!optimizedRoute || !L || !map) return;
-    updateRouteDisplayForNavigation();
-    updateNavigationMarkers();
-  }
-
-  function redrawRemainingRoute() {
-    // Use API instead
-    recalculateRouteFromAPI();
-  }
-
-  function recalculateRemainingRoute() {
-    recalculateRouteFromAPI();
-  }
-
-  function drawFallbackRoute() {
-    recalculateRouteFromAPI();
-  }
-
-  // ==================== SPEED & TRACKING ====================
-  
   function calculateSpeed(newLat: number, newLng: number) {
     const now = Date.now();
-    if (lastPosition) {
-      const distance = getDistance(lastPosition.lat, lastPosition.lng, newLat, newLng);
-      const timeDiff = (now - lastPosition.time) / 1000; // seconds
-      if (timeDiff > 0) {
-        currentSpeed = (distance / timeDiff) * 3.6; // km/h
-        if (currentSpeed > maxSpeed) maxSpeed = currentSpeed;
-        speedHistory.push(currentSpeed);
-        if (speedHistory.length > 60) speedHistory.shift(); // Keep last 60 readings
-      }
-    }
+    if (lastPosition) { const distance = getDistance(lastPosition.lat, lastPosition.lng, newLat, newLng); const timeDiff = (now - lastPosition.time) / 1000; if (timeDiff > 0) { currentSpeed = (distance / timeDiff) * 3.6; if (currentSpeed > maxSpeed) maxSpeed = currentSpeed; speedHistory.push(currentSpeed); if (speedHistory.length > 60) speedHistory.shift(); } }
     lastPosition = { lat: newLat, lng: newLng, time: now };
   }
-  
-  function getAverageSpeed(): number {
-    if (speedHistory.length === 0) return 0;
-    return speedHistory.reduce((a, b) => a + b, 0) / speedHistory.length;
-  }
 
-  // ==================== ETA CALCULATION ====================
-  
   function updateETA() {
-    if (remainingDistance > 0 && currentSpeed > 5) {
-      const hoursRemaining = (remainingDistance / 1000) / currentSpeed;
-      const msRemaining = hoursRemaining * 3600 * 1000;
-      estimatedArrivalTime = new Date(Date.now() + msRemaining);
-    } else if (remainingDistance > 0) {
-      // Use average speed of 30 km/h if not moving
-      const hoursRemaining = (remainingDistance / 1000) / 30;
-      const msRemaining = hoursRemaining * 3600 * 1000;
-      estimatedArrivalTime = new Date(Date.now() + msRemaining);
-    }
+    if (remainingDistance > 0 && currentSpeed > 5) { const hoursRemaining = (remainingDistance / 1000) / currentSpeed; const msRemaining = hoursRemaining * 3600 * 1000; estimatedArrivalTime = new Date(Date.now() + msRemaining); }
+    else if (remainingDistance > 0) { const hoursRemaining = (remainingDistance / 1000) / 30; const msRemaining = hoursRemaining * 3600 * 1000; estimatedArrivalTime = new Date(Date.now() + msRemaining); }
   }
-  
-  function formatETA(date: Date | null): string {
-    if (!date) return '--:--';
-    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-  }
+  function formatETA(date: Date | null): string { if (!date) return '--:--'; return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }); }
 
-  // ==================== FUEL CALCULATION ====================
-  
-  function updateFuelEstimate() {
-    const distanceKm = remainingDistance / 1000;
-    fuelConsumption = distanceKm / KM_PER_LITER;
-    fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER;
-  }
+  function updateFuelEstimate() { const distanceKm = remainingDistance / 1000; fuelConsumption = distanceKm / KM_PER_LITER; fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER; }
 
-  // ==================== VOICE NAVIGATION ====================
-  
+  // Voice Navigation
   let thaiVoice: SpeechSynthesisVoice | null = null;
-  
-  function loadThaiVoice() {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    
-    const voices = speechSynthesis.getVoices();
-    thaiVoice = voices.find(v => v.lang === 'th-TH') || 
-                voices.find(v => v.lang.startsWith('th')) || 
-                voices.find(v => v.name.toLowerCase().includes('thai')) ||
-                null;
-    
-    if (thaiVoice) {
-      console.log('✅ Thai voice loaded:', thaiVoice.name);
-    } else {
-      console.log('⚠️ No Thai voice found. Available voices:', voices.map(v => `${v.name} (${v.lang})`));
-    }
-  }
+  function loadThaiVoice() { if (typeof window === 'undefined' || !('speechSynthesis' in window)) return; const voices = speechSynthesis.getVoices(); thaiVoice = voices.find(v => v.lang === 'th-TH') || voices.find(v => v.lang.startsWith('th')) || voices.find(v => v.name.toLowerCase().includes('thai')) || null; }
+  function speak(text: string) { if (!voiceEnabled || typeof window === 'undefined') return; if (!('speechSynthesis' in window)) return; speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text); utterance.lang = 'th-TH'; utterance.rate = 0.9; utterance.pitch = 1; utterance.volume = 1; if (thaiVoice) { utterance.voice = thaiVoice; } else { loadThaiVoice(); if (thaiVoice) { utterance.voice = thaiVoice; } } speechSynthesis.speak(utterance); }
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) { loadThaiVoice(); speechSynthesis.onvoiceschanged = () => { loadThaiVoice(); }; }
+  function toggleVoice() { voiceEnabled = !voiceEnabled; showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success'); }
 
-  function speak(text: string) {
-    if (!voiceEnabled || typeof window === 'undefined') return;
-    if (!('speechSynthesis' in window)) return;
-    
-    // หยุดเสียงก่อนหน้า
-    speechSynthesis.cancel();
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'th-TH';
-    utterance.rate = 0.9;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-    
-    // ใช้เสียงไทยถ้ามี
-    if (thaiVoice) {
-      utterance.voice = thaiVoice;
-    } else {
-      // ลองโหลดอีกครั้ง
-      loadThaiVoice();
-      if (thaiVoice) {
-        utterance.voice = thaiVoice;
-      }
-    }
-    
-    speechSynthesis.speak(utterance);
-  }
-  
-  // โหลด voices เมื่อพร้อม
-  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-    // บาง browser โหลด voices ทันที
-    loadThaiVoice();
-    
-    // บาง browser ต้องรอ event
-    speechSynthesis.onvoiceschanged = () => {
-      loadThaiVoice();
-    };
-  }
-  
-  function announceNextTurn() {
-    if (!optimizedRoute || currentTargetIndex >= optimizedRoute.optimized_order.length) return;
-    const target = optimizedRoute.optimized_order[currentTargetIndex];
-    const distKm = (distanceToNextPoint / 1000).toFixed(1);
-    speak(`อีก ${distKm} กิโลเมตร ถึง ${target.name}`);
-  }
-  
-  function toggleVoice() {
-    voiceEnabled = !voiceEnabled;
-    showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success');
-  }
+  // Traffic Status
+  function updateTrafficStatus() { const hour = new Date().getHours(); if ((hour >= 7 && hour <= 9) || (hour >= 16 && hour <= 19)) { trafficStatus = 'heavy'; } else if ((hour >= 11 && hour <= 13)) { trafficStatus = 'moderate'; } else { trafficStatus = 'smooth'; } }
+  function getTrafficColor(): string { switch (trafficStatus) { case 'heavy': return '#ff6b6b'; case 'moderate': return '#ffa502'; default: return '#00ff88'; } }
+  function getTrafficLabel(): string { switch (trafficStatus) { case 'heavy': return 'รถติดมาก'; case 'moderate': return 'รถปานกลาง'; default: return 'รถไม่ติด'; } }
 
-  // ==================== TRAFFIC STATUS ====================
-  
-  function updateTrafficStatus() {
-    // Mock traffic based on time of day
-    const hour = new Date().getHours();
-    if ((hour >= 7 && hour <= 9) || (hour >= 16 && hour <= 19)) {
-      trafficStatus = 'heavy';
-    } else if ((hour >= 11 && hour <= 13)) {
-      trafficStatus = 'moderate';
-    } else {
-      trafficStatus = 'smooth';
-    }
-  }
-  
-  function getTrafficColor(): string {
-    switch (trafficStatus) {
-      case 'heavy': return '#ff6b6b';
-      case 'moderate': return '#ffa502';
-      default: return '#00ff88';
-    }
-  }
-  
-  function getTrafficLabel(): string {
-    switch (trafficStatus) {
-      case 'heavy': return 'รถติดมาก';
-      case 'moderate': return 'รถปานกลาง';
-      default: return 'รถไม่ติด';
-    }
-  }
+  // Filter & Sort
+  function sortPoints() { deliveryPoints = [...deliveryPoints].sort((a, b) => { switch (sortBy) { case 'priority': return a.priority - b.priority; case 'name': return a.name.localeCompare(b.name, 'th'); case 'distance': if (!currentLocation) return 0; const distA = getDistance(currentLocation.lat, currentLocation.lng, a.lat, a.lng); const distB = getDistance(currentLocation.lat, currentLocation.lng, b.lat, b.lng); return distA - distB; default: return 0; } }); displayPoints(); }
+  function filterByPriority(priority: number | null) { filterPriority = priority; }
 
-  // ==================== SEARCH & FILTER ====================
-  
-  function searchPoints() {
-    if (!searchQuery.trim()) {
-      searchResults = [];
-      showSearchResults = false;
-      return;
-    }
-    
-    const query = searchQuery.toLowerCase();
-    searchResults = deliveryPoints.filter(p => 
-      p.name.toLowerCase().includes(query) ||
-      p.address.toLowerCase().includes(query)
-    );
-    showSearchResults = true;
-  }
-  
-  function selectSearchResult(point: any) {
-    focusOnPoint(point.lat, point.lng);
-    activePointId = point.id;
-    searchQuery = '';
-    showSearchResults = false;
-  }
-  
-  function sortPoints() {
-    deliveryPoints = [...deliveryPoints].sort((a, b) => {
-      switch (sortBy) {
-        case 'priority':
-          return a.priority - b.priority;
-        case 'name':
-          return a.name.localeCompare(b.name, 'th');
-        case 'distance':
-          if (!currentLocation) return 0;
-          const distA = getDistance(currentLocation.lat, currentLocation.lng, a.lat, a.lng);
-          const distB = getDistance(currentLocation.lat, currentLocation.lng, b.lat, b.lng);
-          return distA - distB;
-        default:
-          return 0;
-      }
-    });
-    displayPoints();
-  }
-  
-  function filterByPriority(priority: number | null) {
-    filterPriority = priority;
-  }
-  
-  function getFilteredPoints() {
-    if (filterPriority === null) return deliveryPoints;
-    return deliveryPoints.filter(p => p.priority === filterPriority);
-  }
+  // Multi-select
+  function toggleMultiSelect() { isMultiSelectMode = !isMultiSelectMode; if (!isMultiSelectMode) { selectedPoints = []; } }
+  function togglePointSelection(id: number) { if (selectedPoints.includes(id)) { selectedPoints = selectedPoints.filter(p => p !== id); } else { selectedPoints = [...selectedPoints, id]; } }
+  function selectAllPoints() { selectedPoints = deliveryPoints.map(p => p.id); }
+  function deselectAllPoints() { selectedPoints = []; }
+  async function deleteSelectedPoints() { if (selectedPoints.length === 0) return; if (!confirm(`ลบ ${selectedPoints.length} จุดที่เลือก?`)) return; for (const id of selectedPoints) { try { await fetch(`${API_URL}/points/${id}`, { method: 'DELETE' }); } catch (err) { console.error('Delete error:', err); } } await loadDeliveryPoints(); selectedPoints = []; isMultiSelectMode = false; showNotification(`ลบจุดสำเร็จ`, 'success'); }
 
-  // ==================== MULTI-SELECT ====================
-  
-  function toggleMultiSelect() {
-    isMultiSelectMode = !isMultiSelectMode;
-    if (!isMultiSelectMode) {
-      selectedPoints = [];
-    }
-  }
-  
-  function togglePointSelection(id: number) {
-    if (selectedPoints.includes(id)) {
-      selectedPoints = selectedPoints.filter(p => p !== id);
-    } else {
-      selectedPoints = [...selectedPoints, id];
-    }
-  }
-  
-  function selectAllPoints() {
-    selectedPoints = deliveryPoints.map(p => p.id);
-  }
-  
-  function deselectAllPoints() {
-    selectedPoints = [];
-  }
-  
-  async function deleteSelectedPoints() {
-    if (selectedPoints.length === 0) return;
-    if (!confirm(`ลบ ${selectedPoints.length} จุดที่เลือก?`)) return;
-    
-    for (const id of selectedPoints) {
-      try {
-        await fetch(`${API_URL}/points/${id}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error('Delete error:', err);
-      }
-    }
-    
-    await loadDeliveryPoints();
-    selectedPoints = [];
-    isMultiSelectMode = false;
-    showNotification(`ลบ ${selectedPoints.length} จุดสำเร็จ`, 'success');
-  }
+  // Break time
+  function startBreak() { isOnBreak = true; breakStartTime = new Date(); showNotification('เริ่มพักเบรค', 'success'); addAlert('break', 'คนขับเริ่มพักเบรค'); }
+  function endBreak() { if (breakStartTime) { const breakDuration = Date.now() - breakStartTime.getTime(); totalBreakTime += breakDuration; } isOnBreak = false; breakStartTime = null; showNotification('สิ้นสุดพักเบรค', 'success'); addAlert('break', 'คนขับกลับมาทำงาน'); }
+  function formatBreakTime(): string { let totalMs = totalBreakTime; if (isOnBreak && breakStartTime) { totalMs += Date.now() - breakStartTime.getTime(); } const mins = Math.floor(totalMs / 60000); return `${mins} นาที`; }
 
-  // ==================== BREAK TIME ====================
-  
-  function startBreak() {
-    isOnBreak = true;
-    breakStartTime = new Date();
-    showNotification('เริ่มพักเบรค', 'success');
-    addAlert('break', 'คนขับเริ่มพักเบรค');
-  }
-  
-  function endBreak() {
-    if (breakStartTime) {
-      const breakDuration = Date.now() - breakStartTime.getTime();
-      totalBreakTime += breakDuration;
-    }
-    isOnBreak = false;
-    breakStartTime = null;
-    showNotification('สิ้นสุดพักเบรค', 'success');
-    addAlert('break', 'คนขับกลับมาทำงาน');
-  }
-  
-  function formatBreakTime(): string {
-    let totalMs = totalBreakTime;
-    if (isOnBreak && breakStartTime) {
-      totalMs += Date.now() - breakStartTime.getTime();
-    }
-    const mins = Math.floor(totalMs / 60000);
-    return `${mins} นาที`;
-  }
+  // Alerts
+  function addAlert(type: string, message: string) { const alert = { id: Date.now(), type, message, time: new Date() }; alerts = [alert, ...alerts].slice(0, 50); }
+  function clearAlerts() { alerts = []; }
+  function dismissAlert(id: number) { alerts = alerts.filter(a => a.id !== id); }
 
-  // ==================== ALERTS ====================
-  
-  function addAlert(type: string, message: string) {
-    const alert = {
-      id: Date.now(),
-      type,
-      message,
-      time: new Date()
-    };
-    alerts = [alert, ...alerts].slice(0, 50); // Keep last 50
-  }
-  
-  function clearAlerts() {
-    alerts = [];
-  }
-  
-  function dismissAlert(id: number) {
-    alerts = alerts.filter(a => a.id !== id);
-  }
+  // Statistics
+  function updateStatistics() { totalDeliveriesToday = deliveryPoints.length + getSuccessCount(); if (navigationStartTime) { elapsedTime = Date.now() - navigationStartTime.getTime(); } if (completedDeliveries > 0) { averageDeliveryTime = elapsedTime / completedDeliveries; } }
 
-  // ==================== DELIVERY COMPLETION ====================
-  
-  function markAsDelivered(pointId: number) {
-    completedDeliveries++;
-    addAlert('delivery', `ส่งสำเร็จ: ${deliveryPoints.find(p => p.id === pointId)?.name}`);
-    speak('ส่งสำเร็จ');
-  }
-  
-  function addDeliveryNote(pointId: number, note: string) {
-    deliveryNotes[pointId] = note;
-  }
+  // Weather
+  function getWeatherIcon(): string { switch (weather.condition) { case 'sunny': return '☀️'; case 'cloudy': return '☁️'; case 'rainy': return '🌧️'; default: return '🌤️'; } }
 
-  // ==================== STATISTICS ====================
-  
-  function updateStatistics() {
-    totalDeliveriesToday = deliveryPoints.length + getSuccessCount();
-    if (navigationStartTime) {
-      elapsedTime = Date.now() - navigationStartTime.getTime();
-    }
-    if (completedDeliveries > 0) {
-      averageDeliveryTime = elapsedTime / completedDeliveries;
-    }
-  }
-  
-  function getCompletionRate(): number {
-    const total = getSuccessCount() + getRemainingPointsCount();
-    if (total === 0) return 0;
-    return Math.round((getSuccessCount() / total) * 100);
-  }
+  // Battery
+  async function updateBatteryStatus() { if (typeof navigator !== 'undefined' && 'getBattery' in navigator) { try { const battery: any = await (navigator as any).getBattery(); batteryLevel = Math.round(battery.level * 100); isCharging = battery.charging; } catch (e) {} } }
+  function getBatteryColor(): string { if (batteryLevel > 50) return '#00ff88'; if (batteryLevel > 20) return '#ffa502'; return '#ff6b6b'; }
 
-  // ==================== WEATHER (MOCK) ====================
-  
-  function updateWeather() {
-    // Mock weather update
-    const conditions = ['sunny', 'cloudy', 'rainy'];
-    weather = {
-      temp: 28 + Math.floor(Math.random() * 8),
-      condition: conditions[Math.floor(Math.random() * conditions.length)],
-      humidity: 60 + Math.floor(Math.random() * 30)
-    };
-  }
-  
-  function getWeatherIcon(): string {
-    switch (weather.condition) {
-      case 'sunny': return '☀️';
-      case 'cloudy': return '☁️';
-      case 'rainy': return '🌧️';
-      default: return '🌤️';
-    }
-  }
+  // Export
+  function exportRouteData() { const data = { driver: driverInfo, route: optimizedRoute, points: deliveryPoints, statistics: { totalPoints: totalDeliveriesToday, completed: completedDeliveries, totalDistance: optimizedRoute?.total_distance, totalTime: optimizedRoute?.total_time }, exportedAt: new Date().toISOString() }; const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `route-export-${new Date().toISOString().split('T')[0]}.json`; a.click(); URL.revokeObjectURL(url); showNotification('ส่งออกข้อมูลสำเร็จ', 'success'); }
 
-  // ==================== BATTERY STATUS ====================
-  
-  async function updateBatteryStatus() {
-    if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
-      try {
-        const battery: any = await (navigator as any).getBattery();
-        batteryLevel = Math.round(battery.level * 100);
-        isCharging = battery.charging;
-      } catch (e) {
-        // Battery API not supported
-      }
-    }
-  }
-  
-  function getBatteryColor(): string {
-    if (batteryLevel > 50) return '#00ff88';
-    if (batteryLevel > 20) return '#ffa502';
-    return '#ff6b6b';
-  }
+  // Emergency
+  function emergencyStop() { if (confirm('ต้องการหยุดฉุกเฉินใช่หรือไม่?')) { stopNavigation(); addAlert('emergency', 'หยุดฉุกเฉิน!'); speak('หยุดฉุกเฉิน'); showNotification('หยุดฉุกเฉินแล้ว', 'error'); } }
 
-  // ==================== NIGHT MODE ====================
-  
-  function toggleNightMode() {
-    isNightMode = !isNightMode;
-    // Could change map tiles here for night mode
-    showNotification(isNightMode ? 'เปิดโหมดกลางคืน' : 'ปิดโหมดกลางคืน', 'success');
-  }
+  // Init
+  function initExtraFeatures() { updateTrafficStatus(); updateBatteryStatus(); setInterval(() => { updateTrafficStatus(); updateStatistics(); updateETA(); updateFuelEstimate(); }, 60000); setInterval(updateBatteryStatus, 300000); }
 
-  // ==================== EXPORT DATA ====================
-  
-  function exportRouteData() {
-    const data = {
-      driver: driverInfo,
-      route: optimizedRoute,
-      points: deliveryPoints,
-      statistics: {
-        totalPoints: totalDeliveriesToday,
-        completed: completedDeliveries,
-        totalDistance: optimizedRoute?.total_distance,
-        totalTime: optimizedRoute?.total_time
-      },
-      exportedAt: new Date().toISOString()
-    };
-    
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `route-export-${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    
-    showNotification('ส่งออกข้อมูลสำเร็จ', 'success');
-  }
+  function cancelAddForm() { showAddForm = false; if (clickMarker) clickMarker.remove(); newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 }; }
 
-  // ==================== SHARE LOCATION ====================
-  
-  function shareCurrentLocation() {
-    if (!currentLocation) {
-      showNotification('ยังไม่มีตำแหน่งปัจจุบัน', 'error');
-      return;
-    }
-    
-    const url = `https://www.google.com/maps?q=${currentLocation.lat},${currentLocation.lng}`;
-    
-    if (navigator.share) {
-      navigator.share({
-        title: 'ตำแหน่งปัจจุบัน',
-        text: `ตำแหน่งคนขับ: ${driverInfo.name}`,
-        url: url
-      });
-    } else {
-      navigator.clipboard.writeText(url);
-      showNotification('คัดลอกลิงก์แล้ว', 'success');
-    }
-  }
-
-  // ==================== EMERGENCY ====================
-  
-  function emergencyStop() {
-    if (confirm('ต้องการหยุดฉุกเฉินใช่หรือไม่?')) {
-      stopNavigation();
-      addAlert('emergency', 'หยุดฉุกเฉิน!');
-      speak('หยุดฉุกเฉิน');
-      showNotification('หยุดฉุกเฉินแล้ว', 'error');
-    }
-  }
-
-  // ==================== INIT EXTRA FEATURES ====================
-  
-  function initExtraFeatures() {
-    updateTrafficStatus();
-    updateWeather();
-    updateBatteryStatus();
-    
-    // Update every minute
-    setInterval(() => {
-      updateTrafficStatus();
-      updateStatistics();
-      updateETA();
-      updateFuelEstimate();
-    }, 60000);
-    
-    // Update battery every 5 minutes
-    setInterval(updateBatteryStatus, 300000);
-  }
-
-  // ==================== END NAVIGATION MODE ====================
-
-  function cancelAddForm() {
-    showAddForm = false;
-    if (clickMarker) clickMarker.remove();
-    newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
-  }
-
-  function getPriorityGradient(p: number) {
-    const colorMap: Record<number, { bg: string; glow: string }> = {
-      1: { bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%)', glow: '#ff6b6b' },
-      2: { bg: 'linear-gradient(135deg, #ffa502 0%, #ff7f00 100%)', glow: '#ffa502' },
-      3: { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', glow: '#667eea' },
-      4: { bg: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', glow: '#a855f7' },
-      5: { bg: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)', glow: '#6b7280' }
-    };
-    return colorMap[p] || colorMap[3];
-  }
-
-  function getPriorityLabel(p: number) {
-    const labels: Record<number, string> = {
-      1: 'ด่วนมาก',
-      2: 'ด่วน',
-      3: 'ปกติ',
-      4: 'ไม่เร่ง',
-      5: 'ยืดหยุ่น'
-    };
-    return labels[p] || 'ปกติ';
-  }
-
-  function showNotification(msg: string, type: 'success' | 'error' | 'warning') {
-    notification = { show: true, message: msg, type };
-    setTimeout(() => notification.show = false, 3500);
-  }
-
-  function focusOnPoint(lat: number, lng: number) {
-    if (map) {
-      map.flyTo([lat, lng], 16, { duration: 0.8 });
-    }
-  }
-
-
-	function updateMarkers() {
-  if (!L || !map) return;
-
-  // ลบ markers เก่าทั้งหมด
-  markers.forEach(m => {
-    try { map.removeLayer(m); } catch(e) {}
-  });
-  markers = [];
-
-  // วาด markers ใหม่
-  deliveryPoints.forEach((point, i) => {
-    const colors = getPriorityGradient(point.priority);
-    const marker = L.marker([point.lat, point.lng], {
-      icon: L.divIcon({
-        className: 'custom-marker',
-        html: `<div class="marker-pin" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};">
-          <span>${i + 1}</span>
-        </div>`,
-        iconSize: [44, 44],
-        iconAnchor: [22, 22]
-      })
-    }).addTo(map);
-
-    marker.bindPopup(`
-      <div class="custom-popup">
-        <div class="popup-header" style="background: ${colors.bg}">
-          <span class="popup-number">${i + 1}</span>
-          <span class="popup-priority">P${point.priority}</span>
-        </div>
-        <div class="popup-content">
-          <h4>${point.name}</h4>
-          <p>${point.address}</p>
-        </div>
-      </div>
-    `, { className: 'dark-popup' });
-
-    markers.push(marker);
-  });
-}
-
+  function getPriorityGradient(p: number) { const colorMap: Record<number, { bg: string; glow: string }> = { 1: { bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%)', glow: '#ff6b6b' }, 2: { bg: 'linear-gradient(135deg, #ffa502 0%, #ff7f00 100%)', glow: '#ffa502' }, 3: { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', glow: '#667eea' }, 4: { bg: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', glow: '#a855f7' }, 5: { bg: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)', glow: '#6b7280' } }; return colorMap[p] || colorMap[3]; }
+  function getPriorityLabel(p: number) { const labels: Record<number, string> = { 1: 'ด่วนมาก', 2: 'ด่วน', 3: 'ปกติ', 4: 'ไม่เร่ง', 5: 'ยืดหยุ่น' }; return labels[p] || 'ปกติ'; }
+  function showNotification(msg: string, type: 'success' | 'error' | 'warning') { notification = { show: true, message: msg, type }; setTimeout(() => notification.show = false, 3500); }
+  function focusOnPoint(lat: number, lng: number) { if (map) { map.flyTo([lat, lng], 16, { duration: 0.8 }); } }
 </script>
 
 <svelte:head>
@@ -2521,87 +1191,147 @@ function clearAllMarkersAndLayers() {
 
 <div class="app-container">
   <!-- Settings Panel -->
-  {#if showSettings}
+ {#if showSettings}
     <div class="settings-overlay" on:click={() => showSettings = false} on:keypress={() => {}} role="button" tabindex="-1">
-      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="settings-panel glass-card" on:click|stopPropagation role="dialog">
         <div class="settings-header">
           <h3>⚙️ ตั้งค่า</h3>
-          <!-- svelte-ignore a11y_consider_explicit_label -->
           <button class="close-btn" on:click={() => showSettings = false}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
         
         <div class="settings-content">
-          <div class="settings-section">
-            <h4>🚗 ข้อมูลคนขับ</h4>
-            <div class="driver-card">
-              <div class="driver-avatar">{driverInfo.avatar}</div>
-              <div class="driver-details">
-                <div class="driver-name">{driverInfo.name}</div>
-                <div class="driver-id">{driverInfo.id} • {driverInfo.role === 'admin' ? '👑 Admin' : '🚗 Driver'}</div>
-                <div class="driver-vehicle">{driverInfo.vehicle} • {driverInfo.plateNumber}</div>
-                <div class="driver-phone">📞 {driverInfo.phone}</div>
+          <!-- Two Column Layout -->
+          <div class="settings-grid">
+            <!-- Left Column -->
+            <div class="settings-column">
+              <div class="settings-section">
+                <h4>🚗 ข้อมูลคนขับ</h4>
+                <div class="driver-card">
+                  <div class="driver-avatar">{driverInfo.avatar}</div>
+                  <div class="driver-details">
+                    <div class="driver-name">{driverInfo.name}</div>
+                    <div class="driver-id">{driverInfo.id} • {driverInfo.role === 'admin' ? '👑 Admin' : '🚗 Driver'}</div>
+                    <div class="driver-vehicle">{driverInfo.vehicle} • {driverInfo.plateNumber}</div>
+                    <div class="driver-phone">📞 {driverInfo.phone}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section">
+                <h4>{getVehicleIcon()} ประเภทรถ</h4>
+                <div class="vehicle-type-selector">
+                  <button 
+                    class="vehicle-type-btn" 
+                    class:active={vehicleType === 'fuel'}
+                    on:click={() => { vehicleType = 'fuel'; saveVehicleSettings(); }}
+                  >
+                    <span class="vehicle-icon">🚗</span>
+                    <span class="vehicle-label">รถน้ำมัน</span>
+                  </button>
+                  <button 
+                    class="vehicle-type-btn" 
+                    class:active={vehicleType === 'ev'}
+                    on:click={() => { vehicleType = 'ev'; saveVehicleSettings(); }}
+                  >
+                    <span class="vehicle-icon">🚙</span>
+                    <span class="vehicle-label">รถไฟฟ้า (EV)</span>
+                  </button>
+                </div>
+                
+                {#if vehicleType === 'fuel'}
+                  <div class="vehicle-info-card fuel">
+                    <div class="info-row">
+                      <span class="info-icon">⛽</span>
+                      <span class="info-text">ราคาน้ำมัน: {FUEL_PRICE_PER_LITER} ฿/ลิตร</span>
+                    </div>
+                    <div class="info-row">
+                      <span class="info-icon">📊</span>
+                      <span class="info-text">อัตราสิ้นเปลือง: {KM_PER_LITER} กม./ลิตร</span>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="vehicle-info-card ev">
+                    <div class="info-row">
+                      <span class="info-icon">🔌</span>
+                      <span class="info-text">ค่าไฟ: {ELECTRICITY_PRICE_PER_KWH} ฿/kWh</span>
+                    </div>
+                    <div class="info-row">
+                      <span class="info-icon">📊</span>
+                      <span class="info-text">กินไฟ: {KWH_PER_100KM} kWh/100กม.</span>
+                    </div>
+                    <div class="ev-battery-setting">
+                      <label>🔋 แบตเตอรี่ปัจจุบัน: {evCurrentCharge}%</label>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        bind:value={evCurrentCharge}
+                        on:change={saveVehicleSettings}
+                        class="ev-slider"
+                      />
+                      <div class="ev-range-info">
+                        <span>ระยะทางเหลือ: <strong style="color: {getEVBatteryColor()}">{evRemainingRange.toFixed(0)} กม.</strong></span>
+                      </div>
+                    </div>
+                  </div>
+                {/if}
               </div>
             </div>
-          </div>
-          
-          <div class="settings-section">
-            <h4>🔊 เสียง</h4>
-            <label class="toggle-setting">
-              <span>เสียงนำทาง</span>
-              <!-- svelte-ignore a11y_consider_explicit_label -->
-              <button class="toggle-btn" class:active={voiceEnabled} on:click={toggleVoice}>
-                <div class="toggle-knob"></div>
-              </button>
-            </label>
+
+            <!-- Right Column -->
+            <div class="settings-column">
+              <div class="settings-section">
+                <h4>🔊 เสียง</h4>
+                <label class="toggle-setting">
+                  <span>เสียงนำทาง</span>
+                  <button class="toggle-btn" class:active={voiceEnabled} on:click={toggleVoice}><div class="toggle-knob"></div></button>
+                </label>
+              </div>
+
+              <div class="settings-section">
+                <h4>🛒 งานลูกค้า</h4>
+                <label class="toggle-setting">
+                  <span>แสดงหมุดลูกค้าบนแผนที่</span>
+                  <button class="toggle-btn" class:active={showCustomerOrders} on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}><div class="toggle-knob"></div></button>
+                </label>
+                <label class="toggle-setting">
+                  <span>รวมลูกค้าในเส้นทาง</span>
+                  <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}><div class="toggle-knob"></div></button>
+                </label>
+              </div>
+                <div class="settings-section">
+                  <h4>⚡ สถานีชาร์จ EV</h4>
+                  <label class="toggle-setting">
+                    <span>แสดงสถานีชาร์จบนแผนที่</span>
+                    <button class="toggle-btn" class:active={showChargingStations} on:click={toggleChargingStations}>
+                      <div class="toggle-knob"></div>
+                    </button>
+                  </label>
+                  <button class="btn btn-ev-search" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
+                    {#if isLoadingStations}
+                      <div class="spinner-small"></div>
+                      <span>กำลังค้นหา...</span>
+                    {:else}
+                      <span>🔍</span>
+                      <span>ค้นหาสถานีชาร์จใกล้เคียง</span>
+                    {/if}
+                  </button>
+                </div>
+            </div>
           </div>
 
-          <div class="settings-section">
-            <h4>🛒 งานลูกค้า</h4>
-            <label class="toggle-setting">
-              <span>แสดงหมุดลูกค้าบนแผนที่</span>
-              <!-- svelte-ignore a11y_consider_explicit_label -->
-              <button class="toggle-btn" class:active={showCustomerOrders} on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}>
-                <div class="toggle-knob"></div>
-              </button>
-            </label>
-            <label class="toggle-setting">
-              <span>รวมลูกค้าในเส้นทาง</span>
-              <!-- svelte-ignore a11y_consider_explicit_label -->
-              <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}>
-                <div class="toggle-knob"></div>
-              </button>
-            </label>
-          </div>
-          
-          <div class="settings-section">
-            <h4>📊 ข้อมูลเพิ่มเติม</h4>
-            <div class="info-grid">
-              <div class="info-item">
-                <span class="info-label">ราคาน้ำมัน</span>
-                <span class="info-value">{FUEL_PRICE_PER_LITER} ฿/ลิตร</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">อัตราสิ้นเปลือง</span>
-                <span class="info-value">{KM_PER_LITER} กม./ลิตร</span>
-              </div>
-            </div>
-          </div>
-                
+          <!-- Full Width Actions -->
           <div class="settings-actions">
             <button class="btn btn-secondary" on:click={exportRouteData}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               ส่งออกข้อมูล
             </button>
             <button class="btn btn-danger" on:click={logout}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
-              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
               ออกจากระบบ
             </button>
           </div>
@@ -2617,7 +1347,6 @@ function clearAllMarkersAndLayers() {
         <h3>🔔 การแจ้งเตือน</h3>
         <div class="alerts-actions">
           <button class="text-btn" on:click={clearAlerts}>ล้างทั้งหมด</button>
-          <!-- svelte-ignore a11y_consider_explicit_label -->
           <button class="close-btn" on:click={() => showAlerts = false}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
@@ -2630,11 +1359,7 @@ function clearAllMarkersAndLayers() {
           {#each alerts as alert}
             <div class="alert-item" class:alert-emergency={alert.type === 'emergency'}>
               <div class="alert-icon">
-                {#if alert.type === 'delivery'}📦
-                {:else if alert.type === 'navigation'}🧭
-                {:else if alert.type === 'break'}☕
-                {:else if alert.type === 'emergency'}🚨
-                {:else}📢{/if}
+                {#if alert.type === 'delivery'}📦{:else if alert.type === 'navigation'}🧭{:else if alert.type === 'break'}☕{:else if alert.type === 'emergency'}🚨{:else}📢{/if}
               </div>
               <div class="alert-content">
                 <div class="alert-message">{alert.message}</div>
@@ -2653,14 +1378,9 @@ function clearAllMarkersAndLayers() {
     <div class="toast" class:toast-success={notification.type === 'success'} class:toast-error={notification.type === 'error'} class:toast-warning={notification.type === 'warning'}>
       <div class="toast-icon">
         {#if notification.type === 'success'}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M20 6L9 17l-5-5"/>
-          </svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>
         {:else}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M15 9l-6 6M9 9l6 6"/>
-          </svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
         {/if}
       </div>
       <span>{notification.message}</span>
@@ -2670,204 +1390,122 @@ function clearAllMarkersAndLayers() {
   <!-- Navigation Overlay -->
   {#if isNavigating}
     <div class="nav-overlay">
-      <!-- Top Status Bar -->
       <div class="nav-status-bar">
-        <div class="status-item">
-          <span class="status-icon">{getWeatherIcon()}</span>
-          <span>{weather.temp}°C</span>
-        </div>
-        <div class="status-item" style="color: {getTrafficColor()}">
-          <span class="status-icon">🚦</span>
-          <span>{getTrafficLabel()}</span>
-        </div>
-        <div class="status-item" style="color: {getBatteryColor()}">
-          <span class="status-icon">{isCharging ? '⚡' : '🔋'}</span>
-          <span>{batteryLevel}%</span>
-        </div>
-        <div class="status-item" style="color: {getGPSStatusColor()}">
-          <span class="status-icon">{getGPSIcon()}</span>
-          <span>{getGPSStatusText()}</span>
-        </div>
+        <div class="status-item"><span class="status-icon">{getWeatherIcon()}</span><span>{weather.temp}°C</span></div>
+        <div class="status-item" style="color: {getTrafficColor()}"><span class="status-icon">🚦</span><span>{getTrafficLabel()}</span></div>
+        <div class="status-item" style="color: {getBatteryColor()}"><span class="status-icon">{isCharging ? '⚡' : '🔋'}</span><span>{batteryLevel}%</span></div>
+        <div class="status-item" style="color: {getGPSStatusColor()}"><span class="status-icon">{getGPSIcon()}</span><span>{getGPSStatusText()}</span></div>
       </div>
 
       <div class="nav-top-bar glass-card">
         <div class="nav-target-info">
           <div class="nav-target-label">เป้าหมายถัดไป</div>
           <div class="nav-target-name">
-            {#if currentTargetIndex < optimizedRoute?.optimized_order?.length}
-              {optimizedRoute.optimized_order[currentTargetIndex].name}
-            {:else}
-              ถึงจุดหมายแล้ว
-            {/if}
+            {#if currentTargetIndex < optimizedRoute?.optimized_order?.length}{optimizedRoute.optimized_order[currentTargetIndex].name}{:else}ถึงจุดหมายแล้ว{/if}
           </div>
-          <div class="nav-eta">
-            ถึงเวลา: <strong>{formatETA(estimatedArrivalTime)}</strong>
-          </div>
+          <div class="nav-eta">ถึงเวลา: <strong>{formatETA(estimatedArrivalTime)}</strong></div>
         </div>
-        <div class="nav-distance-badge">
-          <span class="nav-distance-value">{formatDistance(distanceToNextPoint)}</span>
-        </div>
+        <div class="nav-distance-badge"><span class="nav-distance-value">{formatDistance(distanceToNextPoint)}</span></div>
       </div>
 
-      <!-- Speed Display -->
       <div class="speed-display glass-card">
         <div class="speed-value">{Math.round(currentSpeed)}</div>
         <div class="speed-unit">km/h</div>
         <div class="speed-max">สูงสุด: {Math.round(maxSpeed)} km/h</div>
       </div>
 
-      <!-- Today Stats Panel -->
+      {#if vehicleType === 'ev'}
+          <div class="ev-status-display glass-card">
+            <div class="ev-battery-visual">
+              <div class="ev-battery-fill" style="width: {evBatteryAfterTrip}%; background: {getEVBatteryColor()}"></div>
+            </div>
+            <div class="ev-info">
+              <span class="ev-percent" style="color: {getEVBatteryColor()}">{evBatteryAfterTrip.toFixed(0)}%</span>
+              <span class="ev-label">หลังจบเส้นทาง</span>
+            </div>
+            {#if !isEVRangeSufficient()}
+              <div class="ev-warning">⚠️ แบตอาจไม่พอ!</div>
+            {/if}
+          </div>
+        {/if}
+
       <div class="today-stats glass-card">
-        <div class="today-stat">
-          <span class="stat-icon">✅</span>
-          <span class="stat-value">{getSuccessCount()}</span>
-          <span class="stat-label">ส่งแล้ว</span>
-        </div>
-        <div class="today-stat">
-          <span class="stat-icon">📦</span>
-          <span class="stat-value">{getRemainingPointsCount()}</span>
-          <span class="stat-label">รอส่ง</span>
-        </div>
+        <div class="today-stat"><span class="stat-icon">✅</span><span class="stat-value">{getSuccessCount()}</span><span class="stat-label">ส่งแล้ว</span></div>
+        <div class="today-stat"><span class="stat-icon">📦</span><span class="stat-value">{getRemainingPointsCount()}</span><span class="stat-label">รอส่ง</span></div>
       </div>
 
       <div class="nav-bottom-panel glass-card" class:hide-on-history={showHistory}>
         <div class="nav-stats">
           <div class="nav-stat">
-            <div class="nav-stat-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
-              </svg>
-            </div>
-            <div class="nav-stat-content">
-              <div class="nav-stat-value">{formatDistance(remainingDistance)}</div>
-              <div class="nav-stat-label">ระยะทางเหลือ</div>
-            </div>
+            <div class="nav-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg></div>
+            <div class="nav-stat-content"><div class="nav-stat-value">{formatDistance(remainingDistance)}</div><div class="nav-stat-label">ระยะทางเหลือ</div></div>
           </div>
           <div class="nav-stat">
-            <div class="nav-stat-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <path d="M12 6v6l4 2"/>
-              </svg>
-            </div>
-            <div class="nav-stat-content">
-              <div class="nav-stat-value">{formatTime(remainingTime)}</div>
-              <div class="nav-stat-label">เวลาเหลือ</div>
-            </div>
+            <div class="nav-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+            <div class="nav-stat-content"><div class="nav-stat-value">{formatTime(remainingTime)}</div><div class="nav-stat-label">เวลาเหลือ</div></div>
           </div>
           <div class="nav-stat">
-            <div class="nav-stat-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
-            </div>
-            <div class="nav-stat-content">
-              <div class="nav-stat-value">{getSuccessCount()}/{getSuccessCount() + getRemainingPointsCount()}</div>
-              <div class="nav-stat-label">เสร็จแล้ว</div>
-            </div>
+            <div class="nav-stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></div>
+            <div class="nav-stat-content"><div class="nav-stat-value">{getSuccessCount()}/{getSuccessCount() + getRemainingPointsCount()}</div><div class="nav-stat-label">เสร็จแล้ว</div></div>
           </div>
-          <div class="nav-stat">
-            <div class="nav-stat-icon">⛽</div>
-            <div class="nav-stat-content">
-              <div class="nav-stat-value">฿{Math.round(fuelCostEstimate)}</div>
-              <div class="nav-stat-label">ค่าน้ำมัน</div>
+          <div class="nav-stat" class:ev-stat={vehicleType === 'ev'}>
+              <div class="nav-stat-icon">{getCostIcon()}</div>
+              <div class="nav-stat-content">
+                <div class="nav-stat-value">฿{Math.round(getCostEstimate())}</div>
+                <div class="nav-stat-label">{getCostLabel()}</div>
+              </div>
             </div>
-          </div>
         </div>
 
         <div class="nav-progress">
           <div class="nav-progress-bar">
-            <div 
-              class="nav-progress-fill" 
-              style="width: {(getSuccessCount() + getRemainingPointsCount()) > 0 ? (getSuccessCount() / (getSuccessCount() + getRemainingPointsCount())) * 100 : 0}%"
-            ></div>
+            <div class="nav-progress-fill" style="width: {(getSuccessCount() + getRemainingPointsCount()) > 0 ? (getSuccessCount() / (getSuccessCount() + getRemainingPointsCount())) * 100 : 0}%"></div>
           </div>
         </div>
 
         <div class="nav-actions">
           <button class="nav-btn nav-btn-success" on:click={markDeliverySuccess} disabled={isProcessingDelivery || getRemainingPointsCount() === 0}>
-            {#if isProcessingDelivery}
-              <div class="spinner-small"></div>
-            {:else}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M20 6L9 17l-5-5"/>
-              </svg>
-            {/if}
+            {#if isProcessingDelivery}<div class="spinner-small"></div>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>{/if}
             ส่งสำเร็จ
           </button>
           <button class="nav-btn nav-btn-skip" on:click={skipToNextPoint} disabled={isProcessingDelivery || getRemainingPointsCount() === 0}>
-            {#if isProcessingDelivery}
-              <div class="spinner-small"></div>
-            {:else}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M13 5l7 7-7 7M5 5l7 7-7 7"/>
-              </svg>
-            {/if}
+            {#if isProcessingDelivery}<div class="spinner-small"></div>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>{/if}
             ข้าม
           </button>
           <button class="nav-btn nav-btn-history" on:click={() => showHistory = !showHistory}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M12 6v6l4 2"/>
-            </svg>
-            {#if deliveryHistory.length > 0}
-              <span class="history-badge">{deliveryHistory.length}</span>
-            {/if}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            {#if deliveryHistory.length > 0}<span class="history-badge">{deliveryHistory.length}</span>{/if}
           </button>
           <button class="nav-btn nav-btn-voice" class:active={voiceEnabled} on:click={toggleVoice}>
-            {#if voiceEnabled}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
-            {:else}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6"/></svg>
-            {/if}
+            {#if voiceEnabled}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6"/></svg>{/if}
           </button>
           <button class="nav-btn nav-btn-center" on:click={centerOnCurrentLocation}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M12 2v4m0 12v4m10-10h-4M6 12H2"/>
-            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2"/></svg>
           </button>
           <button class="nav-btn nav-btn-stop" on:click={stopNavigation}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="6" y="6" width="12" height="12" rx="2"/>
-            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
             หยุด
           </button>
         </div>
 
-        {#if isOnBreak}
-          <div class="break-indicator">
-            ☕ กำลังพักเบรค ({formatBreakTime()})
-          </div>
-        {/if}
+        {#if isOnBreak}<div class="break-indicator">☕ กำลังพักเบรค ({formatBreakTime()})</div>{/if}
       </div>
 
       {#if showHistory}
         <div class="history-panel glass-card">
           <div class="history-header">
             <h4>📋 ประวัติการส่ง</h4>
-            <div class="history-stats">
-              <span class="history-stat success">✅ {getSuccessCount()}</span>
-              <span class="history-stat skipped">⏭️ {getSkippedCount()}</span>
-            </div>
+            <div class="history-stats"><span class="history-stat success">✅ {getSuccessCount()}</span><span class="history-stat skipped">⏭️ {getSkippedCount()}</span></div>
             <button class="close-btn" on:click={() => showHistory = false}>×</button>
           </div>
           <div class="history-list">
-            {#if deliveryHistory.length === 0}
-              <div class="history-empty">ยังไม่มีประวัติการส่ง</div>
+            {#if deliveryHistory.length === 0}<div class="history-empty">ยังไม่มีประวัติการส่ง</div>
             {:else}
               {#each [...deliveryHistory].reverse() as record}
                 <div class="history-item" class:success={record.status === 'success'} class:skipped={record.status === 'skipped'}>
-                  <div class="history-icon">
-                    {record.status === 'success' ? '✅' : '⏭️'}
-                  </div>
-                  <div class="history-info">
-                    <div class="history-name">{record.pointName}</div>
-                    <div class="history-address">{record.address}</div>
-                  </div>
-                  <div class="history-time">
-                    {formatHistoryTime(record.timestamp)}
-                  </div>
+                  <div class="history-icon">{record.status === 'success' ? '✅' : '⏭️'}</div>
+                  <div class="history-info"><div class="history-name">{record.pointName}</div><div class="history-address">{record.address}</div></div>
+                  <div class="history-time">{formatHistoryTime(record.timestamp)}</div>
                 </div>
               {/each}
             {/if}
@@ -2875,9 +1513,7 @@ function clearAllMarkersAndLayers() {
         </div>
       {/if}
 
-      <button class="emergency-btn" on:click={emergencyStop}>
-        🚨 ฉุกเฉิน
-      </button>
+      <button class="emergency-btn" on:click={emergencyStop}>🚨 ฉุกเฉิน</button>
     </div>
   {/if}
 
@@ -2886,27 +1522,14 @@ function clearAllMarkersAndLayers() {
     <aside class="sidebar">
       <div class="sidebar-header">
         <div class="logo">
-          <div class="logo-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
-            </svg>
-          </div>
-          <div class="logo-text">
-            <h1>Route Optimization</h1>
-            <span>ระบบคำนวณระยะทางสุดเจ๋ง</span>
-          </div>
+          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg></div>
+          <div class="logo-text"><h1>Route Optimization</h1><span>ระบบคำนวณระยะทางสุดเจ๋ง</span></div>
         </div>
         <div class="header-actions">
-          <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">
-            🔔
-            {#if alerts.length > 0}
-              <span class="badge">{alerts.length}</span>
-            {/if}
-          </button>
+          <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">🔔{#if alerts.length > 0}<span class="badge">{alerts.length}</span>{/if}</button>
           <button class="icon-btn" on:click={() => showSettings = true} title="ตั้งค่า">⚙️</button>
         </div>
       </div>
-      
       {#if isMultiSelectMode}
         <div class="multi-select-toolbar">
           <span>{selectedPoints.length} รายการที่เลือก</span>
@@ -2919,206 +1542,91 @@ function clearAllMarkersAndLayers() {
       {/if}
 
       <div class="action-buttons">
-        <button 
-          class="btn btn-primary"
-          on:click={optimizeRoute}
-          disabled={isOptimizing || allDeliveryPoints.length < 1}
-        >
-          {#if isOptimizing}
-            <div class="spinner"></div>
-            <span>กำลังคำนวณ...</span>
-          {:else}
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
-            </svg>
-            <span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>
-          {/if}
+        <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1}>
+          {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>
+          {:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>{/if}
         </button>
-
         {#if optimizedRoute}
-          <button class="btn btn-navigate" on:click={startNavigation}>
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
-            </svg>
-            <span>เริ่มนำทาง</span>
-          </button>
-          <button class="btn btn-ghost" on:click={clearRoute}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M6 18L18 6M6 6l12 12"/>
-            </svg>
-            <span>ล้างเส้นทาง</span>
-          </button>
+          <button class="btn btn-navigate" on:click={startNavigation}><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
+          <button class="btn btn-ghost" on:click={clearRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg><span>ล้างเส้นทาง</span></button>
         {/if}
-
         {#if !optimizedRoute}
-          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 5v14M5 12h14"/>
-            </svg>
-            <span>เพิ่มจุดส่ง</span>
-          </button>
-
-          <button class="btn btn-ghost" on:click={toggleMultiSelect}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="3" width="7" height="7"/>
-              <rect x="14" y="3" width="7" height="7"/>
-              <rect x="14" y="14" width="7" height="7"/>
-              <rect x="3" y="14" width="7" height="7"/>
-            </svg>
-            <span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span>
-          </button>
+          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg><span>เพิ่มจุดส่ง</span></button>
+          <button class="btn btn-ghost" on:click={toggleMultiSelect}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span></button>
         {/if}
       </div>
 
       {#if showAddForm && !optimizedRoute}
         <div class="add-form-overlay">
           <div class="add-form glass-card">
-            <div class="form-header">
-              <h3>เพิ่มจุดส่งใหม่</h3>
-              <button class="close-btn" on:click={cancelAddForm}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M6 18L18 6M6 6l12 12"/>
-                </svg>
-              </button>
-            </div>
-            <p class="form-hint">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/>
-              </svg>
-              คลิกบนแผนที่เพื่อเลือกตำแหน่ง
-            </p>
-
+            <div class="form-header"><h3>เพิ่มจุดส่งใหม่</h3><button class="close-btn" on:click={cancelAddForm}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg></button></div>
+            <p class="form-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>คลิกบนแผนที่เพื่อเลือกตำแหน่ง</p>
             <form on:submit|preventDefault={addDeliveryPoint}>
-              <div class="form-group">
-                <label>ชื่อสถานที่</label>
-                <input type="text" bind:value={newPoint.name} placeholder="เช่น บ้านลูกค้า A" required />
-              </div>
-
-              <div class="form-group">
-                <label>ที่อยู่</label>
-                <textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea>
-              </div>
-
+              <div class="form-group"><label>ชื่อสถานที่</label><input type="text" bind:value={newPoint.name} placeholder="เช่น บ้านลูกค้า A" required /></div>
+              <div class="form-group"><label>ที่อยู่</label><textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea></div>
               <div class="form-group coords-group">
-                <div class="coord-input">
-                  <label>Latitude</label>
-                  <input type="text" value={newPoint.lat} readonly />
-                </div>
-                <div class="coord-input">
-                  <label>Longitude</label>
-                  <input type="text" value={newPoint.lng} readonly />
-                </div>
+                <div class="coord-input"><label>Latitude</label><input type="text" value={newPoint.lat} readonly /></div>
+                <div class="coord-input"><label>Longitude</label><input type="text" value={newPoint.lng} readonly /></div>
               </div>
-
               <div class="form-group">
                 <label>ระดับความสำคัญ</label>
                 <div class="priority-selector">
                   {#each [1,2,3,4,5] as p}
                     {@const colors = getPriorityGradient(p)}
-                    <button 
-                      type="button"
-                      class="priority-btn"
-                      class:active={newPoint.priority === p}
-                      style="--btn-bg: {colors.bg}; --btn-glow: {colors.glow}"
-                      on:click={() => newPoint.priority = p}
-                    >
-                      <span class="priority-num">{p}</span>
-                      <span class="priority-label">{getPriorityLabel(p)}</span>
+                    <button type="button" class="priority-btn" class:active={newPoint.priority === p} style="--btn-bg: {colors.bg}; --btn-glow: {colors.glow}" on:click={() => newPoint.priority = p}>
+                      <span class="priority-num">{p}</span><span class="priority-label">{getPriorityLabel(p)}</span>
                     </button>
                   {/each}
                 </div>
               </div>
-
               <div class="form-actions">
-                <button type="submit" class="btn btn-primary">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M5 13l4 4L19 7"/>
-                  </svg>
-                  บันทึก
-                </button>
+                <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>บันทึก</button>
                 <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
               </div>
             </form>
           </div>
         </div>
       {/if}
-
+        <div class="vehicle-quick-toggle">
+            <button 
+              class="vehicle-toggle-btn" 
+              class:fuel={vehicleType === 'fuel'}
+              class:ev={vehicleType === 'ev'}
+              on:click={toggleVehicleType}
+            >
+              <span class="toggle-icon">{getVehicleIcon()}</span>
+              <span class="toggle-text">{vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}</span>
+              {#if vehicleType === 'ev'}
+                <span class="ev-charge-badge" style="background: {getEVBatteryColor()}">{evCurrentCharge}%</span>
+              {/if}
+            </button>
+          </div>
       <div class="tabs">
-        <button class="tab" class:active={activeTab === 'points'} on:click={() => activeTab = 'points'}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-            <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-          </svg>
-          จุดส่ง ({deliveryPoints.length})
-        </button>
-        <button class="tab" class:active={activeTab === 'customers'} on:click={() => activeTab = 'customers'}>
-          🛒 ลูกค้า ({customerOrders.length})
-        </button>
-        <button class="tab" class:active={activeTab === 'route'} on:click={() => activeTab = 'route'} disabled={!optimizedRoute}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
-          </svg>
-          เส้นทาง
-        </button>
+        <button class="tab" class:active={activeTab === 'points'} on:click={() => activeTab = 'points'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดส่ง ({deliveryPoints.length})</button>
+        <button class="tab" class:active={activeTab === 'customers'} on:click={() => activeTab = 'customers'}>🛒 ลูกค้า ({customerOrders.length})</button>
+        <button class="tab" class:active={activeTab === 'route'} on:click={() => activeTab = 'route'} disabled={!optimizedRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>เส้นทาง</button>
       </div>
 
       <div class="content-area">
         {#if activeTab === 'points'}
           <div class="points-list">
             {#if filteredPoints.length === 0}
-              <div class="empty-state">
-                <div class="empty-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
-                    <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-                    <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-                  </svg>
-                </div>
-                <h4>ยังไม่มีจุดส่ง</h4>
-                <p>คลิกบนแผนที่หรือกดปุ่ม "เพิ่มจุดส่ง"</p>
-              </div>
+              <div class="empty-state"><div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg></div><h4>ยังไม่มีจุดส่ง</h4><p>คลิกบนแผนที่หรือกดปุ่ม "เพิ่มจุดส่ง"</p></div>
             {:else}
               {#each filteredPoints as point, i}
                 {@const colors = getPriorityGradient(point.priority)}
-                <div 
-                  id="point-{point.id}"
-                  class="point-card"
-                  class:active={activePointId === point.id}
-                  class:selected={selectedPoints.includes(point.id)}
-                  on:click={() => {
-                    if (isMultiSelectMode) {
-                      togglePointSelection(point.id);
-                    } else {
-                      activePointId = point.id;
-                      focusOnPoint(point.lat, point.lng);
-                    }
-                  }}
-                  on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)}
-                  role="button"
-                  tabindex="0"
-                >
-                  {#if isMultiSelectMode}
-                    <div class="checkbox" class:checked={selectedPoints.includes(point.id)}>
-                      {#if selectedPoints.includes(point.id)}✓{/if}
-                    </div>
-                  {/if}
+                <div id="point-{point.id}" class="point-card" class:active={activePointId === point.id} class:selected={selectedPoints.includes(point.id)} on:click={() => { if (isMultiSelectMode) { togglePointSelection(point.id); } else { activePointId = point.id; focusOnPoint(point.lat, point.lng); } }} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
+                  {#if isMultiSelectMode}<div class="checkbox" class:checked={selectedPoints.includes(point.id)}>{#if selectedPoints.includes(point.id)}✓{/if}</div>{/if}
                   <div class="point-number" style="background: {colors.bg}; box-shadow: 0 0 15px {colors.glow}40;">{i + 1}</div>
                   <div class="point-info">
                     <h4 class="point-name">{point.name}</h4>
                     <p class="point-address">{point.address}</p>
                     <div class="point-meta">
                       <span class="priority-tag" style="background: {colors.bg}">P{point.priority} · {getPriorityLabel(point.priority)}</span>
-                      {#if currentLocation}
-                        <span class="distance-tag">
-                          📍 {formatDistance(getDistance(currentLocation.lat, currentLocation.lng, point.lat, point.lng))}
-                        </span>
-                      {/if}
+                      {#if currentLocation}<span class="distance-tag">📍 {formatDistance(getDistance(currentLocation.lat, currentLocation.lng, point.lat, point.lng))}</span>{/if}
                     </div>
                   </div>
-                  <button class="delete-btn" on:click|stopPropagation={() => deletePoint(point.id, point.name)} title="ลบจุดนี้">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                    </svg>
-                  </button>
+                  <button class="delete-btn" on:click|stopPropagation={() => deletePoint(point.id, point.name)} title="ลบจุดนี้"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                 </div>
               {/each}
             {/if}
@@ -3127,138 +1635,82 @@ function clearAllMarkersAndLayers() {
           <div class="customer-orders-section">
             <div class="section-header">
               <h3>🛒 งานจากลูกค้า ({customerOrders.length})</h3>
-              <button class="toggle-btn-small" on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}>
-                {showCustomerOrders ? '👁️' : '🙈'}
-              </button>
+              <button class="toggle-btn-small" on:click={() => { showCustomerOrders = !showCustomerOrders; displayCustomerMarkers(); }}>{showCustomerOrders ? '👁️' : '🙈'}</button>
             </div>
-            
             {#if customerOrders.length === 0}
-              <div class="empty-state">
-                <div class="empty-icon">🛒</div>
-                <h4>ยังไม่มีงานจากลูกค้า</h4>
-                <p>รอลูกค้าส่งคำสั่งซื้อ</p>
-              </div>
+              <div class="empty-state"><div class="empty-icon">🛒</div><h4>ยังไม่มีงานจากลูกค้า</h4><p>รอลูกค้าส่งคำสั่งซื้อ</p></div>
             {:else}
               <div class="customer-orders-list">
                 {#each customerOrders as order}
-                    <div class="customer-order-card" class:accepted={order.status === 'accepted'}>
-                      <!-- Customer Info -->
-                      <div class="order-customer">
-                        <span class="avatar">{order.customer_avatar || '👤'}</span>
-                        <div class="info">
-                          <div class="name">{order.customer_name}</div>
-                          <div class="phone">📞 {order.customer_phone || '-'}</div>
-                        </div>
-                        <span class="order-status-badge" class:pending={order.status === 'pending'} class:accepted={order.status === 'accepted'}>
-                          {order.status === 'pending' ? '⏳ รอรับ' : order.status === 'accepted' ? '✅ รับแล้ว' : '🎉 เสร็จ'}
-                        </span>
-                      </div>
-                      
-                      <!-- Address -->
-                      <div class="order-address">{order.address}</div>
-                      
-                      <!-- Notes -->
-                      {#if order.notes}
-                        <div class="order-notes">📝 {order.notes}</div>
-                      {/if}
-                      
-                      <!-- 🆕 PAYMENT INFO SECTION -->
-                      <div class="order-payment">
-                        <div class="payment-amount">
-                          <span class="amount-label">ยอดเงิน</span>
-                          <span class="amount-value">฿{(order.total_amount || 50).toLocaleString()}</span>
-                        </div>
-                        <div class="payment-details">
-                          <span class="payment-method">{getPaymentMethodText(order.payment_method || 'cash')}</span>
-                          <span class="payment-status" style="color: {getPaymentStatusColor(order.payment_status || 'pending')}">
-                            {getPaymentStatusText(order.payment_status || 'pending')}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      <!-- Actions -->
-                      <div class="order-actions">
-                        {#if order.status === 'pending'}
-                          <button class="btn-accept" on:click={() => acceptCustomerOrder(order.id)}>
-                            ✅ รับงาน
-                          </button>
-                        {:else if order.status === 'accepted'}
-                          <!-- 🆕 CASH PAYMENT BUTTON -->
-                          {#if order.payment_method === 'cash' && (order.payment_status === 'pending' || !order.payment_status)}
-                            <button class="btn-cash" on:click={() => confirmCashPayment(order.id)}>
-                              💵 รับเงินแล้ว
-                            </button>
-                          {/if}
-                          <button class="btn-complete" on:click={() => completeCustomerOrder(order.id)}>
-                            🎉 เสร็จงาน
-                          </button>
-                        {:else}
-                          <span class="completed-text">✅ เสร็จแล้ว</span>
-                        {/if}
-                        <button class="btn-locate" on:click={() => focusOnPoint(order.lat, order.lng)}>
-                          📍 ดูบนแผนที่
-                        </button>
+                  <div class="customer-order-card" class:accepted={order.status === 'accepted'}>
+                    <div class="order-customer">
+                      <span class="avatar">{order.customer_avatar || '👤'}</span>
+                      <div class="info"><div class="name">{order.customer_name}</div><div class="phone">📞 {order.customer_phone || '-'}</div></div>
+                      <span class="order-status-badge" class:pending={order.status === 'pending'} class:accepted={order.status === 'accepted'}>{order.status === 'pending' ? '⏳ รอรับ' : order.status === 'accepted' ? '✅ รับแล้ว' : '🎉 เสร็จ'}</span>
+                    </div>
+                    <div class="order-address">{order.address}</div>
+                    {#if order.notes}<div class="order-notes">📝 {order.notes}</div>{/if}
+                    <div class="order-payment">
+                      <div class="payment-amount"><span class="amount-label">ยอดเงิน</span><span class="amount-value">฿{(order.total_amount || 50).toLocaleString()}</span></div>
+                      <div class="payment-details">
+                        <span class="payment-method">{getPaymentMethodText(order.payment_method || 'cash')}</span>
+                        <span class="payment-status" style="color: {getPaymentStatusColor(order.payment_status || 'pending')}">{getPaymentStatusText(order.payment_status || 'pending')}</span>
                       </div>
                     </div>
+                    <div class="order-actions">
+                      {#if order.status === 'pending'}<button class="btn-accept" on:click={() => acceptCustomerOrder(order.id)}>✅ รับงาน</button>
+                      {:else if order.status === 'accepted'}
+                        {#if order.payment_method === 'cash' && (order.payment_status === 'pending' || !order.payment_status)}<button class="btn-cash" on:click={() => confirmCashPayment(order.id)}>💵 รับเงินแล้ว</button>{/if}
+                        <button class="btn-complete" on:click={() => completeCustomerOrder(order.id)}>🎉 เสร็จงาน</button>
+                      {:else}<span class="completed-text">✅ เสร็จแล้ว</span>{/if}
+                      <button class="btn-locate" on:click={() => focusOnPoint(order.lat, order.lng)}>📍 ดูบนแผนที่</button>
+                    </div>
+                  </div>
                 {/each}
               </div>
             {/if}
-
             {#if getAcceptedCustomerOrdersCount() > 0}
               <div class="customer-route-toggle">
-                <label class="toggle-setting">
-                  <span>รวมลูกค้า ({getAcceptedCustomerOrdersCount()}) ในเส้นทาง</span>
-                  <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}>
-                    <div class="toggle-knob"></div>
-                  </button>
+                <label class="toggle-setting"><span>รวมลูกค้า ({getAcceptedCustomerOrdersCount()}) ในเส้นทาง</span>
+                  <button class="toggle-btn" class:active={includeCustomersInRoute} on:click={() => includeCustomersInRoute = !includeCustomersInRoute}><div class="toggle-knob"></div></button>
                 </label>
               </div>
             {/if}
           </div>
         {:else if activeTab === 'route' && optimizedRoute}
           <div class="route-summary">
-            <div class="summary-header">
-              <h3>สรุปเส้นทาง</h3>
-              <span class="route-badge">เส้นทางที่ดีที่สุด</span>
-            </div>
-
+            <div class="summary-header"><h3>สรุปเส้นทาง</h3><span class="route-badge">เส้นทางที่ดีที่สุด</span></div>
             <div class="summary-stats">
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
-                  </svg>
-                </div>
-                <div class="stat-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</div>
-                <div class="stat-label">กิโลเมตร</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"/>
-                    <path d="M12 6v6l4 2"/>
-                  </svg>
-                </div>
-                <div class="stat-value">{Math.round(optimizedRoute.total_time / 60)}</div>
-                <div class="stat-label">นาที</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-                    <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-                  </svg>
-                </div>
-                <div class="stat-value">{optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length}</div>
-                <div class="stat-label">จุดส่ง</div>
-              </div>
-              <div class="stat-card fuel">
-                <div class="stat-icon">⛽</div>
-                <div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div>
-                <div class="stat-label">ค่าน้ำมัน</div>
-              </div>
+              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg></div><div class="stat-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</div><div class="stat-label">กิโลเมตร</div></div>
+              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="stat-value">{Math.round(optimizedRoute.total_time / 60)}</div><div class="stat-label">นาที</div></div>
+              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg></div><div class="stat-value">{optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length}</div><div class="stat-label">จุดส่ง</div></div>
+              <div class="stat-card fuel"><div class="stat-icon">⛽</div><div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div><div class="stat-label">ค่าน้ำมัน</div></div>
             </div>
-
+            {#if vehicleType === 'ev'}
+            <div class="ev-route-info" class:warning={!isEVRangeSufficient()}>
+              <div class="ev-info-row">
+                <span>🔋 แบตปัจจุบัน:</span>
+                <strong style="color: {getEVBatteryColor()}">{evCurrentCharge}%</strong>
+              </div>
+              <div class="ev-info-row">
+                <span>📍 ระยะทางเหลือ:</span>
+                <strong>{evRemainingRange.toFixed(0)} กม.</strong>
+              </div>
+              <div class="ev-info-row">
+                <span>⚡ ใช้พลังงาน:</span>
+                <strong>{evEnergyConsumption.toFixed(1)} kWh</strong>
+              </div>
+              <div class="ev-info-row">
+                <span>🔋 แบตหลังจบ:</span>
+                <strong style="color: {evBatteryAfterTrip > 20 ? '#00ff88' : '#ff6b6b'}">{evBatteryAfterTrip.toFixed(0)}%</strong>
+              </div>
+              {#if !isEVRangeSufficient()}
+                <div class="ev-warning-banner">
+                  ⚠️ ระยะทางมากกว่าแบตเตอรี่ที่เหลือ! อาจต้องชาร์จระหว่างทาง
+                </div>
+              {/if}
+            </div>
+          {/if}
             <div class="route-timeline">
               <h4>ลำดับการเดินทาง</h4>
               {#each optimizedRoute.optimized_order as point, i}
@@ -3266,10 +1718,7 @@ function clearAllMarkersAndLayers() {
                 {@const isCustomer = point.isCustomerOrder}
                 <div class="timeline-item" class:start={isStart} class:customer={isCustomer} on:click={() => focusOnPoint(point.lat, point.lng)} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
                   <div class="timeline-marker"><span>{isStart ? '📍' : isCustomer ? '🛒' : i}</span></div>
-                  <div class="timeline-content">
-                    <div class="timeline-label">{isStart ? 'ตำแหน่งของคุณ' : isCustomer ? 'ลูกค้า' : `จุดที่ ${i}`}</div>
-                    <div class="timeline-name">{point.name}</div>
-                  </div>
+                  <div class="timeline-content"><div class="timeline-label">{isStart ? 'ตำแหน่งของคุณ' : isCustomer ? 'ลูกค้า' : `จุดที่ ${i}`}</div><div class="timeline-name">{point.name}</div></div>
                 </div>
               {/each}
             </div>
@@ -3277,36 +1726,19 @@ function clearAllMarkersAndLayers() {
         {/if}
       </div>
 
-      <div class="sidebar-footer">
-        <span>RouteFlow v2.0</span>
-        <span>GPS Navigation</span>
-      </div>
+      <div class="sidebar-footer"><span>RouteFlow v2.0</span><span>GPS Navigation</span></div>
     </aside>
   {/if}
 
   <div class="map-container" class:fullscreen={isNavigating}>
     <div id="map"></div>
-    
     {#if !isNavigating}
       <div class="map-stats glass-card">
-        <div class="map-stat">
-          <span class="map-stat-value">{deliveryPoints.length}</span>
-          <span class="map-stat-label">จุดส่ง</span>
-        </div>
-        <div class="map-stat">
-          <span class="map-stat-value">{getAcceptedCustomerOrdersCount()}</span>
-          <span class="map-stat-label">ลูกค้า</span>
-        </div>
-        <div class="map-stat">
-          <span class="map-stat-value">{getSuccessCount()}</span>
-          <span class="map-stat-label">เสร็จแล้ว</span>
-        </div>
-        <div class="map-stat weather">
-          <span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span>
-          <span class="map-stat-label">อากาศ</span>
-        </div>
+        <div class="map-stat"><span class="map-stat-value">{deliveryPoints.length}</span><span class="map-stat-label">จุดส่ง</span></div>
+        <div class="map-stat"><span class="map-stat-value">{getAcceptedCustomerOrdersCount()}</span><span class="map-stat-label">ลูกค้า</span></div>
+        <div class="map-stat"><span class="map-stat-value">{getSuccessCount()}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
+        <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
       </div>
-      
       {#if !optimizedRoute}
         <div class="map-filters glass-card">
           <select bind:value={sortBy} on:change={sortPoints}>
@@ -3323,15 +1755,8 @@ function clearAllMarkersAndLayers() {
         </div>
       {/if}
     {/if}
-    
     {#if !isNavigating && !optimizedRoute}
-      <div class="map-info glass-card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M12 16v-4M12 8h.01"/>
-        </svg>
-        <span>คลิกที่แผนที่เพื่อเพิ่มจุดส่ง</span>
-      </div>
+      <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดส่ง</span></div>
     {/if}
   </div>
 </div>
@@ -3482,6 +1907,82 @@ function clearAllMarkersAndLayers() {
   .search-result-item:hover { background: rgba(255, 255, 255, 0.05); }
   .result-name { display: block; font-weight: 500; }
   .result-address { display: block; font-size: 12px; color: #71717a; }
+    /* Vehicle Quick Toggle */
+  .vehicle-quick-toggle { padding: 12px 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .vehicle-toggle-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px; border-radius: 12px; border: none; cursor: pointer; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 500; transition: all 0.3s ease; }
+  .vehicle-toggle-btn.fuel { background: linear-gradient(135deg, rgba(0, 255, 136, 0.15) 0%, rgba(0, 204, 106, 0.15) 100%); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88; }
+  .vehicle-toggle-btn.ev { background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(29, 78, 216, 0.15) 100%); border: 1px solid rgba(59, 130, 246, 0.3); color: #3b82f6; }
+  .vehicle-toggle-btn:hover { transform: translateY(-2px); }
+  .toggle-icon { font-size: 20px; }
+  .ev-charge-badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; color: #000; }
+
+  /* Vehicle Type Settings */
+  .vehicle-type-selector { display: flex; gap: 12px; margin-bottom: 16px; }
+  .vehicle-type-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px; border-radius: 12px; background: rgba(255, 255, 255, 0.05); border: 2px solid transparent; cursor: pointer; transition: all 0.3s; }
+  .vehicle-type-btn:hover { background: rgba(255, 255, 255, 0.1); }
+  .vehicle-type-btn.active { border-color: #00ff88; background: rgba(0, 255, 136, 0.1); }
+  .vehicle-type-btn.active:last-child { border-color: #3b82f6; background: rgba(59, 130, 246, 0.1); }
+  .vehicle-icon { font-size: 32px; }
+  .vehicle-label { font-size: 14px; font-weight: 500; color: #e4e4e7; }
+
+  .vehicle-info-card { padding: 16px; border-radius: 12px; margin-top: 12px; }
+  .vehicle-info-card.fuel { background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2); }
+  .vehicle-info-card.ev { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); }
+  .info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+  .info-icon { font-size: 18px; }
+  .info-text { font-size: 14px; color: #a1a1aa; }
+
+  .ev-battery-setting { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+  .ev-battery-setting label { display: block; font-size: 13px; color: #a1a1aa; margin-bottom: 10px; }
+  .ev-slider { width: 100%; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); appearance: none; cursor: pointer; }
+  .ev-slider::-webkit-slider-thumb { appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #3b82f6; cursor: pointer; box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); }
+  .ev-range-info { margin-top: 12px; text-align: center; font-size: 14px; color: #71717a; }
+  .ev-range-info strong { font-size: 16px; }
+
+  /* EV Status Display during Navigation */
+  .ev-status-display { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); padding: 16px; width: 140px; pointer-events: none; }
+  .ev-battery-visual { height: 12px; background: rgba(255, 255, 255, 0.1); border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+  .ev-battery-fill { height: 100%; border-radius: 6px; transition: width 0.5s ease; }
+  .ev-info { text-align: center; }
+  .ev-percent { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .ev-label { display: block; font-size: 11px; color: #71717a; margin-top: 4px; }
+  .ev-warning { margin-top: 10px; padding: 6px; background: rgba(255, 107, 107, 0.2); border-radius: 6px; text-align: center; font-size: 11px; color: #ff6b6b; font-weight: 600; animation: pulse 1s infinite; }
+
+  /* EV Route Info */
+  .ev-route-info { padding: 16px; background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 12px; margin-bottom: 20px; }
+  .ev-route-info.warning { border-color: rgba(255, 107, 107, 0.5); background: rgba(255, 107, 107, 0.1); }
+  .ev-info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+  .ev-info-row:last-child { border-bottom: none; }
+  .ev-warning-banner { margin-top: 12px; padding: 10px; background: rgba(255, 107, 107, 0.2); border-radius: 8px; text-align: center; color: #ff6b6b; font-size: 13px; font-weight: 500; }
+
+  .nav-stat.ev-stat { border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.1); }
+  .nav-stat.ev-stat .nav-stat-icon { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
+
+  /* Map Vehicle Type Indicator */
+  .map-stat.vehicle-type { border-left: 2px solid #00ff88; }
+  .map-stat.vehicle-type.ev { border-left-color: #3b82f6; }
+
+  /* Route Badge */
+  .route-badge.ev-badge { background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.3); color: #3b82f6; }
+
+  /* EV Primary Button */
+  .btn-primary.btn-ev { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3); }
+
+  /* Stat Card EV */
+  .stat-card.ev { border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.1); }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .ev-status-display { top: auto; bottom: 250px; right: 10px; transform: none; width: 120px; padding: 10px; }
+    .ev-percent { font-size: 20px; }
+  }
+
+  @media (max-width: 480px) {
+    .vehicle-type-selector { flex-direction: column; gap: 8px; }
+    .vehicle-type-btn { flex-direction: row; justify-content: center; padding: 12px; }
+    .vehicle-icon { font-size: 24px; }
+    .ev-status-display { display: none; }
+  }
 
   /* Filter & Sort */
   .filter-sort-bar { padding: 12px 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
@@ -3531,7 +2032,36 @@ function clearAllMarkersAndLayers() {
 
   /* Settings Panel */
   .settings-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; }
-  .settings-panel { width: 90%; max-width: 600px; max-height: 100vh; overflow-y: auto; padding: 24px; }
+  .settings-panel { 
+    width: 100%; 
+    max-width: 1000px;  /* เพิ่มความกว้าง */
+    max-height: 100vh; 
+    overflow-y: auto; 
+    padding: 24px; 
+  }
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+
+  .settings-column {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Responsive - มือถือแสดงเป็น 1 column */
+  @media (max-width: 768px) {
+    .settings-grid {
+      grid-template-columns: 1fr;
+    }
+    
+    .settings-panel {
+      max-width: 95%;
+      padding: 16px;
+    }
+  }
   .settings-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
   .settings-header h3 { font-size: 20px; font-weight: 600; }
   .settings-content { display: flex; flex-direction: column; gap: 24px; }
@@ -4254,6 +2784,352 @@ function clearAllMarkersAndLayers() {
   color: #00ff88;
   font-family: 'JetBrains Mono', monospace;
 }
+:global(.ev-station-marker) {
+    position: relative;
+  }
+
+  :global(.ev-pin) {
+    width: 44px;
+    height: 44px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border-radius: 50% 50% 50% 0;
+    transform: rotate(-45deg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 3px solid white;
+    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+    position: relative;
+  }
+
+  :global(.ev-pin.route-stop) {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    box-shadow: 0 4px 20px rgba(245, 158, 11, 0.5);
+    animation: pulse-ev 1.5s ease-in-out infinite;
+  }
+
+  :global(.ev-pin.offline) {
+    background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+    opacity: 0.7;
+  }
+
+  :global(.ev-pin .ev-icon) {
+    transform: rotate(45deg);
+    font-size: 18px;
+  }
+
+  :global(.ev-pin .stop-number) {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    transform: rotate(45deg);
+    background: #ef4444;
+    color: white;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  :global(.ev-pin .power-badge) {
+    position: absolute;
+    bottom: -20px;
+    left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    background: rgba(0, 0, 0, 0.8);
+    color: #10b981;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  @keyframes pulse-ev {
+    0%, 100% { transform: rotate(-45deg) scale(1); }
+    50% { transform: rotate(-45deg) scale(1.1); }
+  }
+
+  /* EV Popup Styles */
+  :global(.ev-popup) {
+    min-width: 250px;
+  }
+
+  :global(.ev-popup-header) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    border-radius: 16px 16px 0 0;
+  }
+
+  :global(.ev-icon-large) {
+    font-size: 28px;
+  }
+
+  :global(.ev-status) {
+    font-size: 12px;
+    font-weight: 600;
+    color: white;
+  }
+
+  :global(.ev-popup-content) {
+    padding: 14px 16px;
+  }
+
+  :global(.ev-popup-content h4) {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e4e4e7;
+    margin-bottom: 10px;
+  }
+
+  :global(.ev-popup-content p) {
+    font-size: 12px;
+    color: #a1a1aa;
+    margin-bottom: 6px;
+  }
+
+  :global(.ev-route-stop-info) {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    background: rgba(245, 158, 11, 0.15);
+    border-top: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 0 0 16px 16px;
+  }
+
+  :global(.stop-badge) {
+    font-size: 11px;
+    font-weight: 600;
+    color: #f59e0b;
+  }
+
+  :global(.charging-time) {
+    font-size: 11px;
+    color: #a1a1aa;
+  }
+
+  /* Charging Stops Section */
+  .charging-stops-section {
+    margin-top: 20px;
+    padding: 16px;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 14px;
+  }
+
+  .charging-stops-section h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #10b981;
+    margin-bottom: 12px;
+  }
+
+  .charging-stops-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .charging-stop-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .charging-stop-card:hover {
+    background: rgba(16, 185, 129, 0.15);
+    transform: translateX(4px);
+  }
+
+  .stop-number-badge {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+
+  .stop-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .stop-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e4e4e7;
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .stop-details {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+
+  .stop-details span {
+    font-size: 11px;
+    color: #10b981;
+  }
+
+  .stop-address {
+    font-size: 11px;
+    color: #71717a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .stop-status {
+    font-size: 14px;
+  }
+
+  .charging-summary {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    text-align: center;
+    font-size: 13px;
+    color: #a1a1aa;
+  }
+
+  /* EV Stations Badge */
+  .ev-stations-badge {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+
+  .badge-icon {
+    font-size: 18px;
+  }
+
+  .badge-count {
+    font-size: 18px;
+    font-weight: 700;
+    color: #10b981;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .badge-label {
+    font-size: 11px;
+    color: #71717a;
+  }
+
+  .refresh-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+
+  .refresh-btn:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.2);
+  }
+
+  .refresh-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .spinner-tiny {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #10b981;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  /* EV Search Button */
+  .btn-ev-search {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 12px;
+    margin-top: 12px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(5, 150, 105, 0.2) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 10px;
+    color: #10b981;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn-ev-search:hover:not(:disabled) {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.3) 0%, rgba(5, 150, 105, 0.3) 100%);
+  }
+
+  .btn-ev-search:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .ev-stations-badge {
+      top: auto;
+      bottom: 140px;
+      right: 10px;
+      padding: 8px 12px;
+    }
+
+    .badge-count {
+      font-size: 16px;
+    }
+
+    .badge-label {
+      display: none;
+    }
+
+    .charging-stop-card {
+      padding: 10px;
+    }
+
+    .stop-number-badge {
+      width: 36px;
+      height: 36px;
+      font-size: 12px;
+    }
+  }
 
 .payment-details {
   display: flex;
