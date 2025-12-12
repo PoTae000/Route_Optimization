@@ -301,6 +301,15 @@ function getCostIcon(): string {
 function getVehicleIcon(): string {
   return vehicleType === 'fuel' ? '🚗' : '🚙';
 }
+function clearChargingStations() {
+  chargingStations = [];
+  chargingStationMarkers.forEach(m => {
+    try { map.removeLayer(m); } catch(e) {}
+  });
+  chargingStationMarkers = [];
+  routeChargingStops = [];
+  showNotification('ล้างสถานีชาร์จแล้ว', 'success');
+}
 
 function toggleVehicleType() {
   vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
@@ -308,15 +317,30 @@ function toggleVehicleType() {
   showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
 }
 async function loadNearbyChargingStations() {
-    if (!currentLocation) {
-      showNotification('กรุณาเปิด GPS ก่อน', 'warning');
-      return;
+    // ถ้าไม่มี GPS ให้ใช้ตำแหน่ง default (กรุงเทพ) หรือจุดบนแผนที่
+    let searchLat: number;
+    let searchLng: number;
+    
+    if (currentLocation) {
+      searchLat = currentLocation.lat;
+      searchLng = currentLocation.lng;
+    } else if (map) {
+      // ใช้ตำแหน่งกลางแผนที่ปัจจุบัน
+      const center = map.getCenter();
+      searchLat = center.lat;
+      searchLng = center.lng;
+      showNotification('ค้นหาสถานีชาร์จบริเวณแผนที่', 'success');
+    } else {
+      // Default: กรุงเทพ
+      searchLat = 13.7563;
+      searchLng = 100.5018;
+      showNotification('ค้นหาสถานีชาร์จในกรุงเทพฯ', 'success');
     }
 
     isLoadingStations = true;
     try {
       const res = await fetch(
-        `${API_URL}/ev-stations/nearby?lat=${currentLocation.lat}&lng=${currentLocation.lng}&radius=15&limit=20`
+        `${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20`
       );
       const data = await res.json();
       
@@ -326,7 +350,7 @@ async function loadNearbyChargingStations() {
       
       chargingStations = data;
       displayChargingStationMarkers();
-      showNotification(`พบ ${chargingStations.length} สถานีชาร์จใกล้เคียง`, 'success');
+      showNotification(`พบ ${chargingStations.length} สถานีชาร์จ`, 'success');
     } catch (err: any) {
       console.error('Error loading charging stations:', err);
       showNotification('ไม่สามารถโหลดสถานีชาร์จได้', 'error');
@@ -334,6 +358,7 @@ async function loadNearbyChargingStations() {
       isLoadingStations = false;
     }
   }
+
   function displayChargingStationMarkers() {
     if (!L || !map) return;
     
@@ -1311,15 +1336,24 @@ function saveVehicleSettings() {
                       <div class="toggle-knob"></div>
                     </button>
                   </label>
-                  <button class="btn btn-ev-search" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
-                    {#if isLoadingStations}
-                      <div class="spinner-small"></div>
-                      <span>กำลังค้นหา...</span>
-                    {:else}
-                      <span>🔍</span>
-                      <span>ค้นหาสถานีชาร์จใกล้เคียง</span>
-                    {/if}
+                  <div class="ev-buttons">
+                <button class="btn btn-ev-search" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
+                  {#if isLoadingStations}
+                    <div class="spinner-small"></div>
+                    <span>กำลังค้นหา...</span>
+                  {:else}
+                    <span>🔍</span>
+                    <span>ค้นหาสถานีชาร์จ (100กม.)</span>
+                  {/if}
+                </button>
+                
+                {#if chargingStations.length > 0}
+                  <button class="btn btn-ev-clear" on:click={clearChargingStations}>
+                    <span>🗑️</span>
+                    <span>ล้าง ({chargingStations.length})</span>
                   </button>
+                {/if}
+              </div>
                 </div>
             </div>
           </div>
@@ -1797,8 +1831,36 @@ function saveVehicleSettings() {
   .spinner { width: 20px; height: 20px; border: 2px solid rgba(10, 10, 15, 0.3); border-top-color: #0a0a0f; border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .glass-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; }
+    .glass-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; }
+    .ev-buttons {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
 
+    .ev-buttons .btn {
+      flex: 1;
+    }
+
+    .btn-ev-clear {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 12px;
+      background: rgba(255, 107, 107, 0.15);
+      border: 1px solid rgba(255, 107, 107, 0.3);
+      border-radius: 10px;
+      color: #ff6b6b;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-ev-clear:hover {
+      background: rgba(255, 107, 107, 0.25);
+    }
   .add-form { margin: 0 16px 16px; padding: 16px; animation: slideIn 0.3s ease; }
   .add-form-overlay { display: contents; }
   @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
