@@ -428,6 +428,9 @@
   let searchResults: any[] = [];
   let isSearching = false;
   let searchDebounceTimer: any = null;
+  let searchAbortController: AbortController | null = null;
+  let evAbortController: AbortController | null = null;
+  let poiAbortController: AbortController | null = null;
   let showSearchResults = false;
   let searchFocused = false;
   let destinationMarker: any = null;
@@ -2188,38 +2191,59 @@
     }
   }
 
+  // ==================== FETCH WITH TIMEOUT HELPER ====================
+  function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number } = {}): Promise<Response> {
+    const { timeout = 10000, ...fetchOptions } = options;
+    const controller = fetchOptions.signal ? undefined : new AbortController();
+    const signal = fetchOptions.signal || controller?.signal;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), timeout) : null;
+    return fetch(url, { ...fetchOptions, signal }).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+    });
+  }
+
   // ==================== PLACE SEARCH (NOMINATIM) ====================
 
   async function searchPlace(query: string) {
     if (!query || query.length < 2) { searchResults = []; showSearchResults = false; return; }
+    // Cancel previous search
+    if (searchAbortController) { searchAbortController.abort(); }
+    searchAbortController = new AbortController();
+    const signal = searchAbortController.signal;
     isSearching = true;
     try {
       const params = new URLSearchParams({
         q: query, format: 'json', limit: '8', countrycodes: 'th',
         addressdetails: '1', 'accept-language': 'th'
       });
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-        headers: { 'User-Agent': 'RouteOptimization/2.0' }
+      const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+        headers: { 'User-Agent': 'RouteOptimization/2.0' },
+        signal, timeout: 8000
       });
+      if (signal.aborted) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      searchResults = data.map((r: any) => ({
+      if (signal.aborted) return;
+      if (!Array.isArray(data)) { searchResults = []; showSearchResults = false; return; }
+      searchResults = data.filter((r: any) => r.lat && r.lon && r.display_name).map((r: any) => ({
         lat: parseFloat(r.lat), lng: parseFloat(r.lon),
-        name: r.display_name.split(',')[0],
-        address: r.display_name,
+        name: r.display_name?.split(',')[0] || 'ไม่ทราบชื่อ',
+        address: r.display_name || '',
         type: r.type, category: r.category
       }));
       showSearchResults = searchResults.length > 0;
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'AbortError') return; // cancelled, not an error
       console.error('Search error:', err);
-      showNotification('ค้นหาไม่สำเร็จ', 'error');
+      showNotification('ค้นหาไม่สำเร็จ ลองใหม่อีกครั้ง', 'error');
     } finally {
-      isSearching = false;
+      if (!signal.aborted) isSearching = false;
     }
   }
 
   function handleSearchInput() {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 500);
+    searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 400);
   }
 
   // Reverse geocode: แปลงพิกัดเป็นที่อยู่
@@ -2229,8 +2253,9 @@
         lat: String(lat), lon: String(lng),
         format: 'json', addressdetails: '1', 'accept-language': 'th'
       });
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?${params.toString()}`, {
-        headers: { 'User-Agent': 'RouteOptimization/2.0' }
+      const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/reverse?${params.toString()}`, {
+        headers: { 'User-Agent': 'RouteOptimization/2.0' },
+        timeout: 8000
       });
       if (!res.ok) return null;
       const data = await res.json();
@@ -2249,7 +2274,8 @@
         name: nameParts[0] || data.display_name?.split(',')[0] || 'ไม่ทราบชื่อ',
         address: data.display_name || `${lat.toFixed(6)}, ${lng.toFixed(6)}`
       };
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'AbortError') return null;
       console.error('Reverse geocode error:', err);
       return null;
     }
@@ -3953,21 +3979,32 @@
       searchLng = 100.5018;
       showNotification('ค้นหาสถานีชาร์จในกรุงเทพฯ', 'success');
     }
+    // Cancel previous EV search
+    if (evAbortController) { evAbortController.abort(); }
+    evAbortController = new AbortController();
+    const signal = evAbortController.signal;
     isLoadingStations = true;
     try {
-      const res = await fetch(`${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20`);
+      const res = await fetchWithTimeout(`${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20`, {
+        signal, timeout: 12000
+      });
+      if (signal.aborted) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (signal.aborted) return;
 
       if (data.error) throw new Error(data.error);
+      if (!Array.isArray(data)) throw new Error('Invalid response');
 
       chargingStations = data;
       displayChargingStationMarkers();
       showNotification(`พบ ${chargingStations.length} สถานีชาร์จ`, 'success');
     } catch (err: any) {
+      if (err.name === 'AbortError') return;
       console.error('Error loading charging stations:', err);
-      showNotification('ไม่สามารถโหลดสถานีชาร์จได้', 'error');
+      showNotification('ไม่สามารถโหลดสถานีชาร์จได้ ลองใหม่อีกครั้ง', 'error');
     } finally {
-      isLoadingStations = false;
+      if (!signal.aborted) isLoadingStations = false;
     }
   }
 
@@ -4388,6 +4425,10 @@
       showNotification('ยังไม่มีเส้นทาง กรุณาคำนวณเส้นทางก่อน', 'error');
       return;
     }
+    // Cancel previous POI search
+    if (poiAbortController) { poiAbortController.abort(); }
+    poiAbortController = new AbortController();
+    const signal = poiAbortController.signal;
     isLoadingPOIs = true;
     showPOIOverlay = true;
 
@@ -4428,13 +4469,17 @@
 );
 out center body;`;
 
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
+      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
         method: 'POST',
-        body: `data=${encodeURIComponent(query)}`
+        body: `data=${encodeURIComponent(query)}`,
+        signal, timeout: 30000
       });
+      if (signal.aborted) return;
+      if (!res.ok) throw new Error(`Overpass API error: HTTP ${res.status}`);
       const data = await res.json();
+      if (signal.aborted) return;
 
-      if (!data.elements) {
+      if (!data.elements || !Array.isArray(data.elements)) {
         alongRoutePOIs = [];
         showNotification('ไม่พบสถานที่บนเส้นทาง', 'warning');
         return;
@@ -4460,7 +4505,7 @@ out center body;`;
         else if (tags.tourism === 'attraction') poiType = 'attraction';
         else if (tags.tourism === 'museum') poiType = 'museum';
         else if (tags.amenity === 'place_of_worship' && tags.religion === 'buddhist') poiType = 'temple';
-        else if (tags.historic) poiType = 'attraction'; // historic sites as attractions
+        else if (tags.historic) poiType = 'attraction';
         else if (tags.leisure === 'park') poiType = 'park';
         else continue;
 
@@ -4487,10 +4532,11 @@ out center body;`;
       const attractionCount = pois.filter(p => ['viewpoint', 'attraction', 'temple', 'park', 'museum'].includes(p.type)).length;
       showNotification(`พบ ${pois.length} สถานที่ (${attractionCount} ที่เที่ยว)`, 'success');
     } catch (err: any) {
+      if (err.name === 'AbortError') return;
       console.error('POI search error:', err);
-      showNotification('ค้นหาสถานที่ล้มเหลว', 'error');
+      showNotification('ค้นหาสถานที่ล้มเหลว ลองใหม่อีกครั้ง', 'error');
     } finally {
-      isLoadingPOIs = false;
+      if (!signal.aborted) isLoadingPOIs = false;
     }
   }
 
@@ -4499,6 +4545,10 @@ out center body;`;
       showNotification('ยังไม่มีเส้นทาง กรุณาคำนวณเส้นทางก่อน', 'error');
       return;
     }
+    // Cancel previous EV search
+    if (evAbortController) { evAbortController.abort(); }
+    evAbortController = new AbortController();
+    const signal = evAbortController.signal;
     isLoadingStations = true;
     try {
       const coords = optimizedRoute.route.geometry.coordinates;
@@ -4513,13 +4563,17 @@ out center body;`;
       minLat -= pad; maxLat += pad; minLng -= pad; maxLng += pad;
 
       const query = `[out:json][timeout:15];node["amenity"="charging_station"](${minLat},${minLng},${maxLat},${maxLng});out body;`;
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
+      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
         method: 'POST',
-        body: `data=${encodeURIComponent(query)}`
+        body: `data=${encodeURIComponent(query)}`,
+        signal, timeout: 20000
       });
+      if (signal.aborted) return;
+      if (!res.ok) throw new Error(`Overpass API error: HTTP ${res.status}`);
       const data = await res.json();
+      if (signal.aborted) return;
 
-      if (!data.elements?.length) {
+      if (!data.elements || !Array.isArray(data.elements) || !data.elements.length) {
         showNotification('ไม่พบสถานีชาร์จบนเส้นทาง', 'warning');
         return;
       }
@@ -4529,7 +4583,7 @@ out center body;`;
         if (!el.lat || !el.lon) continue;
         const match = matchPOIToRoute(el.lat, el.lon, coords);
         if (match.distFromRoute > POI_MAX_DIST) continue;
-        const existsAlready = chargingStations.some(s => Math.abs(s.lat - el.lat) < 0.0001 && Math.abs(s.lng - el.lon) < 0.0001);
+        const existsAlready = chargingStations.some(s => Math.abs(s.lat - el.lat) < 0.0005 && Math.abs(s.lng - el.lon) < 0.0005);
         if (existsAlready) continue;
         chargingStations.push({
           id: el.id,
@@ -4549,10 +4603,11 @@ out center body;`;
       displayChargingStationMarkers();
       showNotification(`พบ ${count} สถานีชาร์จบนเส้นทาง`, 'success');
     } catch (err: any) {
+      if (err.name === 'AbortError') return;
       console.error('EV route search error:', err);
-      showNotification('ค้นหาสถานีชาร์จบนเส้นทางล้มเหลว', 'error');
+      showNotification('ค้นหาสถานีชาร์จบนเส้นทางล้มเหลว ลองใหม่', 'error');
     } finally {
-      isLoadingStations = false;
+      if (!signal.aborted) isLoadingStations = false;
     }
   }
 
@@ -5189,6 +5244,13 @@ out center body;`;
     quickAddLoading = false;
   }
 
+  function smoothMapResize() {
+    if (!map) return;
+    setTimeout(() => { if (map) map.invalidateSize(); }, 50);
+    setTimeout(() => { if (map) map.invalidateSize(); }, 150);
+    setTimeout(() => { if (map) map.invalidateSize(); }, 250);
+  }
+
   function handleKeyboardShortcuts(e: KeyboardEvent) {
     // ไม่ทำงานถ้ากำลังพิมพ์ใน input/textarea
     const target = e.target as HTMLElement;
@@ -5320,11 +5382,7 @@ out center body;`;
         if (!isNavigating) {
           e.preventDefault();
           desktopSidebarCollapsed = !desktopSidebarCollapsed;
-          const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); };
-          requestAnimationFrame(resizeMap);
-          setTimeout(resizeMap, 100);
-          setTimeout(resizeMap, 350);
-          setTimeout(resizeMap, 500);
+          smoothMapResize();
         }
         break;
       case 't': // เปิด/ปิด traffic
@@ -5394,10 +5452,7 @@ out center body;`;
         e.preventDefault();
         if (!isNavigating) {
           desktopSidebarCollapsed = !desktopSidebarCollapsed;
-          const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); };
-          requestAnimationFrame(resizeMap);
-          setTimeout(resizeMap, 350);
-          setTimeout(resizeMap, 500);
+          smoothMapResize();
         }
         break;
       case '+': case '=': // Zoom in
@@ -6337,7 +6392,7 @@ out center body;`;
   {#if !isNavigating}
     <aside class="sidebar" class:collapsed={!mobileSidebarOpen} class:desktop-collapsed={desktopSidebarCollapsed}>
       <!-- Mobile toggle handle -->
-      <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; requestAnimationFrame(() => { if (map) map.invalidateSize(); }); setTimeout(() => { if (map) map.invalidateSize(); }, 50); }}>
+      <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; smoothMapResize(); }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class:flipped={mobileSidebarOpen}><path d="M6 9l6 6 6-6"/></svg>
         <span>{mobileSidebarOpen ? 'ซ่อนเมนู' : optimizedRoute ? `สรุป: ${(optimizedRoute.total_distance/1000).toFixed(1)} กม. · ${Math.round(optimizedRoute.total_time/60)} นาที` : `${allDeliveryPoints.length} จุดแวะ`}</span>
       </button>
@@ -6819,7 +6874,7 @@ out center body;`;
 
   <!-- Desktop Sidebar Toggle Button (fixed position) -->
   {#if !isNavigating}
-    <button class="desktop-sidebar-toggle" class:sidebar-hidden={desktopSidebarCollapsed} on:click={() => { desktopSidebarCollapsed = !desktopSidebarCollapsed; const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); }; requestAnimationFrame(resizeMap); setTimeout(resizeMap, 100); setTimeout(resizeMap, 200); setTimeout(resizeMap, 350); }} title={desktopSidebarCollapsed ? 'แสดงเมนู [M]' : 'ซ่อนเมนู [M]'}>
+    <button class="desktop-sidebar-toggle" class:sidebar-hidden={desktopSidebarCollapsed} on:click={() => { desktopSidebarCollapsed = !desktopSidebarCollapsed; smoothMapResize(); }} title={desktopSidebarCollapsed ? 'แสดงเมนู [M]' : 'ซ่อนเมนู [M]'}>
       {#if desktopSidebarCollapsed}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         <span>เมนู</span>
@@ -7865,31 +7920,23 @@ out center body;`;
   :global(*) { margin: 0; padding: 0; box-sizing: border-box; }
   :global(body) { font-family: 'Kanit', sans-serif; background: #0a0a0f; color: #e4e4e7; overflow: hidden; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
   :global(::selection) { background: rgba(0, 255, 136, 0.25); color: #fff; }
-  :global(*) { scroll-behavior: smooth; }
 
-  .app-container { display: flex; height: 100vh; width: 100vw; background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%); }
+  .app-container { display: flex; height: 100vh; width: 100vw; overflow: hidden; background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%); }
 
   .sidebar {
     width: 500px;
-    background: rgba(15, 15, 25, 0.95);
-    backdrop-filter: blur(24px) saturate(1.1);
-    -webkit-backdrop-filter: blur(24px) saturate(1.1);
-    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    flex-shrink: 0;
+    background: #0d0d18;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
     display: flex;
     flex-direction: column;
     z-index: 10;
     overflow: hidden;
     max-width: 100%;
     position: relative;
-    transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1),
-                max-height 0.4s cubic-bezier(0.22, 1, 0.36, 1),
-                border-right 0.3s ease,
-                box-shadow 0.3s ease;
-    will-change: width, transform;
-    transform: translateZ(0);
-    -webkit-backface-visibility: hidden;
-    backface-visibility: hidden;
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+    transition: margin-left 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 0.15s ease;
+    will-change: margin-left, opacity;
   }
   .sidebar-toggle { display: none; }
 
@@ -7915,10 +7962,10 @@ out center body;`;
     font-size: 11px;
     font-weight: 600;
     z-index: 1500;
-    transition: left 0.4s cubic-bezier(0.22, 1, 0.36, 1),
-                transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
-                background 0.25s ease,
-                box-shadow 0.3s ease;
+    transition: left 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.2s ease,
+                background 0.2s ease,
+                box-shadow 0.2s ease;
     will-change: left, transform;
     -webkit-backface-visibility: hidden;
     backface-visibility: hidden;
@@ -7942,27 +7989,12 @@ out center body;`;
     left: 0;
   }
 
-  /* Desktop collapsed state */
+  /* Desktop collapsed state - uses margin-left instead of width for smooth GPU animation */
   .sidebar.desktop-collapsed {
-    width: 0 !important;
-    min-width: 0 !important;
-    border-right: none;
-  }
-  .sidebar.desktop-collapsed > * {
+    margin-left: -500px;
     opacity: 0;
-    visibility: hidden;
-    transform: translateX(-20px);
-    transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1),
-                visibility 0.25s ease,
-                transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  .sidebar:not(.desktop-collapsed) > * {
-    opacity: 1;
-    visibility: visible;
-    transform: translateX(0);
-    transition: opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1) 0.1s,
-                visibility 0.35s ease 0.1s,
-                transform 0.35s cubic-bezier(0.22, 1, 0.36, 1) 0.1s;
+    pointer-events: none;
+    border-right: none;
   }
   .sidebar-header { padding: 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: rgba(0, 0, 0, 0.1); }
   .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
@@ -8777,7 +8809,8 @@ out center body;`;
   .nav-btn-voice.active { background: rgba(0, 255, 136, 0.2); color: #00ff88; border-color: rgba(0, 255, 136, 0.3); }
   .nav-btn-share { background: rgba(59, 130, 246, 0.15); color: #60a5fa; flex: 0 0 auto; width: 44px; border: 1px solid rgba(59, 130, 246, 0.2); }
   .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
-  .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.45s cubic-bezier(0.22, 1, 0.36, 1); }
+  .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .map-container.fullscreen { width: 100vw; }
   .map-container.fullscreen { width: 100vw; }
   
   /* Map Stats - Top Left */
@@ -8788,7 +8821,7 @@ out center body;`;
   .map-stat.weather .map-stat-value { font-size: 16px; }
   #map { width: 100%; height: 100%; }
   :global(.leaflet-tile-pane) { filter: grayscale(1) invert(1) brightness(0.55); }
-  .map-info { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
+  .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
   .nav-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 1000; }
@@ -9015,28 +9048,16 @@ out center body;`;
     }
     .sidebar.collapsed > *:not(.sidebar-toggle) {
       opacity: 0;
-      transform: translateY(-10px);
-      transition: opacity 0.15s ease, transform 0.15s ease;
       pointer-events: none;
-    }
-    .sidebar:not(.collapsed) > *:not(.sidebar-toggle) {
-      opacity: 1;
-      transform: translateY(0);
-      transition: opacity 0.25s ease 0.1s, transform 0.25s ease 0.1s;
     }
     /* Keyboard M ซ่อน sidebar สมบูรณ์บนมือถือ */
     .sidebar.desktop-collapsed {
       width: 100% !important;
+      margin-left: 0 !important;
       max-height: 0 !important;
       min-height: 0 !important;
       border-bottom: none !important;
       overflow: hidden !important;
-      padding: 0 !important;
-    }
-    .sidebar.desktop-collapsed > * {
-      opacity: 0 !important;
-      visibility: hidden !important;
-      pointer-events: none !important;
     }
     .desktop-sidebar-toggle { display: none !important; } /* ซ่อนปุ่ม desktop toggle บน mobile */
     .sidebar-toggle {
@@ -9128,7 +9149,7 @@ out center body;`;
     .map-stat { padding: 2px 4px; }
     .map-stat-value { font-size: 13px; }
     .map-stat-label { font-size: 8px; }
-    .map-info { position: absolute; bottom: 4px; left: 50%; right: auto; width: auto; max-width: calc(100% - 16px); transform: translateX(-50%); padding: 4px 8px; font-size: 9px; z-index: 999; }
+    .map-info { position: absolute; bottom: 4px; left: 8px; right: auto; width: auto; max-width: calc(100% - 16px); padding: 4px 8px; font-size: 9px; z-index: 999; }
 
     /* ===== Navigation Mode Mobile ===== */
     .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
@@ -11445,7 +11466,7 @@ out center body;`;
 
 /* Floating Saved Routes */
 .map-saved-float {
-  position: absolute;
+  position: fixed;
   bottom: 30px;
   left: 50%;
   transform: translateX(-50%);
