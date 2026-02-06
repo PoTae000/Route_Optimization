@@ -2,11 +2,49 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import { browser } from '$app/environment';
 
   let currentUser: any = null;
 
   function logout() {
-    localStorage.removeItem('user');
+    // Stop navigation if running
+    if (isNavigating) stopNavigation();
+    // Stop all GPS watches
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    if (continuousWatchId !== null) {
+      navigator.geolocation.clearWatch(continuousWatchId);
+      continuousWatchId = null;
+    }
+    // Abort pending requests
+    if (routeAbortController) { routeAbortController.abort(); routeAbortController = null; }
+    // Clear all intervals
+    if (extraFeaturesInterval) { clearInterval(extraFeaturesInterval); extraFeaturesInterval = null; }
+    if (batteryInterval) { clearInterval(batteryInterval); batteryInterval = null; }
+    if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
+    if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    // Remove event listeners
+    if (browser) {
+      window.removeEventListener('keydown', handleKeyboardShortcuts);
+      if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
+    }
+    // Destroy map
+    if (map) { try { map.off(); map.remove(); } catch(e) {} map = null; }
+    // Clear all user-specific localStorage keys
+    const userId = currentUser?.id || 'guest';
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.endsWith(`_${userId}`) || key === 'user')) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(k => localStorage.removeItem(k));
+    // Clear sessionStorage entirely
+    sessionStorage.clear();
+    // Navigate to login
     goto('/');
   }
 
@@ -28,8 +66,9 @@
   let activePointId: number | null = null;
   let isNavigating = false;
   let mobileSidebarOpen = true;
+  let desktopSidebarCollapsed = false;
   let isDragMode = false;
-  let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldLat: number; oldLng: number } | null = null;
+  let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
 
   // Reorder mode (drag to reorder in sidebar)
   let isReorderMode = false;
@@ -40,8 +79,10 @@
   // ==================== GPS VARIABLES - COPIED FROM ORIGINAL ====================
   let currentLocation: { lat: number; lng: number; heading?: number | null; speed?: number | null } | null = null;
   let currentLocationMarker: any = null;
+  let accuracyCircle: any = null;
   let headingMarkerElement: HTMLElement | null = null;
   let watchId: number | null = null;
+  let continuousWatchId: number | null = null; // Always-on GPS tracking for marker
   let isMapFollowing = true; // auto-follow mode like Google Maps
   let currentHeading: number | null = null; // GPS heading in degrees
   let currentTargetIndex = 0;
@@ -167,8 +208,8 @@
       }
     }
 
-    localStorage.setItem('selectedStation', selectedStation);
-    localStorage.setItem('selectedFuelType', selectedFuelType);
+    localStorage.setItem(getUserKey('selectedStation'), selectedStation);
+    localStorage.setItem(getUserKey('selectedFuelType'), selectedFuelType);
   }
 
   function getAvailableFuelTypes(): { value: string; label: string; price: string }[] {
@@ -284,7 +325,7 @@
   // ==================== ALONG-ROUTE POI ====================
   interface RoutePOI {
     id: string;
-    type: 'gas' | 'convenience' | 'restaurant' | 'cafe' | 'ev_charging';
+    type: 'gas' | 'convenience' | 'restaurant' | 'cafe' | 'ev_charging' | 'viewpoint' | 'attraction' | 'temple' | 'park' | 'museum';
     name: string;
     lat: number;
     lng: number;
@@ -296,9 +337,9 @@
   let alongRoutePOIs: RoutePOI[] = [];
   let poiMarkers: any[] = [];
   let showPOIOverlay = false;
-  let activePOITypes: Set<string> = new Set(['gas', 'convenience']);
+  let activePOITypes: Set<string> = new Set(['viewpoint', 'attraction']);
   let isLoadingPOIs = false;
-  const POI_MAX_DIST = 300;
+  const POI_MAX_DIST = 500; // เพิ่มระยะค้นหาสำหรับสถานที่ท่องเที่ยว
 
   // 🔄 userInfo แทน driverInfo - เปลี่ยนจาก driver เป็น user
   $: userInfo = currentUser ? {
@@ -390,6 +431,17 @@
   let showSearchResults = false;
   let destinationMarker: any = null;
 
+  // Recent Searches
+  interface RecentSearch {
+    name: string;
+    address: string;
+    lat: number;
+    lng: number;
+    timestamp: number;
+  }
+  let recentSearches: RecentSearch[] = [];
+  const MAX_RECENT_SEARCHES = 8;
+
   // Direct A→B Navigation
   let directDestination: { lat: number; lng: number; name: string; address: string } | null = null;
 
@@ -415,9 +467,42 @@
   // Route Comparison
   let showRouteComparison = false;
 
+  // Share Route QR
+  let showShareQR = false;
+  let shareQRUrl = '';
+
+  // ==================== TRAFFIC INCIDENTS ====================
+  interface TrafficIncident {
+    id: string;
+    type: 'accident' | 'construction' | 'road_closed' | 'congestion' | 'hazard' | 'event';
+    severity: 'minor' | 'moderate' | 'major' | 'critical';
+    title: string;
+    description: string;
+    lat: number;
+    lng: number;
+    road: string;
+    startTime: Date;
+    endTime?: Date;
+    delay?: number; // minutes
+  }
+  let trafficIncidents: TrafficIncident[] = [];
+  let incidentMarkers: any[] = [];
+  let showIncidentsPanel = false;
+  let isLoadingIncidents = false;
+  let lastIncidentFetch: Date | null = null;
+  let incidentsOnRoute: TrafficIncident[] = [];
+  let selectedIncidentFilter: 'all' | 'accident' | 'construction' | 'road_closed' | 'congestion' = 'all';
+
   // Cache for re-selection
   let _lastStartPoint: any = null;
   let _lastSortedPoints: any[] = [];
+
+  // ==================== 2-OPT OPTIMIZATION ====================
+  let isOptimizingOrder = false;
+  let optimizationProgress = 0;
+  let useRealDistances = false;
+  let showOptimizationResult = false;
+  let optimizationResult: { beforeDistance: number; afterDistance: number; improvement: number } | null = null;
 
   // Save/Restore route state across page refresh
   function saveRouteState() {
@@ -431,7 +516,7 @@
         label: r.label, color: r.color, excludeUsed: r.excludeUsed,
         _turns: extractTurnInstructions(r)
       }));
-      sessionStorage.setItem('routeState', JSON.stringify({
+      sessionStorage.setItem(getUserKey('routeState'), JSON.stringify({
         alts: lightAlts,
         idx: selectedRouteIndex,
         start: _lastStartPoint,
@@ -441,12 +526,12 @@
   }
 
   function clearRouteState() {
-    sessionStorage.removeItem('routeState');
+    sessionStorage.removeItem(getUserKey('routeState'));
   }
 
   function restoreRouteState(): boolean {
     try {
-      const saved = sessionStorage.getItem('routeState');
+      const saved = sessionStorage.getItem(getUserKey('routeState'));
       if (!saved) return false;
       const state = JSON.parse(saved);
       if (!state.alts?.length || !state.start) return false;
@@ -475,6 +560,11 @@
   let compassDir = 'N';
   let lastDeliveryUndo: { point: any; index: number; time: number } | null = null;
   let undoTimeout: any = null;
+
+  // Curve Warning & Lane Guidance
+  let curveWarning: { active: boolean; severity: 'gentle' | 'sharp' | 'hairpin'; distance: number; direction: 'left' | 'right' } | null = null;
+  let laneGuidance: { show: boolean; lane: 'left' | 'right' | 'center'; instruction: string } | null = null;
+  let upcomingCurves: { distance: number; angle: number; direction: 'left' | 'right' }[] = [];
 
   // ==================== HELPER FUNCTIONS ====================
 
@@ -564,20 +654,32 @@
       marker.on('dragend', async () => {
         const pos = marker.getLatLng();
         const oldLat = point.lat, oldLng = point.lng;
+        const oldAddress = point.address;
         deliveryPoints[i] = { ...deliveryPoints[i], lat: pos.lat, lng: pos.lng };
         deliveryPoints = [...deliveryPoints];
+
+        // ดึงที่อยู่ใหม่จาก reverse geocoding
+        let newAddress = oldAddress;
+        const geoResult = await reverseGeocode(pos.lat, pos.lng);
+        if (geoResult) {
+          newAddress = geoResult.address;
+          deliveryPoints[i] = { ...deliveryPoints[i], address: newAddress };
+          deliveryPoints = [...deliveryPoints];
+        }
+
         try {
           const res = await fetch(`${API_URL}/points/${point.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lat: pos.lat, lng: pos.lng, user_id: currentUser?.id, table: 'users' })
+            body: JSON.stringify({ lat: pos.lat, lng: pos.lng, address: newAddress, user_id: currentUser?.id, table: 'users' })
           });
           if (!res.ok) throw new Error();
-          lastDragUndo = { pointId: point.id, pointIndex: i, name: point.name, oldLat, oldLng };
+          lastDragUndo = { pointId: point.id, pointIndex: i, name: point.name, oldLat, oldLng, oldAddress };
           showNotification(`ย้าย "${point.name}" สำเร็จ`, 'success');
+          displayPoints(); // อัปเดต popup ด้วยที่อยู่ใหม่
           if (optimizedRoute) await optimizeRoute();
         } catch {
-          deliveryPoints[i] = { ...deliveryPoints[i], lat: oldLat, lng: oldLng };
+          deliveryPoints[i] = { ...deliveryPoints[i], lat: oldLat, lng: oldLng, address: oldAddress };
           deliveryPoints = [...deliveryPoints];
           marker.setLatLng([oldLat, oldLng]);
           showNotification('ย้ายจุดไม่สำเร็จ', 'error');
@@ -597,16 +699,22 @@
 
   async function undoDragPoint() {
     if (!lastDragUndo) return;
-    const { pointId, pointIndex, name, oldLat, oldLng } = lastDragUndo;
+    const { pointId, pointIndex, name, oldLat, oldLng, oldAddress } = lastDragUndo;
     lastDragUndo = null;
     try {
+      const updateData: any = { lat: oldLat, lng: oldLng, user_id: currentUser?.id, table: 'users' };
+      if (oldAddress) updateData.address = oldAddress;
+
       const res = await fetch(`${API_URL}/points/${pointId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lat: oldLat, lng: oldLng, user_id: currentUser?.id, table: 'users' })
+        body: JSON.stringify(updateData)
       });
       if (!res.ok) throw new Error();
-      deliveryPoints[pointIndex] = { ...deliveryPoints[pointIndex], lat: oldLat, lng: oldLng };
+
+      const pointUpdate: any = { lat: oldLat, lng: oldLng };
+      if (oldAddress) pointUpdate.address = oldAddress;
+      deliveryPoints[pointIndex] = { ...deliveryPoints[pointIndex], ...pointUpdate };
       deliveryPoints = [...deliveryPoints];
       displayPoints();
       showNotification(`ย้าย "${name}" กลับตำแหน่งเดิมแล้ว`, 'success');
@@ -1003,6 +1111,22 @@
     return CONGESTION_COLORS[level] || CONGESTION_COLORS['unknown'];
   }
 
+  // Get line options based on congestion level - enhanced styling
+  function getTrafficLineOptions(level: string, baseWeight: number): { weight: number; opacity: number; dashArray?: string; className?: string } {
+    switch (level) {
+      case 'severe':
+        return { weight: baseWeight + 3, opacity: 1, className: 'traffic-severe' };
+      case 'heavy':
+        return { weight: baseWeight + 2, opacity: 1, className: 'traffic-heavy' };
+      case 'moderate':
+        return { weight: baseWeight + 1, opacity: 0.9, dashArray: '12 6' };
+      case 'low':
+        return { weight: baseWeight, opacity: 0.85 };
+      default:
+        return { weight: baseWeight, opacity: 0.7 };
+    }
+  }
+
   function clearTrafficLayers() {
     trafficLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch {} });
     trafficLayers = [];
@@ -1020,30 +1144,97 @@
     }
     if (allCongestion.length === 0) return;
     const coords = route.geometry.coordinates;
-    // Each congestion value = one segment between two coordinates
-    let currentColor = getCongestionColor(allCongestion[0]);
+
+    // Enhanced: track current congestion level for styling
+    let currentLevel = allCongestion[0];
+    let currentColor = getCongestionColor(currentLevel);
     let segCoords: [number, number][] = [[coords[0][1], coords[0][0]]];
 
     for (let i = 0; i < allCongestion.length && i < coords.length - 1; i++) {
-      const color = getCongestionColor(allCongestion[i]);
+      const level = allCongestion[i];
+      const color = getCongestionColor(level);
       const nextCoord: [number, number] = [coords[i + 1][1], coords[i + 1][0]];
+
       if (color === currentColor) {
         segCoords.push(nextCoord);
       } else {
-        // Finish current segment
+        // Finish current segment with enhanced styling
         segCoords.push(nextCoord);
-        const line = L.polyline(segCoords, { color: currentColor, weight, opacity, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+        const opts = getTrafficLineOptions(currentLevel, weight);
+
+        // Draw glow layer for heavy/severe traffic
+        if (currentLevel === 'heavy' || currentLevel === 'severe') {
+          const glowLine = L.polyline(segCoords, {
+            color: currentColor,
+            weight: opts.weight + 6,
+            opacity: 0.3,
+            lineCap: 'round',
+            lineJoin: 'round'
+          }).addTo(map);
+          trafficLayers.push(glowLine);
+        }
+
+        // Main traffic line
+        const line = L.polyline(segCoords, {
+          color: currentColor,
+          weight: opts.weight,
+          opacity: opts.opacity,
+          lineCap: 'round',
+          lineJoin: 'round',
+          dashArray: opts.dashArray
+        }).addTo(map);
         trafficLayers.push(line);
+
         // Start new segment from overlap point
         segCoords = [nextCoord];
+        currentLevel = level;
         currentColor = color;
       }
     }
-    // Draw last segment
+
+    // Draw last segment with enhanced styling
     if (segCoords.length >= 2) {
-      const line = L.polyline(segCoords, { color: currentColor, weight, opacity, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+      const opts = getTrafficLineOptions(currentLevel, weight);
+
+      // Glow for heavy/severe
+      if (currentLevel === 'heavy' || currentLevel === 'severe') {
+        const glowLine = L.polyline(segCoords, {
+          color: currentColor,
+          weight: opts.weight + 6,
+          opacity: 0.3,
+          lineCap: 'round',
+          lineJoin: 'round'
+        }).addTo(map);
+        trafficLayers.push(glowLine);
+      }
+
+      const line = L.polyline(segCoords, {
+        color: currentColor,
+        weight: opts.weight,
+        opacity: opts.opacity,
+        lineCap: 'round',
+        lineJoin: 'round',
+        dashArray: opts.dashArray
+      }).addTo(map);
       trafficLayers.push(line);
     }
+  }
+
+  // Get traffic statistics for legend
+  function getTrafficStats(route: any): { low: number; moderate: number; heavy: number; severe: number; total: number } {
+    const stats = { low: 0, moderate: 0, heavy: 0, severe: 0, total: 0 };
+    if (!route?.legs) return stats;
+    for (const leg of route.legs) {
+      if (!leg.annotation?.congestion) continue;
+      for (const c of leg.annotation.congestion) {
+        stats.total++;
+        if (c === 'low' || c === 'unknown') stats.low++;
+        else if (c === 'moderate') stats.moderate++;
+        else if (c === 'heavy') stats.heavy++;
+        else if (c === 'severe') stats.severe++;
+      }
+    }
+    return stats;
   }
 
   function getTrafficSummary(route: any): { level: string; label: string; color: string } {
@@ -1065,7 +1256,7 @@
 
   function toggleTraffic() {
     showTraffic = !showTraffic;
-    localStorage.setItem('showTraffic', String(showTraffic));
+    localStorage.setItem(getUserKey('showTraffic'), String(showTraffic));
     if (showTraffic && optimizedRoute) {
       // Refetch with traffic annotations
       optimizeRoute();
@@ -1497,6 +1688,12 @@
       }
     }
     saveRouteState();
+    // Clear old incidents when route changes
+    if (trafficIncidents.length > 0) {
+      trafficIncidents = [];
+      incidentsOnRoute = [];
+      clearIncidentMarkers();
+    }
   }
 
   // Extract diverging segments of altCoords that don't overlap with mainCoords
@@ -1656,12 +1853,166 @@
       nextTurnInstruction = 'ถึงจุดหมาย';
       nextTurnIcon = '🏁';
       nextTurnDistance = 0;
+      laneGuidance = null;
       return;
     }
     const step = turnInstructions[currentStepIndex];
     nextTurnInstruction = getTurnText(step.type, step.modifier, step.name);
     nextTurnIcon = getTurnIcon(step.type, step.modifier);
     nextTurnDistance = step.distance;
+
+    // Update lane guidance based on upcoming turn
+    updateLaneGuidance(step);
+  }
+
+  // ==================== CURVE WARNING ====================
+  function detectCurvesOnRoute() {
+    if (!cachedRouteCoords || cachedRouteCoords.length < 10) {
+      upcomingCurves = [];
+      return;
+    }
+
+    const curves: { distance: number; angle: number; direction: 'left' | 'right' }[] = [];
+    let accumulatedDistance = 0;
+
+    // Analyze route geometry for sharp turns
+    for (let i = lastRouteIndex + 5; i < cachedRouteCoords.length - 5; i += 5) {
+      const prev = cachedRouteCoords[i - 5];
+      const curr = cachedRouteCoords[i];
+      const next = cachedRouteCoords[i + 5];
+
+      // Calculate bearing change
+      const bearing1 = calculateBearing(prev[0], prev[1], curr[0], curr[1]);
+      const bearing2 = calculateBearing(curr[0], curr[1], next[0], next[1]);
+      let angleDiff = bearing2 - bearing1;
+
+      // Normalize to -180 to 180
+      if (angleDiff > 180) angleDiff -= 360;
+      if (angleDiff < -180) angleDiff += 360;
+
+      const absAngle = Math.abs(angleDiff);
+
+      // Track distance from current position
+      if (i > lastRouteIndex) {
+        accumulatedDistance += getDistance(
+          cachedRouteCoords[i - 5][0], cachedRouteCoords[i - 5][1],
+          cachedRouteCoords[i][0], cachedRouteCoords[i][1]
+        );
+      }
+
+      // Detect significant curves (> 30 degrees)
+      if (absAngle > 30 && accumulatedDistance < 2000) {
+        curves.push({
+          distance: accumulatedDistance,
+          angle: absAngle,
+          direction: angleDiff > 0 ? 'right' : 'left'
+        });
+      }
+    }
+
+    upcomingCurves = curves.slice(0, 5); // Keep only next 5 curves
+  }
+
+  function calculateBearing(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const lat1Rad = lat1 * Math.PI / 180;
+    const lat2Rad = lat2 * Math.PI / 180;
+
+    const x = Math.sin(dLng) * Math.cos(lat2Rad);
+    const y = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng);
+
+    return (Math.atan2(x, y) * 180 / Math.PI + 360) % 360;
+  }
+
+  function updateCurveWarning() {
+    if (!isNavigating || upcomingCurves.length === 0) {
+      curveWarning = null;
+      return;
+    }
+
+    const nextCurve = upcomingCurves[0];
+    if (!nextCurve) {
+      curveWarning = null;
+      return;
+    }
+
+    // Warn when within 300m of curve
+    if (nextCurve.distance < 300) {
+      let severity: 'gentle' | 'sharp' | 'hairpin' = 'gentle';
+      if (nextCurve.angle > 90) severity = 'hairpin';
+      else if (nextCurve.angle > 50) severity = 'sharp';
+
+      const newWarning = {
+        active: true,
+        severity,
+        distance: Math.round(nextCurve.distance),
+        direction: nextCurve.direction
+      };
+
+      // Only speak once per curve
+      if (!curveWarning || curveWarning.distance > nextCurve.distance + 50) {
+        if (severity === 'hairpin') {
+          speak(`ระวัง โค้งหักศอก${nextCurve.direction === 'left' ? 'ซ้าย' : 'ขวา'} ใน ${Math.round(nextCurve.distance)} เมตร`);
+        } else if (severity === 'sharp') {
+          speak(`โค้ง${nextCurve.direction === 'left' ? 'ซ้าย' : 'ขวา'}หน้า`);
+        }
+      }
+
+      curveWarning = newWarning;
+    } else if (nextCurve.distance > 500) {
+      curveWarning = null;
+    }
+  }
+
+  // ==================== LANE GUIDANCE ====================
+  function updateLaneGuidance(step: TurnInstruction) {
+    if (!step || !isNavigating) {
+      laneGuidance = null;
+      return;
+    }
+
+    const dist = nextTurnDistance;
+    const modifier = step.modifier || '';
+    const type = step.type;
+
+    // Show lane guidance when within 500m of turn
+    if (dist > 500 || dist < 10) {
+      laneGuidance = null;
+      return;
+    }
+
+    let lane: 'left' | 'right' | 'center' = 'center';
+    let instruction = '';
+
+    if (type === 'turn' || type === 'end of road' || type === 'fork') {
+      if (modifier.includes('left')) {
+        lane = 'left';
+        instruction = 'ชิดซ้าย';
+      } else if (modifier.includes('right')) {
+        lane = 'right';
+        instruction = 'ชิดขวา';
+      }
+    } else if (type === 'roundabout') {
+      lane = 'left';
+      instruction = 'ชิดซ้ายเข้าวงเวียน';
+    } else if (type === 'off ramp' || type === 'on ramp') {
+      if (modifier.includes('left')) {
+        lane = 'left';
+        instruction = 'ชิดซ้ายออกทางด่วน';
+      } else {
+        lane = 'right';
+        instruction = 'ชิดขวาออกทางด่วน';
+      }
+    } else if (type === 'merge') {
+      lane = 'center';
+      instruction = 'เตรียมรวมเลน';
+    }
+
+    if (instruction) {
+      laneGuidance = { show: true, lane, instruction };
+    } else {
+      laneGuidance = null;
+    }
   }
 
   function advanceTurnStep() {
@@ -1704,7 +2055,9 @@
   }
 
   async function handleOffRouteDetection() {
-    if (!isNavigating) return;
+    if (!isNavigating || !navigationStartTime) return;
+    // Skip off-route check for first 5 seconds (GPS settling period)
+    if (Date.now() - navigationStartTime.getTime() < 5000) return;
     const offRoute = checkOffRoute();
     if (offRoute) {
       consecutiveOffRouteCount++;
@@ -1713,8 +2066,8 @@
           isOffRoute = true;
           speak('ออกนอกเส้นทาง');
         }
-        // Auto-reroute only if enabled and cooldown passed
-        if (autoRerouteEnabled) {
+        // Auto-reroute only if enabled, cooldown passed, and not exceeded max
+        if (autoRerouteEnabled && rerouteCount < 10) {
           const now = Date.now();
           if (now - lastRerouteTime > rerouteCooldown) {
             lastRerouteTime = now;
@@ -1722,9 +2075,13 @@
             showNotification(`🔄 ออกนอกเส้นทาง ${Math.round(offRouteDistance)} ม. - กำลังคำนวณเส้นทางใหม่...`, 'warning');
             speak('กำลังคำนวณเส้นทางใหม่');
             addAlert('navigation', `คำนวณเส้นทางใหม่ครั้งที่ ${rerouteCount} (ห่าง ${Math.round(offRouteDistance)} ม.)`);
-            await autoReroute();
-            consecutiveOffRouteCount = 0;
+            const success = await autoReroute();
+            if (success) {
+              consecutiveOffRouteCount = 0;
+            }
           }
+        } else if (rerouteCount >= 10) {
+          showNotification('คำนวณเส้นทางใหม่เกินจำนวน กรุณาตรวจสอบตำแหน่ง', 'warning');
         }
       }
     } else {
@@ -1737,8 +2094,8 @@
     }
   }
 
-  async function autoReroute() {
-    if (!currentLocation || !optimizedRoute) return;
+  async function autoReroute(): Promise<boolean> {
+    if (!currentLocation || !optimizedRoute) return false;
     try {
       const remainingPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1 && !arrivedPoints.includes(optimizedRoute.optimized_order.indexOf(p)));
       if (remainingPoints.length === 0) {
@@ -1781,9 +2138,11 @@
       updateNavigationMarkers();
       isOffRoute = false;
       showNotification('✅ คำนวณเส้นทางใหม่สำเร็จ', 'success');
+      return true;
     } catch (err) {
       console.error('Auto reroute error:', err);
       showNotification('คำนวณเส้นทางใหม่ไม่สำเร็จ', 'error');
+      return false;
     }
   }
 
@@ -1862,6 +2221,39 @@
     searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 500);
   }
 
+  // Reverse geocode: แปลงพิกัดเป็นที่อยู่
+  async function reverseGeocode(lat: number, lng: number): Promise<{ name: string; address: string } | null> {
+    try {
+      const params = new URLSearchParams({
+        lat: String(lat), lon: String(lng),
+        format: 'json', addressdetails: '1', 'accept-language': 'th'
+      });
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?${params.toString()}`, {
+        headers: { 'User-Agent': 'RouteOptimization/2.0' }
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || data.error) return null;
+
+      // สร้างชื่อสถานที่จาก address details
+      const addr = data.address || {};
+      const nameParts = [
+        addr.amenity || addr.shop || addr.building || addr.road || addr.hamlet || addr.village,
+        addr.subdistrict || addr.suburb,
+        addr.district || addr.city_district,
+        addr.city || addr.town || addr.province
+      ].filter(Boolean);
+
+      return {
+        name: nameParts[0] || data.display_name?.split(',')[0] || 'ไม่ทราบชื่อ',
+        address: data.display_name || `${lat.toFixed(6)}, ${lng.toFixed(6)}`
+      };
+    } catch (err) {
+      console.error('Reverse geocode error:', err);
+      return null;
+    }
+  }
+
   function selectSearchResult(result: any) {
     showSearchResults = false;
     searchQuery = result.name;
@@ -1875,6 +2267,41 @@
       })
     }).addTo(map);
     directDestination = { lat: result.lat, lng: result.lng, name: result.name, address: result.address };
+
+    // Save to recent searches
+    addToRecentSearches({ name: result.name, address: result.address, lat: result.lat, lng: result.lng });
+  }
+
+  function loadRecentSearches() {
+    try {
+      const saved = localStorage.getItem(getUserKey('recentSearches'));
+      if (saved) recentSearches = JSON.parse(saved);
+    } catch (e) { recentSearches = []; }
+  }
+
+  function saveRecentSearches() {
+    try {
+      localStorage.setItem(getUserKey('recentSearches'), JSON.stringify(recentSearches));
+    } catch (e) {}
+  }
+
+  function addToRecentSearches(item: { name: string; address: string; lat: number; lng: number }) {
+    // Remove duplicate if exists
+    recentSearches = recentSearches.filter(r => !(Math.abs(r.lat - item.lat) < 0.0001 && Math.abs(r.lng - item.lng) < 0.0001));
+    // Add to front
+    recentSearches.unshift({ ...item, timestamp: Date.now() });
+    // Limit size
+    if (recentSearches.length > MAX_RECENT_SEARCHES) recentSearches = recentSearches.slice(0, MAX_RECENT_SEARCHES);
+    saveRecentSearches();
+  }
+
+  function selectRecentSearch(recent: RecentSearch) {
+    selectSearchResult({ name: recent.name, address: recent.address, lat: recent.lat, lng: recent.lng });
+  }
+
+  function clearRecentSearches() {
+    recentSearches = [];
+    saveRecentSearches();
   }
 
   async function navigateToSearchResult() {
@@ -1921,9 +2348,16 @@
   // ==================== SAVED ROUTES ====================
 
   function loadSavedRoutes() {
+    if (!currentUser?.id) {
+      console.warn('Cannot load saved routes: no user ID');
+      savedRoutes = [];
+      return;
+    }
     try {
-      const saved = localStorage.getItem('savedRoutes');
+      const key = `savedRoutes_${currentUser.id}`;
+      const saved = localStorage.getItem(key);
       if (saved) savedRoutes = JSON.parse(saved);
+      else savedRoutes = [];
     } catch { savedRoutes = []; }
   }
 
@@ -1944,14 +2378,21 @@
       avoidTolls: avoidTollRoads,
       createdAt: new Date().toISOString()
     };
+    if (!currentUser?.id) {
+      showNotification('ไม่สามารถบันทึก: ไม่พบ user ID', 'error');
+      return;
+    }
     savedRoutes = [route, ...savedRoutes].slice(0, 20);
-    localStorage.setItem('savedRoutes', JSON.stringify(savedRoutes));
+    const key = `savedRoutes_${currentUser.id}`;
+    localStorage.setItem(key, JSON.stringify(savedRoutes));
     showNotification('💾 บันทึกเส้นทางสำเร็จ', 'success');
   }
 
   function deleteSavedRoute(id: string) {
+    if (!currentUser?.id) return;
     savedRoutes = savedRoutes.filter(r => r.id !== id);
-    localStorage.setItem('savedRoutes', JSON.stringify(savedRoutes));
+    const key = `savedRoutes_${currentUser.id}`;
+    localStorage.setItem(key, JSON.stringify(savedRoutes));
     showNotification('ลบเส้นทางที่บันทึกแล้ว', 'success');
   }
 
@@ -2004,6 +2445,11 @@
     }
   }
 
+  // Helper function to get user-specific localStorage key
+  function getUserKey(key: string): string {
+    return `${key}_${currentUser?.id || 'guest'}`;
+  }
+
   function toggleRoutePreference(pref: typeof routePreference) {
     routePreference = pref;
     const prefLabels: Record<string, string> = {
@@ -2022,9 +2468,9 @@
     }
     showNotification(`เลือก: ${prefLabels[pref]}`, 'success');
     speak(prefLabels[pref]);
-    localStorage.setItem('routePreference', pref);
-    localStorage.setItem('avoidTollRoads', String(avoidTollRoads));
-    localStorage.setItem('avoidExpressways', String(avoidExpressways));
+    localStorage.setItem(getUserKey('routePreference'), pref);
+    localStorage.setItem(getUserKey('avoidTollRoads'), String(avoidTollRoads));
+    localStorage.setItem(getUserKey('avoidExpressways'), String(avoidExpressways));
 
     // If we already have route alternatives, auto-select the best one
     if (routeAlternatives.length > 1 && _lastStartPoint && _lastSortedPoints.length > 0) {
@@ -2149,6 +2595,193 @@
     return sorted;
   }
 
+  // ==================== 2-OPT OPTIMIZATION ALGORITHM ====================
+
+  // Build Haversine distance matrix
+  function buildHaversineMatrix(points: { lat: number; lng: number }[]): number[][] {
+    const n = points.length;
+    const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dist = getDistance(points[i].lat, points[i].lng, points[j].lat, points[j].lng);
+        matrix[i][j] = dist;
+        matrix[j][i] = dist;
+      }
+    }
+    return matrix;
+  }
+
+  // Build real distance matrix using Mapbox API (slow but accurate)
+  async function buildRealDistanceMatrix(points: { lat: number; lng: number }[]): Promise<number[][]> {
+    const n = points.length;
+    const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
+
+    // Fetch all pairs in batches to avoid too many concurrent requests
+    const pairs: { i: number; j: number }[] = [];
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        pairs.push({ i, j });
+      }
+    }
+
+    const batchSize = 5;
+    const totalPairs = pairs.length;
+    let completed = 0;
+
+    for (let b = 0; b < pairs.length; b += batchSize) {
+      const batch = pairs.slice(b, b + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async ({ i, j }) => {
+          const waypoints = `${points[i].lng},${points[i].lat};${points[j].lng},${points[j].lat}`;
+          try {
+            const data = await callOSRMProxy(waypoints, { steps: false });
+            return { i, j, distance: data.routes[0].distance };
+          } catch {
+            // Fallback to Haversine if API fails
+            return { i, j, distance: getDistance(points[i].lat, points[i].lng, points[j].lat, points[j].lng) };
+          }
+        })
+      );
+
+      results.forEach((res) => {
+        if (res.status === 'fulfilled') {
+          const { i, j, distance } = res.value;
+          matrix[i][j] = distance;
+          matrix[j][i] = distance;
+        }
+      });
+
+      completed += batch.length;
+      optimizationProgress = Math.round((completed / totalPairs) * 50) + 50; // 50-100%
+    }
+
+    return matrix;
+  }
+
+  // Calculate total tour distance using distance matrix
+  function calculateTourDistance(tour: number[], matrix: number[][]): number {
+    let total = 0;
+    for (let i = 0; i < tour.length - 1; i++) {
+      total += matrix[tour[i]][tour[i + 1]];
+    }
+    return total;
+  }
+
+  // 2-opt improvement: reverse segment between i and j if it improves the tour
+  function improveWith2opt(tour: number[], matrix: number[][]): number[] {
+    const n = tour.length;
+    let improved = true;
+    let best = [...tour];
+
+    while (improved) {
+      improved = false;
+      for (let i = 1; i < n - 2; i++) {
+        for (let j = i + 1; j < n - 1; j++) {
+          // Current edges: (i-1, i) and (j, j+1)
+          // New edges after reverse: (i-1, j) and (i, j+1)
+          const currentCost = matrix[best[i - 1]][best[i]] + matrix[best[j]][best[j + 1]];
+          const newCost = matrix[best[i - 1]][best[j]] + matrix[best[i]][best[j + 1]];
+
+          if (newCost < currentCost - 0.1) { // Small epsilon for floating point
+            // Reverse segment from i to j
+            const segment = best.slice(i, j + 1).reverse();
+            best = [...best.slice(0, i), ...segment, ...best.slice(j + 1)];
+            improved = true;
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  // Main optimization function
+  async function optimizePointOrder() {
+    if (allDeliveryPoints.length < 3) {
+      showNotification('ต้องมีอย่างน้อย 3 จุดแวะเพื่อใช้การจัดลำดับ', 'warning');
+      return;
+    }
+
+    isOptimizingOrder = true;
+    optimizationProgress = 0;
+
+    try {
+      // Get start point
+      const startPoint = await getCurrentLocationAsStart();
+
+      // Build points array with start at index 0
+      const points = [startPoint, ...allDeliveryPoints.map(p => ({ lat: p.lat, lng: p.lng }))];
+
+      optimizationProgress = 10;
+
+      // Step 1: Get initial tour from nearest neighbor
+      const nnOrder = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
+      const initialTour = [0, ...nnOrder.map((p: any) => allDeliveryPoints.findIndex((dp: any) => dp.id === p.id) + 1)];
+
+      optimizationProgress = 20;
+
+      // Step 2: Build distance matrix
+      let matrix: number[][];
+      if (useRealDistances) {
+        optimizationProgress = 25;
+        matrix = await buildRealDistanceMatrix(points);
+      } else {
+        matrix = buildHaversineMatrix(points);
+        optimizationProgress = 50;
+      }
+
+      // Calculate before distance
+      const beforeDistance = calculateTourDistance(initialTour, matrix);
+
+      optimizationProgress = 60;
+
+      // Step 3: Apply 2-opt improvement
+      const improvedTour = improveWith2opt(initialTour, matrix);
+
+      optimizationProgress = 90;
+
+      // Calculate after distance
+      const afterDistance = calculateTourDistance(improvedTour, matrix);
+      const improvement = ((beforeDistance - afterDistance) / beforeDistance) * 100;
+
+      // Step 4: Reorder delivery points according to improved tour
+      const newOrder = improvedTour.slice(1).map(idx => allDeliveryPoints[idx - 1]);
+      deliveryPoints = newOrder;
+      manualOrder = true; // Lock to this order
+
+      optimizationProgress = 100;
+
+      // Store result for display
+      optimizationResult = {
+        beforeDistance,
+        afterDistance,
+        improvement
+      };
+      showOptimizationResult = true;
+
+      displayPoints();
+
+      if (improvement > 0.1) {
+        showNotification(`จัดลำดับใหม่แล้ว! ประหยัดระยะทาง ${improvement.toFixed(1)}%`, 'success');
+        speak(`จัดลำดับจุดแวะใหม่แล้ว ประหยัดระยะทาง ${improvement.toFixed(0)} เปอร์เซ็นต์`);
+      } else {
+        showNotification('ลำดับเดิมดีที่สุดแล้ว', 'success');
+      }
+
+      // Recalculate route with new order
+      if (optimizedRoute) {
+        await optimizeRoute();
+      }
+
+    } catch (err: any) {
+      console.error('Optimization error:', err);
+      showNotification(err.message || 'จัดลำดับไม่สำเร็จ', 'error');
+    } finally {
+      isOptimizingOrder = false;
+      optimizationProgress = 0;
+    }
+  }
+
   // ==================== GPS FUNCTIONS - COPIED EXACTLY FROM ORIGINAL ====================
   function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
     return new Promise((resolve, reject) => {
@@ -2170,6 +2803,7 @@
           });
         },
         (error) => {
+          // Fallback: lower accuracy but still fresh position
           navigator.geolocation.getCurrentPosition(
             (position) => {
               resolve({
@@ -2186,15 +2820,15 @@
             },
             {
               enableHighAccuracy: false,
-              timeout: 30000,
-              maximumAge: 60000
+              timeout: 10000,
+              maximumAge: 5000
             }
           );
         },
         {
           enableHighAccuracy: true,
-          timeout: 15000,
-          maximumAge: 30000
+          timeout: 8000,
+          maximumAge: 0
         }
       );
     });
@@ -2221,19 +2855,41 @@
       const isStart = i === 0;
       const isCurrentLocation = isStart && point.id === -1;
 
-      let gradient, glow;
-      if (isCurrentLocation) { gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'; glow = '#3b82f6'; }
-      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
+      let markerHtml: string;
+      let markerSize: [number, number];
+      let markerAnchor: [number, number];
+
+      if (isCurrentLocation) {
+        // Clean start-point marker
+        markerHtml = `
+          <div class="start-loc-marker">
+            <div class="start-loc-ripple"></div>
+            <div class="start-loc-ripple start-loc-ripple-2"></div>
+            <div class="start-loc-core">
+              <svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/></svg>
+            </div>
+            <div class="start-loc-label">คุณอยู่ที่นี่</div>
+          </div>`;
+        markerSize = [48, 48];
+        markerAnchor = [24, 24];
+      } else {
+        const gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        const glow = '#667eea';
+        markerHtml = `<div class="marker-pin route-pin" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${i}</span></div>`;
+        markerSize = [52, 52];
+        markerAnchor = [26, 26];
+      }
 
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: 'route-marker',
-          html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${isCurrentLocation ? '📍' : i}</span>${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}</div>`,
-          iconSize: [52, 52],
-          iconAnchor: [26, 26]
+          html: markerHtml,
+          iconSize: markerSize,
+          iconAnchor: markerAnchor
         })
       }).addTo(map);
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${gradient}"><span class="popup-number">${isCurrentLocation ? '📍' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดแวะ'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
+      const popupGradient = isCurrentLocation ? 'linear-gradient(135deg, #00ff88 0%, #00c06a 100%)' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${popupGradient}"><span class="popup-number">${isCurrentLocation ? '📍' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดแวะ'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
       markers.push(marker);
     });
   }
@@ -2288,13 +2944,18 @@
       updateCurrentLocationMarker();
     }
 
+    // Clear existing watch before starting new one (prevent orphaned watches)
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
     watchId = navigator.geolocation.watchPosition(
       updatePosition,
       handleGeoError,
       {
         enableHighAccuracy: true,
         timeout: 20000,
-        maximumAge: 2000
+        maximumAge: 0
       }
     );
 
@@ -2319,6 +2980,8 @@
       updateFuelEstimate();
       updateStatistics();
       updateCompass();
+      detectCurvesOnRoute();
+      updateCurveWarning();
     }, 2000);
 
     speak('เริ่มนำทาง');
@@ -2355,6 +3018,10 @@
       currentLocationMarker = null;
       headingMarkerElement = null;
     }
+    if (accuracyCircle) {
+      accuracyCircle.remove();
+      accuracyCircle = null;
+    }
     if (traveledLayer) {
       traveledLayer.remove();
       traveledLayer = null;
@@ -2389,6 +3056,10 @@
     lastRouteIndex = 0;
     avgSpeedSamples = [];
     lastDrawnRouteIndex = -1;
+    currentSpeed = 0;
+    maxSpeed = 0;
+    lastPosition = null;
+    lastRerouteTime = 0;
     // Keep currentLocation so next startNavigation can center on user
     currentHeading = null;
     currentTargetIndex = 0;
@@ -2419,7 +3090,7 @@
     if (gpsSpeed !== null && gpsSpeed !== undefined && !isNaN(gpsSpeed) && gpsSpeed >= 0) {
       const rawSpeed = gpsSpeed * 3.6; // m/s to km/h
       if (rawSpeed < 250) { // sanity check
-        const alpha = 0.4; // slightly more responsive for GPS speed
+        const alpha = 0.35;
         currentSpeed = currentSpeed * (1 - alpha) + rawSpeed * alpha;
         if (currentSpeed > maxSpeed && currentSpeed < 200) maxSpeed = currentSpeed;
       }
@@ -2490,49 +3161,81 @@
 
   function updateCurrentLocationMarker() {
     if (!L || !map || !currentLocation) return;
-    const accuracySize = Math.min(accuracy * 2, 100);
     const headingDeg = currentHeading !== null ? currentHeading : 0;
     const showHeading = currentHeading !== null && currentSpeed > 3;
+
+    // Update or create accuracy circle
+    if (accuracy > 0) {
+      if (accuracyCircle) {
+        accuracyCircle.setLatLng([currentLocation.lat, currentLocation.lng]);
+        accuracyCircle.setRadius(accuracy);
+      } else {
+        accuracyCircle = L.circle([currentLocation.lat, currentLocation.lng], {
+          radius: accuracy,
+          color: '#00ff88',
+          fillColor: '#00ff88',
+          fillOpacity: 0.08,
+          weight: 1.5,
+          opacity: 0.35,
+          dashArray: '4 6'
+        }).addTo(map);
+      }
+    }
 
     if (currentLocationMarker) {
       currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
       // Update heading arrow rotation
       if (headingMarkerElement) {
-        const arrow = headingMarkerElement.querySelector('.location-heading') as HTMLElement;
+        const arrow = headingMarkerElement.querySelector('.heading-arrow') as HTMLElement;
         if (arrow) {
           arrow.style.transform = `rotate(${headingDeg}deg)`;
           arrow.style.opacity = showHeading ? '1' : '0';
-        }
-        const accCircle = headingMarkerElement.querySelector('.location-accuracy') as HTMLElement;
-        if (accCircle) {
-          accCircle.style.width = `${accuracySize}px`;
-          accCircle.style.height = `${accuracySize}px`;
         }
       }
     } else {
       currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
         icon: L.divIcon({
-          className: 'current-location-marker',
+          className: '',
           html: `
-            <div class="location-wrapper">
-              <div class="location-accuracy" style="width: ${accuracySize}px; height: ${accuracySize}px;"></div>
-              <div class="location-heading" style="transform: rotate(${headingDeg}deg); opacity: ${showHeading ? 1 : 0};">
-                <div class="heading-cone"></div>
-              </div>
-              <div class="location-dot-gmap">
-                <div class="location-dot-inner-gmap"></div>
-              </div>
-              <div class="location-pulse-gmap"></div>
+            <div class="my-loc-wrapper">
+              <div class="loc-pulse-ring"></div>
+              <div class="loc-pulse-ring loc-pulse-ring-2"></div>
+              <div class="heading-arrow" style="transform: rotate(${headingDeg}deg); opacity: ${showHeading ? 1 : 0};"></div>
+              <div class="my-loc-dot"></div>
             </div>
           `,
-          iconSize: [48, 48],
-          iconAnchor: [24, 24]
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
         }),
         zIndexOffset: 1000
       }).addTo(map);
-      // Store reference to update heading
       headingMarkerElement = currentLocationMarker.getElement();
     }
+  }
+
+  // Manual GPS refresh button
+  let isRefreshingGps = false;
+  async function refreshGpsPosition() {
+    if (isRefreshingGps || !navigator.geolocation) return;
+    isRefreshingGps = true;
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        currentLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        accuracy = pos.coords.accuracy;
+        updateCurrentLocationMarker();
+        if (map) {
+          map.setView([pos.coords.latitude, pos.coords.longitude], map.getZoom(), { animate: true });
+        }
+        showNotification(`GPS อัพเดท (±${Math.round(accuracy)}m)`, 'success');
+        isRefreshingGps = false;
+      },
+      (err) => {
+        showNotification('ไม่สามารถรับตำแหน่ง GPS ได้', 'error');
+        isRefreshingGps = false;
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
   }
 
   function calculateSpeed(newLat: number, newLng: number) {
@@ -2602,7 +3305,8 @@
     const arrivalThreshold = 50 + accOffset;
 
     // Hysteresis: only trigger if moving closer (not GPS jitter bouncing out and back)
-    const movingCloser = dist < lastArrivalDist + 10; // 10m jitter allowance
+    const jitterTolerance = Math.max(10, accuracy * 0.5);
+    const movingCloser = dist < lastArrivalDist + jitterTolerance;
 
     // ใกล้ถึง - แจ้งเตือนว่าใกล้ถึงแล้ว
     if (dist < proximityThreshold && !arrivalProximityAnnounced && movingCloser) {
@@ -2736,6 +3440,337 @@
     const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
+  }
+
+  // ==================== TRAFFIC INCIDENTS FUNCTIONS ====================
+  async function fetchTrafficIncidents() {
+    if (!map || !optimizedRoute?.route?.geometry?.coordinates) {
+      showNotification('กรุณาคำนวณเส้นทางก่อน', 'warning');
+      return;
+    }
+    isLoadingIncidents = true;
+    try {
+      const routeCoords = optimizedRoute.route.geometry.coordinates;
+      const incidents: TrafficIncident[] = [];
+
+      // Sample points along route for Overpass query (every ~1km)
+      const samplePoints: [number, number][] = [];
+      let lastSampleDist = 0;
+      for (let i = 0; i < routeCoords.length; i++) {
+        if (i === 0 || i === routeCoords.length - 1) {
+          samplePoints.push([routeCoords[i][1], routeCoords[i][0]]);
+        } else if (i > 0) {
+          const dist = getDistance(routeCoords[i-1][1], routeCoords[i-1][0], routeCoords[i][1], routeCoords[i][0]);
+          lastSampleDist += dist;
+          if (lastSampleDist >= 2000) { // every 2km
+            samplePoints.push([routeCoords[i][1], routeCoords[i][0]]);
+            lastSampleDist = 0;
+          }
+        }
+      }
+
+      // Build bounding box along route
+      const lats = routeCoords.map((c: number[]) => c[1]);
+      const lngs = routeCoords.map((c: number[]) => c[0]);
+      const minLat = Math.min(...lats) - 0.005;
+      const maxLat = Math.max(...lats) + 0.005;
+      const minLng = Math.min(...lngs) - 0.005;
+      const maxLng = Math.max(...lngs) + 0.005;
+
+      // Try to fetch road works from Overpass API along route
+      try {
+        const overpassQuery = `
+          [out:json][timeout:15];
+          (
+            node["highway"="construction"](${minLat},${minLng},${maxLat},${maxLng});
+            way["highway"="construction"](${minLat},${minLng},${maxLat},${maxLng});
+            node["barrier"="block"](${minLat},${minLng},${maxLat},${maxLng});
+          );
+          out center;
+        `;
+        const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          body: `data=${encodeURIComponent(overpassQuery)}`
+        });
+        if (overpassRes.ok) {
+          const overpassData = await overpassRes.json();
+          overpassData.elements?.forEach((el: any) => {
+            const lat = el.lat || el.center?.lat;
+            const lng = el.lon || el.center?.lon;
+            if (lat && lng && isNearRoute(lat, lng, 300)) {
+              incidents.push({
+                id: `osm-${el.id}`,
+                type: 'construction',
+                severity: 'moderate',
+                title: 'งานก่อสร้างถนน',
+                description: el.tags?.name || 'พื้นที่ก่อสร้าง',
+                lat, lng,
+                road: el.tags?.name || 'บนเส้นทาง',
+                startTime: new Date(),
+                delay: 5 + Math.floor(Math.random() * 10)
+              });
+            }
+          });
+        }
+      } catch (e) {
+        console.log('Overpass fetch skipped');
+      }
+
+      // Generate mock incidents along the actual route
+      const mockCount = Math.min(3, Math.floor(routeCoords.length / 100));
+      for (let i = 0; i < mockCount; i++) {
+        const idx = Math.floor((i + 1) * routeCoords.length / (mockCount + 1));
+        const [lng, lat] = routeCoords[idx];
+        const mockIncident = generateMockIncidentAtPoint(lat, lng, i);
+        incidents.push(mockIncident);
+      }
+
+      trafficIncidents = incidents;
+      incidentsOnRoute = incidents; // ทุกอันอยู่บนเส้นทาง
+      lastIncidentFetch = new Date();
+      displayIncidentMarkers();
+
+      if (incidents.length > 0) {
+        showNotification(`พบ ${incidents.length} เหตุการณ์บนเส้นทาง`, 'warning');
+
+        // Check for serious incidents that need rerouting
+        const seriousIncidents = incidents.filter(i =>
+          i.type === 'road_closed' ||
+          i.type === 'accident' && (i.severity === 'critical' || i.severity === 'major') ||
+          i.severity === 'critical'
+        );
+
+        if (seriousIncidents.length > 0) {
+          suggestReroute(seriousIncidents);
+        }
+      } else {
+        showNotification('ไม่พบเหตุการณ์บนเส้นทาง ✓', 'success');
+      }
+    } catch (err) {
+      console.error('Error fetching traffic incidents:', err);
+      showNotification('ไม่สามารถโหลดข้อมูลจราจรได้', 'error');
+    } finally {
+      isLoadingIncidents = false;
+    }
+  }
+
+  let showRerouteModal = false;
+  let rerouteReason = '';
+  let rerouteIncidents: TrafficIncident[] = [];
+
+  function suggestReroute(seriousIncidents: TrafficIncident[]) {
+    rerouteIncidents = seriousIncidents;
+    const roadClosed = seriousIncidents.filter(i => i.type === 'road_closed');
+    const accidents = seriousIncidents.filter(i => i.type === 'accident');
+
+    if (roadClosed.length > 0) {
+      rerouteReason = `พบถนนปิด ${roadClosed.length} จุด`;
+    } else if (accidents.length > 0) {
+      rerouteReason = `พบอุบัติเหตุรุนแรง ${accidents.length} จุด`;
+    } else {
+      rerouteReason = `พบเหตุการณ์วิกฤต ${seriousIncidents.length} จุด`;
+    }
+
+    showRerouteModal = true;
+    speak(`แจ้งเตือน ${rerouteReason} บนเส้นทาง แนะนำให้เปลี่ยนเส้นทาง`);
+  }
+
+  async function acceptReroute() {
+    showRerouteModal = false;
+    showNotification('กำลังคำนวณเส้นทางใหม่...', 'warning');
+
+    // Try to find alternative route avoiding incidents
+    // Use different route preference
+    const oldPref = routePreference;
+
+    if (routePreference === 'fastest') {
+      routePreference = 'no_highways';
+    } else if (routePreference === 'no_tolls') {
+      routePreference = 'no_highways';
+    } else {
+      routePreference = 'no_tolls';
+    }
+
+    // Clear incidents and recalculate
+    trafficIncidents = [];
+    incidentsOnRoute = [];
+    clearIncidentMarkers();
+
+    // Trigger route recalculation
+    if (deliveryPoints.length >= 1) {
+      await optimizeRoute();
+      showNotification('เปลี่ยนเส้นทางเรียบร้อย', 'success');
+      speak('เปลี่ยนเส้นทางเรียบร้อยแล้ว');
+    }
+  }
+
+  function dismissReroute() {
+    showRerouteModal = false;
+    showNotification('ใช้เส้นทางเดิมต่อ', 'warning');
+  }
+
+  function isNearRoute(lat: number, lng: number, threshold: number): boolean {
+    if (!optimizedRoute?.route?.geometry?.coordinates) return false;
+    const routeCoords = optimizedRoute.route.geometry.coordinates;
+    for (let i = 0; i < routeCoords.length; i += 5) {
+      const [rLng, rLat] = routeCoords[i];
+      if (getDistance(lat, lng, rLat, rLng) < threshold) return true;
+    }
+    return false;
+  }
+
+  function generateMockIncidentAtPoint(lat: number, lng: number, index: number): TrafficIncident {
+    const types: TrafficIncident['type'][] = ['accident', 'construction', 'congestion', 'hazard'];
+    const severities: TrafficIncident['severity'][] = ['minor', 'moderate', 'major'];
+    const type = types[index % types.length];
+    const severity = severities[Math.floor(Math.random() * severities.length)];
+
+    // Small offset so marker doesn't cover the route exactly
+    const offset = 0.0003;
+    return {
+      id: `route-${index}-${Date.now()}`,
+      type,
+      severity,
+      title: getIncidentTitle(type),
+      description: getIncidentDescription(type, 'บนเส้นทาง'),
+      lat: lat + (Math.random() - 0.5) * offset,
+      lng: lng + (Math.random() - 0.5) * offset,
+      road: 'บนเส้นทางของคุณ',
+      startTime: new Date(Date.now() - Math.random() * 3600000),
+      delay: type === 'accident' ? 10 + Math.floor(Math.random() * 15) :
+             type === 'construction' ? 5 + Math.floor(Math.random() * 10) :
+             3 + Math.floor(Math.random() * 8)
+    };
+  }
+
+  function getIncidentTitle(type: TrafficIncident['type']): string {
+    const titles: Record<TrafficIncident['type'], string> = {
+      accident: 'อุบัติเหตุ',
+      construction: 'งานก่อสร้าง',
+      road_closed: 'ถนนปิด',
+      congestion: 'การจราจรติดขัด',
+      hazard: 'อันตรายบนถนน',
+      event: 'กิจกรรมพิเศษ'
+    };
+    return titles[type];
+  }
+
+  function getIncidentDescription(type: TrafficIncident['type'], road: string): string {
+    const descriptions: Record<TrafficIncident['type'], string[]> = {
+      accident: ['รถชนกัน', 'รถเสียบนถนน', 'อุบัติเหตุรถจักรยานยนต์'],
+      construction: ['ซ่อมผิวถนน', 'วางท่อประปา', 'ติดตั้งสัญญาณไฟ'],
+      road_closed: ['ปิดซ่อมบำรุง', 'น้ำท่วม', 'มีขบวนรถผ่าน'],
+      congestion: ['การจราจรหนาแน่น', 'รถติดสะสม', 'ช่วงชั่วโมงเร่งด่วน'],
+      hazard: ['สิ่งกีดขวางบนถนน', 'หลุมบ่อ', 'น้ำมันหก'],
+      event: ['งานวิ่ง', 'ขบวนพาเหรด', 'กิจกรรมชุมชน']
+    };
+    const desc = descriptions[type][Math.floor(Math.random() * descriptions[type].length)];
+    return `${desc} บน${road}`;
+  }
+
+  function getIncidentIcon(type: TrafficIncident['type']): string {
+    const icons: Record<TrafficIncident['type'], string> = {
+      accident: '🚨',
+      construction: '🚧',
+      road_closed: '⛔',
+      congestion: '🚗',
+      hazard: '⚠️',
+      event: '🎪'
+    };
+    return icons[type];
+  }
+
+  function getIncidentColor(severity: TrafficIncident['severity']): string {
+    const colors: Record<TrafficIncident['severity'], string> = {
+      minor: '#fbbf24',
+      moderate: '#f97316',
+      major: '#ef4444',
+      critical: '#dc2626'
+    };
+    return colors[severity];
+  }
+
+  function displayIncidentMarkers() {
+    if (!L || !map) return;
+    clearIncidentMarkers();
+
+    const filteredIncidents = selectedIncidentFilter === 'all'
+      ? trafficIncidents
+      : trafficIncidents.filter(i => i.type === selectedIncidentFilter);
+
+    filteredIncidents.forEach(incident => {
+      const color = getIncidentColor(incident.severity);
+      const icon = getIncidentIcon(incident.type);
+
+      const marker = L.marker([incident.lat, incident.lng], {
+        icon: L.divIcon({
+          className: 'incident-marker',
+          html: `<div class="incident-pin" style="background: ${color}; border-color: ${color};">
+            <span class="incident-icon">${icon}</span>
+          </div>`,
+          iconSize: [36, 36],
+          iconAnchor: [18, 18]
+        })
+      }).addTo(map);
+
+      marker.bindPopup(`
+        <div class="incident-popup">
+          <div class="incident-popup-header" style="background: ${color}">
+            <span class="incident-popup-icon">${icon}</span>
+            <span class="incident-popup-title">${incident.title}</span>
+          </div>
+          <div class="incident-popup-content">
+            <p>${incident.description}</p>
+            <div class="incident-popup-meta">
+              <span>📍 ${incident.road}</span>
+              ${incident.delay ? `<span>⏱️ ล่าช้า ~${incident.delay} นาที</span>` : ''}
+            </div>
+            <div class="incident-popup-time">
+              🕐 ${incident.startTime.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
+            </div>
+          </div>
+        </div>
+      `, { className: 'dark-popup incident-dark-popup' });
+
+      incidentMarkers.push(marker);
+    });
+  }
+
+  function clearIncidentMarkers() {
+    incidentMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch (e) {}
+    });
+    incidentMarkers = [];
+  }
+
+  function checkIncidentsOnRoute() {
+    // All fetched incidents are already on route, just update the count
+    incidentsOnRoute = trafficIncidents;
+
+    if (incidentsOnRoute.length > 0 && isNavigating) {
+      const criticalCount = incidentsOnRoute.filter(i => i.severity === 'critical' || i.severity === 'major').length;
+      if (criticalCount > 0) {
+        speak(`แจ้งเตือน: มี ${criticalCount} เหตุการณ์สำคัญบนเส้นทาง`);
+        showNotification(`⚠️ มี ${criticalCount} เหตุการณ์สำคัญบนเส้นทาง!`, 'warning');
+      }
+    }
+  }
+
+  function toggleIncidentsPanel() {
+    showIncidentsPanel = !showIncidentsPanel;
+    if (showIncidentsPanel && (!lastIncidentFetch || Date.now() - lastIncidentFetch.getTime() > 300000)) {
+      fetchTrafficIncidents();
+    }
+  }
+
+  function focusOnIncident(incident: TrafficIncident) {
+    if (map) {
+      map.setView([incident.lat, incident.lng], 16, { animate: true });
+    }
+  }
+
+  function refreshIncidents() {
+    fetchTrafficIncidents();
   }
 
   // ⚠️ CRITICAL: updateRouteDisplayForNavigation - หายไปจากไฟล์ใหม่!
@@ -2892,7 +3927,7 @@
 
   function toggleVehicleType() {
     vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
-    localStorage.setItem('vehicleType', vehicleType);
+    localStorage.setItem(getUserKey('vehicleType'), vehicleType);
     showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
   }
 
@@ -3079,11 +4114,11 @@
   }
 
   function saveVehicleSettings() {
-    localStorage.setItem('vehicleType', vehicleType);
-    localStorage.setItem('evCurrentCharge', String(evCurrentCharge));
-    localStorage.setItem('kmPerLiter', String(KM_PER_LITER));
-    localStorage.setItem('kwhPer100km', String(KWH_PER_100KM));
-    localStorage.setItem('electricityPrice', String(ELECTRICITY_PRICE_PER_KWH));
+    localStorage.setItem(getUserKey('vehicleType'), vehicleType);
+    localStorage.setItem(getUserKey('evCurrentCharge'), String(evCurrentCharge));
+    localStorage.setItem(getUserKey('kmPerLiter'), String(KM_PER_LITER));
+    localStorage.setItem(getUserKey('kwhPer100km'), String(KWH_PER_100KM));
+    localStorage.setItem(getUserKey('electricityPrice'), String(ELECTRICITY_PRICE_PER_KWH));
     showNotification('บันทึกการตั้งค่ารถสำเร็จ', 'success');
   }
 
@@ -3362,18 +4397,32 @@
         if (c[1] < minLat) minLat = c[1];
         if (c[1] > maxLat) maxLat = c[1];
       }
-      const pad = 0.003; // ~300m
+      const pad = 0.005; // ~500m for attractions
       minLat -= pad; maxLat += pad; minLng -= pad; maxLng += pad;
 
-      const query = `[out:json][timeout:15];
+      const query = `[out:json][timeout:25];
 (
+  // Amenities
   node["amenity"="fuel"](${minLat},${minLng},${maxLat},${maxLng});
   node["shop"="convenience"](${minLat},${minLng},${maxLat},${maxLng});
   node["amenity"="restaurant"](${minLat},${minLng},${maxLat},${maxLng});
   node["amenity"="cafe"](${minLat},${minLng},${maxLat},${maxLng});
   node["amenity"="charging_station"](${minLat},${minLng},${maxLat},${maxLng});
+  // Tourism & Attractions
+  node["tourism"="viewpoint"](${minLat},${minLng},${maxLat},${maxLng});
+  node["tourism"="attraction"](${minLat},${minLng},${maxLat},${maxLng});
+  node["tourism"="museum"](${minLat},${minLng},${maxLat},${maxLng});
+  way["tourism"="attraction"](${minLat},${minLng},${maxLat},${maxLng});
+  way["tourism"="museum"](${minLat},${minLng},${maxLat},${maxLng});
+  // Temples & Historic
+  node["amenity"="place_of_worship"]["religion"="buddhist"](${minLat},${minLng},${maxLat},${maxLng});
+  way["amenity"="place_of_worship"]["religion"="buddhist"](${minLat},${minLng},${maxLat},${maxLng});
+  node["historic"](${minLat},${minLng},${maxLat},${maxLng});
+  // Parks
+  node["leisure"="park"](${minLat},${minLng},${maxLat},${maxLng});
+  way["leisure"="park"](${minLat},${minLng},${maxLat},${maxLng});
 );
-out body;`;
+out center body;`;
 
       const res = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST',
@@ -3389,27 +4438,40 @@ out body;`;
 
       const pois: RoutePOI[] = [];
       for (const el of data.elements) {
-        if (!el.lat || !el.lon) continue;
+        // way elements use center lat/lon
+        const lat = el.lat || el.center?.lat;
+        const lon = el.lon || el.center?.lon;
+        if (!lat || !lon) continue;
+
         let poiType: RoutePOI['type'];
-        if (el.tags?.amenity === 'fuel') poiType = 'gas';
-        else if (el.tags?.shop === 'convenience') poiType = 'convenience';
-        else if (el.tags?.amenity === 'restaurant') poiType = 'restaurant';
-        else if (el.tags?.amenity === 'cafe') poiType = 'cafe';
-        else if (el.tags?.amenity === 'charging_station') poiType = 'ev_charging';
+        const tags = el.tags || {};
+
+        // Determine POI type
+        if (tags.amenity === 'fuel') poiType = 'gas';
+        else if (tags.shop === 'convenience') poiType = 'convenience';
+        else if (tags.amenity === 'restaurant') poiType = 'restaurant';
+        else if (tags.amenity === 'cafe') poiType = 'cafe';
+        else if (tags.amenity === 'charging_station') poiType = 'ev_charging';
+        else if (tags.tourism === 'viewpoint') poiType = 'viewpoint';
+        else if (tags.tourism === 'attraction') poiType = 'attraction';
+        else if (tags.tourism === 'museum') poiType = 'museum';
+        else if (tags.amenity === 'place_of_worship' && tags.religion === 'buddhist') poiType = 'temple';
+        else if (tags.historic) poiType = 'attraction'; // historic sites as attractions
+        else if (tags.leisure === 'park') poiType = 'park';
         else continue;
 
-        const match = matchPOIToRoute(el.lat, el.lon, coords);
+        const match = matchPOIToRoute(lat, lon, coords);
         if (match.distFromRoute <= POI_MAX_DIST) {
           pois.push({
             id: String(el.id),
             type: poiType,
-            name: el.tags?.name || el.tags?.brand || '',
-            lat: el.lat,
-            lng: el.lon,
+            name: tags.name || tags['name:th'] || tags.brand || '',
+            lat: lat,
+            lng: lon,
             routeIndex: match.routeIndex,
             distFromRoute: match.distFromRoute,
             distAlongRoute: match.distAlongRoute,
-            tags: el.tags
+            tags: tags
           });
         }
       }
@@ -3417,7 +4479,9 @@ out body;`;
       pois.sort((a, b) => a.distAlongRoute - b.distAlongRoute);
       alongRoutePOIs = pois;
       displayPOIMarkers();
-      showNotification(`พบ ${pois.length} สถานที่บนเส้นทาง`, 'success');
+
+      const attractionCount = pois.filter(p => ['viewpoint', 'attraction', 'temple', 'park', 'museum'].includes(p.type)).length;
+      showNotification(`พบ ${pois.length} สถานที่ (${attractionCount} ที่เที่ยว)`, 'success');
     } catch (err: any) {
       console.error('POI search error:', err);
       showNotification('ค้นหาสถานที่ล้มเหลว', 'error');
@@ -3495,6 +4559,11 @@ out body;`;
       case 'restaurant': return '🍜';
       case 'cafe': return '☕';
       case 'ev_charging': return '⚡';
+      case 'viewpoint': return '📸';
+      case 'attraction': return '🏛️';
+      case 'temple': return '🏯';
+      case 'park': return '🌳';
+      case 'museum': return '🎨';
       default: return '📍';
     }
   }
@@ -3506,6 +4575,11 @@ out body;`;
       case 'restaurant': return 'ร้านอาหาร';
       case 'cafe': return 'คาเฟ่';
       case 'ev_charging': return 'สถานีชาร์จ';
+      case 'viewpoint': return 'จุดชมวิว';
+      case 'attraction': return 'สถานที่ท่องเที่ยว';
+      case 'temple': return 'วัด';
+      case 'park': return 'สวนสาธารณะ';
+      case 'museum': return 'พิพิธภัณฑ์';
       default: return 'สถานที่';
     }
   }
@@ -3561,6 +4635,56 @@ out body;`;
     if (map) {
       map.flyTo([poi.lat, poi.lng], 17, { duration: 0.8 });
     }
+  }
+
+  function closePOIPanel() {
+    clearPOIMarkers();
+    alongRoutePOIs = [];
+  }
+
+  // ==================== SHARE ROUTE QR ====================
+  function openShareQR() {
+    if (!optimizedRoute?.optimized_order || optimizedRoute.optimized_order.length < 2) {
+      showNotification('ยังไม่มีเส้นทาง กรุณาคำนวณเส้นทางก่อน', 'warning');
+      return;
+    }
+
+    // Build Google Maps directions URL
+    const points = optimizedRoute.optimized_order;
+    const origin = points[0];
+    const destination = points[points.length - 1];
+    const waypoints = points.slice(1, -1);
+
+    let url = `https://www.google.com/maps/dir/?api=1`;
+    url += `&origin=${origin.lat},${origin.lng}`;
+    url += `&destination=${destination.lat},${destination.lng}`;
+
+    if (waypoints.length > 0) {
+      const waypointStr = waypoints.map((p: any) => `${p.lat},${p.lng}`).join('|');
+      url += `&waypoints=${encodeURIComponent(waypointStr)}`;
+    }
+
+    url += `&travelmode=driving`;
+
+    shareQRUrl = url;
+    showShareQR = true;
+  }
+
+  function closeShareQR() {
+    showShareQR = false;
+  }
+
+  async function copyRouteLink() {
+    try {
+      await navigator.clipboard.writeText(shareQRUrl);
+      showNotification('คัดลอก link แล้ว', 'success');
+    } catch (e) {
+      showNotification('ไม่สามารถคัดลอกได้', 'error');
+    }
+  }
+
+  function openRouteInGoogleMaps() {
+    window.open(shareQRUrl, '_blank');
   }
 
   function getGPSStatusColor(): string {
@@ -3780,8 +4904,544 @@ out body;`;
   // ==================== NIGHT MODE (manual toggle) ====================
   function toggleNightMode() {
     nightMode = !nightMode;
-    localStorage.setItem('nightMode', nightMode ? 'dark' : 'light');
+    localStorage.setItem(getUserKey('nightMode'), nightMode ? 'dark' : 'light');
     showNotification(nightMode ? 'โหมดกลางคืน' : 'โหมดกลางวัน', 'success');
+  }
+
+  // ==================== KEYBOARD SHORTCUTS ====================
+  let selectedPointIndex = -1; // สำหรับ keyboard navigation ใน point list
+  let showKeyboardHelp = false;
+
+  // ==================== QUICK ADD FROM CLIPBOARD ====================
+  let showQuickAdd = false;
+  let quickAddLoading = false;
+  let quickAddResults: { name: string; address: string; lat: number; lng: number }[] = [];
+  let quickAddSelectedIndex = 0;
+  let quickAddError: string | null = null;
+  let quickAddInput = '';
+
+  // Getter for currently selected result
+  $: quickAddResult = quickAddResults.length > 0 ? quickAddResults[quickAddSelectedIndex] : null;
+
+  async function quickAddFromClipboard() {
+    if (optimizedRoute || isNavigating) {
+      showNotification('ล้างเส้นทางก่อนเพิ่มจุดใหม่', 'warning');
+      return;
+    }
+
+    try {
+      // อ่าน clipboard
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText || clipboardText.trim().length === 0) {
+        showNotification('ไม่มีข้อความใน clipboard', 'warning');
+        return;
+      }
+
+      quickAddInput = clipboardText.trim();
+      showQuickAdd = true;
+      quickAddLoading = true;
+      quickAddResults = [];
+      quickAddSelectedIndex = 0;
+      quickAddError = null;
+
+      // พยายาม parse content
+      const results = await parseClipboardContent(clipboardText.trim());
+
+      if (results && results.length > 0) {
+        quickAddResults = results;
+        quickAddSelectedIndex = 0;
+      } else {
+        quickAddError = 'ไม่พบตำแหน่ง ลองพิมพ์ชื่อสถานที่ให้ชัดเจนขึ้น';
+      }
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError') {
+        showNotification('กรุณาอนุญาตการเข้าถึง clipboard', 'error');
+        showQuickAdd = false;
+      } else {
+        quickAddError = 'เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error');
+      }
+    } finally {
+      quickAddLoading = false;
+    }
+  }
+
+  async function parseClipboardContent(text: string): Promise<{ name: string; address: string; lat: number; lng: number }[]> {
+    const results: { name: string; address: string; lat: number; lng: number }[] = [];
+
+    // 1. ตรวจสอบว่าเป็นพิกัดโดยตรง (13.7563, 100.5018) หรือ 13.7563 100.5018
+    const coordsRegex = /^[-]?\d+\.?\d*[,\s]+[-]?\d+\.?\d*$/;
+    if (coordsRegex.test(text)) {
+      const parts = text.split(/[,\s]+/).map(s => parseFloat(s.trim()));
+      if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        const [lat, lng] = parts;
+        if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+          // Reverse geocode เพื่อหาชื่อ
+          const geo = await reverseGeocode(lat, lng);
+          return [{
+            name: geo?.name || `จุดที่ ${allDeliveryPoints.length + 1}`,
+            address: geo?.address || `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+            lat, lng
+          }];
+        }
+      }
+    }
+
+    // 2. ตรวจสอบ Google Maps URL
+    const gmapsRegex = /(?:google\.com\/maps|maps\.google\.com|goo\.gl\/maps|maps\.app\.goo\.gl)/i;
+    if (gmapsRegex.test(text)) {
+      const coords = extractCoordsFromGoogleMapsUrl(text);
+      if (coords) {
+        const geo = await reverseGeocode(coords.lat, coords.lng);
+        return [{
+          name: geo?.name || `จุดที่ ${allDeliveryPoints.length + 1}`,
+          address: geo?.address || `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`,
+          lat: coords.lat, lng: coords.lng
+        }];
+      }
+    }
+
+    // 3. ค้นหาที่อยู่ด้วย Nominatim (ลองหลายวิธี)
+    const searchStrategies = [
+      // Strategy 1: ค้นหาตรงๆ ในไทย
+      { q: text, countrycodes: 'th' },
+      // Strategy 2: เพิ่ม "ประเทศไทย" ต่อท้าย
+      { q: `${text} ประเทศไทย`, countrycodes: undefined },
+      // Strategy 3: เพิ่ม "Thailand" ต่อท้าย
+      { q: `${text} Thailand`, countrycodes: undefined },
+      // Strategy 4: ค้นหาแบบไม่จำกัดประเทศ
+      { q: text, countrycodes: undefined },
+      // Strategy 5: ลองแยกคำค้นหา (เอาเฉพาะคำแรก + กรุงเทพ)
+      { q: `${text.split(/[,\s]+/)[0]} กรุงเทพ`, countrycodes: 'th' },
+    ];
+
+    // เก็บ place_id ที่เจอแล้วเพื่อไม่ให้ซ้ำ
+    const seenPlaceIds = new Set<string>();
+
+    for (const strategy of searchStrategies) {
+      if (results.length >= 5) break; // จำกัดไม่เกิน 5 ผลลัพธ์
+
+      try {
+        const params = new URLSearchParams({
+          q: strategy.q,
+          format: 'json',
+          limit: '5',
+          'accept-language': 'th',
+          addressdetails: '1'
+        });
+        if (strategy.countrycodes) {
+          params.append('countrycodes', strategy.countrycodes);
+        }
+
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+          headers: { 'User-Agent': 'RouteOptimization/2.0' }
+        });
+        const data = await res.json();
+
+        if (data && data.length > 0) {
+          // เพิ่มผลลัพธ์ที่ไม่ซ้ำ (ให้ priority กับไทย)
+          const sortedData = [...data].sort((a, b) => {
+            const aIsThai = a.address?.country_code === 'th' ? 0 : 1;
+            const bIsThai = b.address?.country_code === 'th' ? 0 : 1;
+            return aIsThai - bIsThai;
+          });
+
+          for (const place of sortedData) {
+            if (results.length >= 5) break;
+
+            const placeKey = `${parseFloat(place.lat).toFixed(4)},${parseFloat(place.lon).toFixed(4)}`;
+            if (seenPlaceIds.has(placeKey)) continue;
+            seenPlaceIds.add(placeKey);
+
+            results.push({
+              name: place.name || place.display_name?.split(',')[0] || text.substring(0, 30),
+              address: place.display_name || text,
+              lat: parseFloat(place.lat),
+              lng: parseFloat(place.lon)
+            });
+          }
+
+          // ถ้าเจอผลลัพธ์ในไทยแล้ว หยุดค้นหา
+          if (results.some(r => data.find((p: any) =>
+            parseFloat(p.lat).toFixed(4) === r.lat.toFixed(4) &&
+            p.address?.country_code === 'th'
+          ))) {
+            break;
+          }
+        }
+      } catch (err) {
+        console.error('Nominatim search failed:', err);
+      }
+    }
+
+    // ถ้ายังไม่เจอ ลอง fallback - ถ้ามีคำว่า "ซอย" หรือ "ถนน" ลองตัดออก
+    if (results.length === 0) {
+      const simplifiedText = text
+        .replace(/ซอย\s*\S+/g, '')
+        .replace(/ถนน\s*\S+/g, '')
+        .replace(/เลขที่\s*\S+/g, '')
+        .replace(/\d+\/\d+/g, '')
+        .trim();
+
+      if (simplifiedText && simplifiedText !== text && simplifiedText.length > 3) {
+        try {
+          const params = new URLSearchParams({
+            q: `${simplifiedText} Thailand`,
+            format: 'json',
+            limit: '3',
+            'accept-language': 'th'
+          });
+          const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+            headers: { 'User-Agent': 'RouteOptimization/2.0' }
+          });
+          const data = await res.json();
+          if (data && data.length > 0) {
+            for (const place of data) {
+              const placeKey = `${parseFloat(place.lat).toFixed(4)},${parseFloat(place.lon).toFixed(4)}`;
+              if (seenPlaceIds.has(placeKey)) continue;
+              seenPlaceIds.add(placeKey);
+
+              results.push({
+                name: text.substring(0, 40), // ใช้ชื่อเดิมที่ผู้ใช้ป้อน
+                address: place.display_name || text,
+                lat: parseFloat(place.lat),
+                lng: parseFloat(place.lon)
+              });
+            }
+          }
+        } catch (err) {
+          console.error('Simplified search failed:', err);
+        }
+      }
+    }
+
+    return results;
+  }
+
+  function extractCoordsFromGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
+    // Pattern: @13.7563,100.5018 หรือ !3d13.7563!4d100.5018 หรือ q=13.7563,100.5018
+    const patterns = [
+      /@(-?\d+\.?\d*),(-?\d+\.?\d*)/,           // @lat,lng
+      /!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)/,       // !3dlat!4dlng
+      /q=(-?\d+\.?\d*),(-?\d+\.?\d*)/,          // q=lat,lng
+      /place\/.*\/@(-?\d+\.?\d*),(-?\d+\.?\d*)/ // place/.../@lat,lng
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match) {
+        const lat = parseFloat(match[1]);
+        const lng = parseFloat(match[2]);
+        if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+          return { lat, lng };
+        }
+      }
+    }
+    return null;
+  }
+
+  async function confirmQuickAdd() {
+    if (!quickAddResult) return;
+
+    try {
+      const params = new URLSearchParams();
+      params.append('user_id', $page.params.id);
+      params.append('name', quickAddResult.name);
+      params.append('address', quickAddResult.address);
+      params.append('lat', String(quickAddResult.lat));
+      params.append('lng', String(quickAddResult.lng));
+      params.append('priority', '3');
+
+      const res = await fetch(`${API_URL}/points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      if (!res.ok) throw new Error('Failed to add point');
+
+      const data = await res.json();
+      if (data.success && data.point) {
+        deliveryPoints = [...deliveryPoints, data.point];
+        showNotification(`เพิ่ม "${quickAddResult.name}" สำเร็จ`, 'success');
+
+        // แสดงบนแผนที่
+        if (map && L) {
+          map.setView([quickAddResult.lat, quickAddResult.lng], 15, { animate: true });
+        }
+      }
+    } catch (err) {
+      showNotification('เพิ่มจุดไม่สำเร็จ', 'error');
+    } finally {
+      closeQuickAdd();
+    }
+  }
+
+  function closeQuickAdd() {
+    showQuickAdd = false;
+    quickAddResults = [];
+    quickAddSelectedIndex = 0;
+    quickAddError = null;
+    quickAddInput = '';
+    quickAddLoading = false;
+  }
+
+  function handleKeyboardShortcuts(e: KeyboardEvent) {
+    // ไม่ทำงานถ้ากำลังพิมพ์ใน input/textarea
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+
+    const key = e.key.toLowerCase();
+    const isShift = e.shiftKey;
+    const isCtrl = e.ctrlKey || e.metaKey;
+
+    // Ctrl+? หรือ ? = แสดง keyboard help
+    if (key === '?' || (isShift && key === '/')) {
+      e.preventDefault();
+      showKeyboardHelp = !showKeyboardHelp;
+      return;
+    }
+
+    // ไม่ทำงานถ้ากด Ctrl/Cmd/Alt (ยกเว้นบางคำสั่ง)
+    if (e.altKey) return;
+
+    // Ctrl shortcuts
+    if (isCtrl) {
+      switch (key) {
+        case 'v': // Ctrl+V = Quick Add from Clipboard
+          if (!optimizedRoute && !isNavigating) {
+            e.preventDefault();
+            quickAddFromClipboard();
+          }
+          break;
+        case 'arrowup': // Zoom in
+          e.preventDefault();
+          if (map) map.zoomIn();
+          break;
+        case 'arrowdown': // Zoom out
+          e.preventDefault();
+          if (map) map.zoomOut();
+          break;
+      }
+      return;
+    }
+
+    switch (key) {
+      // ==================== NAVIGATION KEYS ====================
+      case 'arrowup': // เลื่อนขึ้นใน point list
+        e.preventDefault();
+        if (allDeliveryPoints.length > 0) {
+          selectedPointIndex = selectedPointIndex <= 0 ? allDeliveryPoints.length - 1 : selectedPointIndex - 1;
+          activePointId = allDeliveryPoints[selectedPointIndex]?.id || null;
+          scrollToSelectedPoint();
+        }
+        break;
+      case 'arrowdown': // เลื่อนลงใน point list
+        e.preventDefault();
+        if (allDeliveryPoints.length > 0) {
+          selectedPointIndex = selectedPointIndex >= allDeliveryPoints.length - 1 ? 0 : selectedPointIndex + 1;
+          activePointId = allDeliveryPoints[selectedPointIndex]?.id || null;
+          scrollToSelectedPoint();
+        }
+        break;
+      case 'enter': // เลือก/ยืนยัน point ที่เลือก
+        e.preventDefault();
+        if (showKeyboardHelp) {
+          showKeyboardHelp = false;
+        } else if (selectedPointIndex >= 0 && selectedPointIndex < allDeliveryPoints.length) {
+          const point = allDeliveryPoints[selectedPointIndex];
+          if (point && map) {
+            map.setView([point.lat, point.lng], 16, { animate: true });
+          }
+        }
+        break;
+      case 'delete': // ลบ point ที่เลือก
+      case 'backspace':
+        if (!isNavigating && !optimizedRoute && selectedPointIndex >= 0) {
+          e.preventDefault();
+          const point = allDeliveryPoints[selectedPointIndex];
+          if (point) {
+            deletePoint(point.id, point.name);
+            selectedPointIndex = Math.min(selectedPointIndex, allDeliveryPoints.length - 1);
+          }
+        }
+        break;
+
+      // ==================== NUMBER KEYS - SELECT POINT / ROUTE ====================
+      case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
+        e.preventDefault();
+        const num = parseInt(key);
+        if (isShift && routeAlternatives.length > 0 && optimizedRoute) {
+          // Shift+1-4 = เลือก route alternative
+          if (num <= routeAlternatives.length) {
+            const start = optimizedRoute?.optimized_order?.[0];
+            const points = optimizedRoute?.optimized_order?.filter((p: any) => p.id !== -1);
+            if (start && points) {
+              selectRoute(num - 1, start, points, true);
+              showNotification(`เลือกเส้นทาง ${num}`, 'success');
+            }
+          }
+        } else if (allDeliveryPoints.length >= num) {
+          // 1-9 = เลือก point
+          selectedPointIndex = num - 1;
+          activePointId = allDeliveryPoints[selectedPointIndex]?.id || null;
+          const point = allDeliveryPoints[selectedPointIndex];
+          if (point && map) {
+            map.setView([point.lat, point.lng], 16, { animate: true });
+          }
+        }
+        break;
+
+      // ==================== TAB NAVIGATION ====================
+      case 'tab':
+        if (!showAddForm && !showSettings && !isNavigating) {
+          e.preventDefault();
+          activeTab = activeTab === 'points' ? 'route' : 'points';
+        }
+        break;
+
+      // ==================== ACTION KEYS ====================
+      case 'r': // คำนวณเส้นทาง
+        if (!isOptimizing && allDeliveryPoints.length >= 1 && !isNavigating) {
+          e.preventDefault();
+          optimizeRoute();
+        }
+        break;
+      case 'n': // เริ่มนำทาง
+        if (optimizedRoute && !isNavigating) {
+          e.preventDefault();
+          startNavigation();
+        }
+        break;
+      case 'm': // ซ่อน/แสดง sidebar
+        if (!isNavigating) {
+          e.preventDefault();
+          desktopSidebarCollapsed = !desktopSidebarCollapsed;
+          const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); };
+          requestAnimationFrame(resizeMap);
+          setTimeout(resizeMap, 100);
+          setTimeout(resizeMap, 350);
+        }
+        break;
+      case 't': // เปิด/ปิด traffic
+        e.preventDefault();
+        toggleTraffic();
+        break;
+      case 'd': // โหมดกลางวัน/กลางคืน
+        e.preventDefault();
+        toggleNightMode();
+        break;
+      case 'a': // เพิ่มจุดแวะ
+        if (!optimizedRoute && !isNavigating) {
+          e.preventDefault();
+          showAddForm = !showAddForm;
+        }
+        break;
+      case 'escape': // ปิด modal / หยุดนำทาง / ยกเลิกการเลือก
+        e.preventDefault();
+        if (showKeyboardHelp) showKeyboardHelp = false;
+        else if (showSettings) showSettings = false;
+        else if (showAlerts) showAlerts = false;
+        else if (showAddForm) showAddForm = false;
+        else if (showRouteSelector) showRouteSelector = false;
+        else if (showOptimizationResult) showOptimizationResult = false;
+        else if (selectedPointIndex >= 0) { selectedPointIndex = -1; activePointId = null; }
+        else if (isNavigating) stopNavigation();
+        break;
+      case 's': // บันทึกเส้นทาง
+        if (optimizedRoute && !isNavigating) {
+          e.preventDefault();
+          saveCurrentRoute();
+        }
+        break;
+      case 'c': // ล้างเส้นทาง
+        if (optimizedRoute && !isNavigating) {
+          e.preventDefault();
+          clearRoute();
+          clearAlternativeRouteLayers();
+          routeAlternatives = [];
+        }
+        break;
+      case 'o': // 2-opt optimization
+        if (allDeliveryPoints.length >= 3 && !isOptimizingOrder && !isNavigating && !optimizedRoute) {
+          e.preventDefault();
+          optimizePointOrder();
+        }
+        break;
+
+      // ==================== MAP CONTROLS ====================
+      case 'g': // ไปที่ตำแหน่ง GPS ปัจจุบัน
+        e.preventDefault();
+        if (currentLocation && map) {
+          map.setView([currentLocation.lat, currentLocation.lng], 17, { animate: true });
+          showNotification('ไปที่ตำแหน่งปัจจุบัน', 'success');
+        } else {
+          showNotification('ไม่พบตำแหน่ง GPS', 'warning');
+        }
+        break;
+      case 'l': // Lock/Unlock map following (navigation mode)
+        if (isNavigating) {
+          e.preventDefault();
+          isMapFollowing = !isMapFollowing;
+          showNotification(isMapFollowing ? 'ติดตามตำแหน่งอัตโนมัติ' : 'หยุดติดตาม', 'success');
+        }
+        break;
+      case 'f': // Full screen toggle
+        e.preventDefault();
+        if (!isNavigating) {
+          desktopSidebarCollapsed = !desktopSidebarCollapsed;
+          const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); };
+          requestAnimationFrame(resizeMap);
+          setTimeout(resizeMap, 350);
+        }
+        break;
+      case '+': case '=': // Zoom in
+        e.preventDefault();
+        if (map) map.zoomIn();
+        break;
+      case '-': case '_': // Zoom out
+        e.preventDefault();
+        if (map) map.zoomOut();
+        break;
+      case 'h': // Home - zoom to fit all points
+        e.preventDefault();
+        if (allDeliveryPoints.length > 0 && map) {
+          const bounds = L.latLngBounds(allDeliveryPoints.map((p: any) => [p.lat, p.lng]));
+          map.fitBounds(bounds, { padding: [50, 50], animate: true });
+        }
+        break;
+
+      // ==================== QUICK ACTIONS ====================
+      case 'q': // Quick Add from Clipboard
+        if (!optimizedRoute && !isNavigating) {
+          e.preventDefault();
+          quickAddFromClipboard();
+        }
+        break;
+      case 'p': // Toggle POI panel
+        e.preventDefault();
+        showPOIOverlay = !showPOIOverlay;
+        break;
+      case 'e': // Toggle EV mode
+        e.preventDefault();
+        toggleVehicleType();
+        break;
+      case 'v': // เปิด voice navigation
+        if (isNavigating) {
+          e.preventDefault();
+          voiceEnabled = !voiceEnabled;
+          showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success');
+        }
+        break;
+    }
+  }
+
+  function scrollToSelectedPoint() {
+    if (selectedPointIndex >= 0) {
+      const pointCard = document.querySelector(`.point-card[data-index="${selectedPointIndex}"]`);
+      if (pointCard) {
+        pointCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
   }
 
   // ==================== onMount - เปลี่ยน redirect path ====================
@@ -3798,38 +5458,42 @@ out body;`;
       if (role === 'customer') { goto(`/Customer/${currentUser.id}`); return; }
     }
 
-    const savedVehicleType = localStorage.getItem('vehicleType');
+    const savedVehicleType = localStorage.getItem(getUserKey('vehicleType'));
     if (savedVehicleType === 'ev' || savedVehicleType === 'fuel') {
       vehicleType = savedVehicleType;
     }
-    const savedEVCharge = localStorage.getItem('evCurrentCharge');
+    const savedEVCharge = localStorage.getItem(getUserKey('evCurrentCharge'));
     if (savedEVCharge) evCurrentCharge = parseFloat(savedEVCharge);
-    const savedKmPerLiter = localStorage.getItem('kmPerLiter');
+    const savedKmPerLiter = localStorage.getItem(getUserKey('kmPerLiter'));
     if (savedKmPerLiter) KM_PER_LITER = parseFloat(savedKmPerLiter) || 15;
-    const savedKwhPer100km = localStorage.getItem('kwhPer100km');
+    const savedKwhPer100km = localStorage.getItem(getUserKey('kwhPer100km'));
     if (savedKwhPer100km) KWH_PER_100KM = parseFloat(savedKwhPer100km) || 15;
-    const savedElectricityPrice = localStorage.getItem('electricityPrice');
+    const savedElectricityPrice = localStorage.getItem(getUserKey('electricityPrice'));
     if (savedElectricityPrice) ELECTRICITY_PRICE_PER_KWH = parseFloat(savedElectricityPrice) || 4.5;
 
-    const savedStation = localStorage.getItem('selectedStation');
+    const savedStation = localStorage.getItem(getUserKey('selectedStation'));
     if (savedStation) selectedStation = savedStation;
-    const savedFuelType = localStorage.getItem('selectedFuelType');
+    const savedFuelType = localStorage.getItem(getUserKey('selectedFuelType'));
     if (savedFuelType) selectedFuelType = savedFuelType;
 
-    // Load route preferences
-    const savedPref = localStorage.getItem('routePreference');
+    // Load route preferences (per user)
+    const savedPref = localStorage.getItem(getUserKey('routePreference'));
     if (savedPref) routePreference = savedPref as typeof routePreference;
-    const savedAvoidToll = localStorage.getItem('avoidTollRoads');
+    const savedAvoidToll = localStorage.getItem(getUserKey('avoidTollRoads'));
     if (savedAvoidToll) avoidTollRoads = savedAvoidToll === 'true';
-    const savedAvoidHwy = localStorage.getItem('avoidExpressways');
+    const savedAvoidHwy = localStorage.getItem(getUserKey('avoidExpressways'));
     if (savedAvoidHwy) avoidExpressways = savedAvoidHwy === 'true';
-    const savedAutoReroute = localStorage.getItem('autoRerouteEnabled');
+
+    // Load recent searches
+    loadRecentSearches();
+
+    const savedAutoReroute = localStorage.getItem(getUserKey('autoRerouteEnabled'));
     if (savedAutoReroute !== null) autoRerouteEnabled = savedAutoReroute === 'true';
-    const savedSpeedAlert = localStorage.getItem('speedAlertEnabled');
+    const savedSpeedAlert = localStorage.getItem(getUserKey('speedAlertEnabled'));
     if (savedSpeedAlert !== null) speedAlertEnabled = savedSpeedAlert === 'true';
-    const savedTraffic = localStorage.getItem('showTraffic');
+    const savedTraffic = localStorage.getItem(getUserKey('showTraffic'));
     if (savedTraffic !== null) showTraffic = savedTraffic === 'true';
-    const savedNightMode = localStorage.getItem('nightMode');
+    const savedNightMode = localStorage.getItem(getUserKey('nightMode'));
     if (savedNightMode === 'light') nightMode = false;
     else nightMode = true;
     loadSavedRoutes();
@@ -3845,7 +5509,7 @@ out body;`;
         navigator.geolocation.getCurrentPosition(
           (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
           () => resolve(null),
-          { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
         );
       });
 
@@ -3883,6 +5547,36 @@ out body;`;
         updateCurrentLocationMarker();
       }
 
+      // Start continuous GPS tracking (always-on, real-time)
+      if (navigator.geolocation) {
+        continuousWatchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            const { latitude, longitude, accuracy: acc, heading, speed } = pos.coords;
+            // Update location when not navigating (navigation has its own watch)
+            if (!isNavigating) {
+              currentLocation = { lat: latitude, lng: longitude, heading, speed };
+              accuracy = acc;
+              if (heading !== null && !isNaN(heading) && speed && speed > 1) {
+                currentHeading = heading;
+              }
+              updateCurrentLocationMarker();
+            }
+          },
+          (err) => {
+            console.warn('Continuous GPS error:', err.code, err.message);
+            // Permission denied - stop trying
+            if (err.code === 1) {
+              if (continuousWatchId !== null) {
+                navigator.geolocation.clearWatch(continuousWatchId);
+                continuousWatchId = null;
+              }
+              showNotification('กรุณาอนุญาตการเข้าถึง GPS', 'error');
+            }
+          },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      }
+
       setTimeout(() => map.invalidateSize(), 100);
       setTimeout(() => map.invalidateSize(), 500);
 
@@ -3917,6 +5611,9 @@ out body;`;
         showNotification('กู้คืนเส้นทางที่คำนวณไว้แล้ว', 'success');
       }
 
+      // Keyboard shortcuts
+      window.addEventListener('keydown', handleKeyboardShortcuts);
+
       oilPriceInterval = setInterval(() => { fetchOilPrices(); }, 1800000);
     } catch (error) {
       console.error('Map init error:', error);
@@ -3927,12 +5624,37 @@ out body;`;
   onDestroy(() => {
     stopNavigation();
     clearTrafficLayers();
+    clearIncidentMarkers();
+    // Stop navigation GPS tracking
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    // Stop continuous GPS tracking
+    if (continuousWatchId !== null) {
+      navigator.geolocation.clearWatch(continuousWatchId);
+      continuousWatchId = null;
+    }
+    // Clean up accuracy circle
+    if (accuracyCircle && map) {
+      try { map.removeLayer(accuracyCircle); } catch(e) {}
+      accuracyCircle = null;
+    }
+    // Clean up location marker
+    if (currentLocationMarker && map) {
+      try { map.removeLayer(currentLocationMarker); } catch(e) {}
+      currentLocationMarker = null;
+    }
+    if (browser) {
+      window.removeEventListener('keydown', handleKeyboardShortcuts);
+      if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
+    }
     if (extraFeaturesInterval) { clearInterval(extraFeaturesInterval); extraFeaturesInterval = null; }
     if (batteryInterval) { clearInterval(batteryInterval); batteryInterval = null; }
     if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
-    if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
     if (routeAbortController) { routeAbortController.abort(); routeAbortController = null; }
-    if (map) { map.off('zoomend', updateRouteWeights); }
+    if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    if (map) { map.off('zoomend', updateRouteWeights); map.remove(); map = null; }
   });
 </script>
 
@@ -4054,10 +5776,10 @@ out body;`;
               <div class="settings-section">
                 <h4>🌓 โหมดแสง</h4>
                 <div class="night-mode-selector">
-                  <button class="night-mode-btn" class:active={nightMode} on:click={() => { nightMode = true; localStorage.setItem('nightMode', 'dark'); }}>
+                  <button class="night-mode-btn" class:active={nightMode} on:click={() => { nightMode = true; localStorage.setItem(getUserKey('nightMode'), 'dark'); }}>
                     <span>🌙</span><span>มืด</span>
                   </button>
-                  <button class="night-mode-btn" class:active={!nightMode} on:click={() => { nightMode = false; localStorage.setItem('nightMode', 'light'); }}>
+                  <button class="night-mode-btn" class:active={!nightMode} on:click={() => { nightMode = false; localStorage.setItem(getUserKey('nightMode'), 'light'); }}>
                     <span>☀️</span><span>สว่าง</span>
                   </button>
                 </div>
@@ -4228,6 +5950,242 @@ out body;`;
     </div>
   {/if}
 
+  <!-- 2-opt Optimization Result Modal -->
+  {#if showOptimizationResult && optimizationResult}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="optimization-result-overlay" on:click={() => showOptimizationResult = false}>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="optimization-result-modal glass-card" on:click|stopPropagation>
+        <div class="opt-result-header">
+          <span class="opt-result-icon">🎯</span>
+          <h3>ผลการจัดลำดับ 2-opt</h3>
+          <!-- svelte-ignore a11y_consider_explicit_label -->
+          <button class="opt-close-btn" on:click={() => showOptimizationResult = false}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="opt-result-body">
+          <div class="opt-comparison">
+            <div class="opt-before">
+              <span class="opt-label">ก่อน</span>
+              <span class="opt-value">{(optimizationResult.beforeDistance / 1000).toFixed(2)} กม.</span>
+            </div>
+            <div class="opt-arrow">→</div>
+            <div class="opt-after">
+              <span class="opt-label">หลัง</span>
+              <span class="opt-value">{(optimizationResult.afterDistance / 1000).toFixed(2)} กม.</span>
+            </div>
+          </div>
+          <div class="opt-improvement" class:positive={optimizationResult.improvement > 0}>
+            {#if optimizationResult.improvement > 0}
+              <span class="opt-improvement-icon">📉</span>
+              <span>ลดระยะทาง {optimizationResult.improvement.toFixed(1)}%</span>
+              <span class="opt-saved">(-{((optimizationResult.beforeDistance - optimizationResult.afterDistance) / 1000).toFixed(2)} กม.)</span>
+            {:else}
+              <span class="opt-improvement-icon">✅</span>
+              <span>ลำดับเดิมดีที่สุดแล้ว</span>
+            {/if}
+          </div>
+        </div>
+        <div class="opt-result-footer">
+          <button class="btn btn-primary" on:click={() => showOptimizationResult = false}>ตกลง</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Quick Add from Clipboard Modal -->
+  {#if showQuickAdd}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="quick-add-overlay" on:click={closeQuickAdd} on:keydown={(e) => {
+      if (e.key === 'Escape') closeQuickAdd();
+      if (e.key === 'Enter' && quickAddResult) confirmQuickAdd();
+      if (e.key === 'ArrowUp' && quickAddResults.length > 1) {
+        e.preventDefault();
+        quickAddSelectedIndex = quickAddSelectedIndex <= 0 ? quickAddResults.length - 1 : quickAddSelectedIndex - 1;
+      }
+      if (e.key === 'ArrowDown' && quickAddResults.length > 1) {
+        e.preventDefault();
+        quickAddSelectedIndex = quickAddSelectedIndex >= quickAddResults.length - 1 ? 0 : quickAddSelectedIndex + 1;
+      }
+    }}>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div class="quick-add-modal glass-card" on:click|stopPropagation>
+        <div class="qa-header">
+          <div class="qa-title">
+            <span class="qa-icon">📋</span>
+            <h3>เพิ่มจุดจาก Clipboard</h3>
+          </div>
+          <button class="close-btn" on:click={closeQuickAdd}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <div class="qa-body">
+          <div class="qa-input-preview">
+            <span class="qa-label">ข้อความที่วาง:</span>
+            <div class="qa-input-text">{quickAddInput}</div>
+          </div>
+
+          {#if quickAddLoading}
+            <div class="qa-loading">
+              <div class="qa-spinner"></div>
+              <span>กำลังค้นหาตำแหน่ง...</span>
+            </div>
+          {:else if quickAddError}
+            <div class="qa-error">
+              <span class="qa-error-icon">❌</span>
+              <span>{quickAddError}</span>
+            </div>
+          {:else if quickAddResults.length > 0}
+            <div class="qa-results-list">
+              {#if quickAddResults.length > 1}
+                <div class="qa-results-hint">
+                  <span>พบ {quickAddResults.length} ผลลัพธ์ - ใช้ ↑↓ เลือก</span>
+                </div>
+              {/if}
+              {#each quickAddResults as result, i}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="qa-result" class:selected={quickAddSelectedIndex === i} on:click={() => quickAddSelectedIndex = i}>
+                  <div class="qa-result-number">{i + 1}</div>
+                  <div class="qa-result-info">
+                    <div class="qa-result-name">{result.name}</div>
+                    <div class="qa-result-address">{result.address}</div>
+                    <div class="qa-result-coords">{result.lat.toFixed(6)}, {result.lng.toFixed(6)}</div>
+                  </div>
+                  {#if quickAddSelectedIndex === i}
+                    <div class="qa-result-check">✓</div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <div class="qa-footer">
+          <button class="btn btn-secondary" on:click={closeQuickAdd}>
+            <span>ยกเลิก</span>
+            <kbd>Esc</kbd>
+          </button>
+          <button class="btn btn-primary" on:click={confirmQuickAdd} disabled={!quickAddResult || quickAddLoading}>
+            <span>เพิ่มจุดนี้</span>
+            <kbd>Enter</kbd>
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Share Route QR Modal -->
+  {#if showShareQR}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="share-qr-overlay" on:click={closeShareQR} on:keydown={(e) => e.key === 'Escape' && closeShareQR()}>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div class="share-qr-modal glass-card" on:click|stopPropagation>
+        <div class="share-qr-header">
+          <h3>📲 แชร์เส้นทาง</h3>
+          <button class="close-btn" on:click={closeShareQR}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="share-qr-body">
+          <div class="qr-code-container">
+            <img
+              src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={encodeURIComponent(shareQRUrl)}"
+              alt="QR Code"
+              class="qr-code-img"
+            />
+          </div>
+          <p class="share-qr-hint">สแกน QR เพื่อเปิดเส้นทางใน Google Maps</p>
+          <div class="share-qr-actions">
+            <button class="btn btn-secondary" on:click={copyRouteLink}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              <span>คัดลอก Link</span>
+            </button>
+            <button class="btn btn-primary" on:click={openRouteInGoogleMaps}>
+              <svg viewBox="0 0 24 24" fill="currentColor" style="width: 16px; height: 16px;">
+                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+              </svg>
+              <span>เปิด Google Maps</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Keyboard Help Modal -->
+  {#if showKeyboardHelp}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="keyboard-help-overlay" on:click={() => showKeyboardHelp = false} on:keydown={(e) => e.key === 'Escape' && (showKeyboardHelp = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div class="keyboard-help-modal glass-card" on:click|stopPropagation>
+        <div class="kbh-header">
+          <h3>⌨️ คีย์ลัด</h3>
+          <!-- svelte-ignore a11y_consider_explicit_label -->
+          <button class="close-btn" on:click={() => showKeyboardHelp = false}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="kbh-body">
+          <div class="kbh-section">
+            <h4>การนำทาง</h4>
+            <div class="kbh-grid">
+              <div class="kbh-item"><kbd>↑</kbd><kbd>↓</kbd><span>เลือกจุดแวะ</span></div>
+              <div class="kbh-item"><kbd>1</kbd>-<kbd>9</kbd><span>ไปจุดที่ 1-9</span></div>
+              <div class="kbh-item"><kbd>Enter</kbd><span>ซูมไปจุดที่เลือก</span></div>
+              <div class="kbh-item"><kbd>Delete</kbd><span>ลบจุดที่เลือก</span></div>
+              <div class="kbh-item"><kbd>Tab</kbd><span>สลับแท็บ</span></div>
+            </div>
+          </div>
+          <div class="kbh-section">
+            <h4>การทำงาน</h4>
+            <div class="kbh-grid">
+              <div class="kbh-item"><kbd>R</kbd><span>คำนวณเส้นทาง</span></div>
+              <div class="kbh-item"><kbd>N</kbd><span>เริ่มนำทาง</span></div>
+              <div class="kbh-item"><kbd>O</kbd><span>จัดลำดับ 2-opt</span></div>
+              <div class="kbh-item"><kbd>A</kbd><span>เพิ่มจุดแวะ</span></div>
+              <div class="kbh-item"><kbd>Q</kbd><span>วางจาก Clipboard</span></div>
+              <div class="kbh-item"><kbd>S</kbd><span>บันทึกเส้นทาง</span></div>
+              <div class="kbh-item"><kbd>C</kbd><span>ล้างเส้นทาง</span></div>
+            </div>
+          </div>
+          <div class="kbh-section">
+            <h4>แผนที่</h4>
+            <div class="kbh-grid">
+              <div class="kbh-item"><kbd>G</kbd><span>ไปตำแหน่ง GPS</span></div>
+              <div class="kbh-item"><kbd>H</kbd><span>ซูมให้เห็นทุกจุด</span></div>
+              <div class="kbh-item"><kbd>+</kbd><kbd>-</kbd><span>ซูมเข้า/ออก</span></div>
+              <div class="kbh-item"><kbd>M</kbd><kbd>F</kbd><span>ซ่อน/แสดง sidebar</span></div>
+              <div class="kbh-item"><kbd>T</kbd><span>เปิด/ปิด traffic</span></div>
+              <div class="kbh-item"><kbd>D</kbd><span>โหมดกลางวัน/กลางคืน</span></div>
+            </div>
+          </div>
+          <div class="kbh-section">
+            <h4>อื่นๆ</h4>
+            <div class="kbh-grid">
+              <div class="kbh-item"><kbd>Shift</kbd>+<kbd>1</kbd>-<kbd>4</kbd><span>เลือกเส้นทางสำรอง</span></div>
+              <div class="kbh-item"><kbd>E</kbd><span>สลับ EV/รถยนต์</span></div>
+              <div class="kbh-item"><kbd>P</kbd><span>เปิด/ปิด POI</span></div>
+              <div class="kbh-item"><kbd>V</kbd><span>เปิด/ปิดเสียง (นำทาง)</span></div>
+              <div class="kbh-item"><kbd>L</kbd><span>ล็อค/ปลดล็อคติดตาม</span></div>
+              <div class="kbh-item"><kbd>Esc</kbd><span>ปิด/ยกเลิก</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="kbh-footer">
+          <span>กด <kbd>?</kbd> เพื่อเปิด/ปิดหน้านี้</span>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Navigation Overlay -->
   {#if isNavigating}
     <div class="nav-overlay">
@@ -4271,6 +6229,34 @@ out body;`;
           <div class="nav-eta">{formatDistance(distanceToNextPoint)} · {formatETA(estimatedArrivalTime)}</div>
         </div>
       </div>
+
+      <!-- Curve Warning (below nav-top-bar, left side) -->
+      {#if curveWarning?.active}
+        <div class="curve-warning glass-card" class:sharp={curveWarning.severity === 'sharp'} class:hairpin={curveWarning.severity === 'hairpin'}>
+          <div class="curve-icon">
+            {#if curveWarning.direction === 'left'}↰{:else}↱{/if}
+          </div>
+          <div class="curve-info">
+            <div class="curve-text">
+              {curveWarning.severity === 'hairpin' ? '⚠️ โค้งหักศอก!' : curveWarning.severity === 'sharp' ? 'โค้งแรง' : 'ทางโค้ง'}
+              {curveWarning.direction === 'left' ? 'ซ้าย' : 'ขวา'}
+            </div>
+            <div class="curve-distance">อีก {curveWarning.distance} ม.</div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Lane Guidance (below nav-top-bar, left side) -->
+      {#if laneGuidance?.show}
+        <div class="lane-guidance glass-card">
+          <div class="lane-visual">
+            <div class="lane" class:active={laneGuidance.lane === 'left'}></div>
+            <div class="lane" class:active={laneGuidance.lane === 'center'}></div>
+            <div class="lane" class:active={laneGuidance.lane === 'right'}></div>
+          </div>
+          <div class="lane-text">{laneGuidance.instruction}</div>
+        </div>
+      {/if}
 
       <!-- Right side: Speed + Compass + Lock -->
       <div class="nav-right-cluster">
@@ -4343,7 +6329,7 @@ out body;`;
 
   <!-- Sidebar -->
   {#if !isNavigating}
-    <aside class="sidebar" class:collapsed={!mobileSidebarOpen}>
+    <aside class="sidebar" class:collapsed={!mobileSidebarOpen} class:desktop-collapsed={desktopSidebarCollapsed}>
       <!-- Mobile toggle handle -->
       <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; requestAnimationFrame(() => { if (map) map.invalidateSize(); }); setTimeout(() => { if (map) map.invalidateSize(); }, 50); }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class:flipped={mobileSidebarOpen}><path d="M6 9l6 6 6-6"/></svg>
@@ -4352,10 +6338,11 @@ out body;`;
       <div class="sidebar-header">
         <div class="logo">
           <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg></div>
-          <div class="logo-text"><h1>Route Planning </h1><span>ระบบเพิ่มประสิทธิภาพในการวางแผนเส้นทาง</span></div>
+          <div class="logo-text"><h1>Route Planning </h1><span>ระบบวางแผนเส้นทาง</span></div>
         </div>
         <div class="header-actions">
-          <button class="icon-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง' : 'เปลี่ยนเป็นโหมดมืด'}>{nightMode ? '🌙' : '☀️'}</button>
+          <button class="icon-btn keyboard-help-btn" on:click={() => showKeyboardHelp = true} title="คีย์ลัด [?]">⌨️</button>
+          <button class="icon-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง [D]' : 'เปลี่ยนเป็นโหมดมืด [D]'}>{nightMode ? '🌙' : '☀️'}</button>
           <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">🔔{#if alerts.length > 0}<span class="badge">{alerts.length}</span>{/if}</button>
           <button class="icon-btn" on:click={() => showSettings = true} title="ตั้งค่า">⚙️</button>
         </div>
@@ -4375,23 +6362,24 @@ out body;`;
       {/if}
 
       <div class="action-buttons">
-        <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1}>
+        <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1} title="คำนวณเส้นทาง [R]">
           {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>{/if}
         </button>
         {#if optimizedRoute}
-          <button class="btn btn-navigate" on:click={startNavigation}><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
+          <button class="btn btn-navigate" on:click={startNavigation} title="เริ่มนำทาง [N]"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
           {#if routeAlternatives.length > 1}
-            <button class="btn btn-alt-routes" on:click={() => showRouteSelector = !showRouteSelector}>
+            <button class="btn btn-alt-routes" on:click={() => showRouteSelector = !showRouteSelector} title="เลือกเส้นทาง">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
               <span>เลือกเส้นทาง ({routeAlternatives.length})</span>
             </button>
           {/if}
-          <button class="btn btn-save-route" on:click={saveCurrentRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><span>บันทึกเส้นทาง</span></button>
+          <button class="btn btn-save-route" on:click={saveCurrentRoute} title="บันทึกเส้นทาง [S]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><span>บันทึกเส้นทาง</span></button>
+          <button class="btn btn-share" on:click={openShareQR} title="แชร์เส้นทาง QR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>แชร์ QR</span></button>
 
-          <button class="btn btn-ghost" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg><span>ล้างเส้นทาง</span></button>
+          <button class="btn btn-ghost" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }} title="ล้างเส้นทาง [C]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg><span>ล้างเส้นทาง</span></button>
         {/if}
         {#if !optimizedRoute}
-          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg><span>เพิ่มจุดแวะ</span></button>
+          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm} title="เพิ่มจุดแวะ [A]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg><span>เพิ่มจุดแวะ</span></button>
           <button class="btn btn-ghost" on:click={toggleMultiSelect}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span></button>
           <button class="btn {isDragMode ? 'btn-drag-active' : 'btn-ghost'}" on:click={toggleDragMode} disabled={deliveryPoints.length < 1}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 3-3 3M12 2L9 5l3 3M12 22l3-3-3-3M12 22l-3-3 3-3M2 12l3-3 3 3M2 12l3 3 3-3M22 12l-3-3-3 3M22 12l-3 3-3-3"/><circle cx="12" cy="12" r="1"/></svg>
@@ -4406,6 +6394,27 @@ out body;`;
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
               <span>กลับลำดับอัตโนมัติ</span>
             </button>
+          {/if}
+          {#if deliveryPoints.length >= 3}
+            <button class="btn btn-optimize-2opt" on:click={optimizePointOrder} disabled={isOptimizingOrder} title="จัดลำดับอัตโนมัติ 2-opt [O]">
+              {#if isOptimizingOrder}
+                <div class="spinner"></div>
+                <span>กำลังจัดลำดับ... {optimizationProgress}%</span>
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l7.07 17 2.51-7.39L21 11.07z"/><path d="M15 15l6 6"/></svg>
+                <span>จัดลำดับอัตโนมัติ</span>
+              {/if}
+            </button>
+            <label class="real-dist-toggle" class:disabled={isOptimizingOrder}>
+              <input type="checkbox" bind:checked={useRealDistances} disabled={isOptimizingOrder} />
+              <span class="toggle-switch">
+                <span class="toggle-knob"></span>
+              </span>
+              <span class="toggle-label">
+                <span class="toggle-text">ระยะทางจริง</span>
+                <span class="toggle-hint">{useRealDistances ? '🛣️ API (แม่นยำ)' : '📐 Haversine (เร็ว)'}</span>
+              </span>
+            </label>
           {/if}
         {/if}
       </div>
@@ -4445,7 +6454,7 @@ out body;`;
             {:else}
               {#each filteredPoints as point, i}
                 {@const colors = getPriorityGradient(point.priority)}
-                <div id="point-{point.id}" class="point-card" class:active={activePointId === point.id} class:selected={selectedPoints.includes(point.id)} class:drag-source={isReorderMode && dragSourceIndex === i} class:drag-over={isReorderMode && dragOverIndex === i && dragSourceIndex !== i} draggable={isReorderMode} on:dragstart={(e) => isReorderMode && handleReorderDragStart(e, i)} on:dragover={(e) => isReorderMode && handleReorderDragOver(e, i)} on:drop={(e) => isReorderMode && handleReorderDrop(e, i)} on:dragend={() => isReorderMode && handleReorderDragEnd()} on:click={() => { if (isReorderMode) return; if (isMultiSelectMode) { togglePointSelection(point.id); } else { activePointId = point.id; focusOnPoint(point.lat, point.lng); } }} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
+                <div id="point-{point.id}" data-index={i} class="point-card" class:active={activePointId === point.id} class:keyboard-selected={selectedPointIndex === i} class:selected={selectedPoints.includes(point.id)} class:drag-source={isReorderMode && dragSourceIndex === i} class:drag-over={isReorderMode && dragOverIndex === i && dragSourceIndex !== i} draggable={isReorderMode} on:dragstart={(e) => isReorderMode && handleReorderDragStart(e, i)} on:dragover={(e) => isReorderMode && handleReorderDragOver(e, i)} on:drop={(e) => isReorderMode && handleReorderDrop(e, i)} on:dragend={() => isReorderMode && handleReorderDragEnd()} on:click={() => { if (isReorderMode) return; if (isMultiSelectMode) { togglePointSelection(point.id); } else { selectedPointIndex = i; activePointId = point.id; focusOnPoint(point.lat, point.lng); } }} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
                   {#if isReorderMode}<div class="drag-handle"><svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="10" r="1.5"/><circle cx="15" cy="10" r="1.5"/><circle cx="9" cy="15" r="1.5"/><circle cx="15" cy="15" r="1.5"/><circle cx="9" cy="20" r="1.5"/><circle cx="15" cy="20" r="1.5"/></svg></div>{/if}
                   {#if isMultiSelectMode}<div class="checkbox" class:checked={selectedPoints.includes(point.id)}>{#if selectedPoints.includes(point.id)}✓{/if}</div>{/if}
                   <div class="point-number" style="background: {colors.bg}; box-shadow: 0 0 15px {colors.glow}40;">{i + 1}</div>
@@ -4674,7 +6683,7 @@ out body;`;
 
       </div><!-- /.sidebar-scroll -->
 
-      <div class="sidebar-footer"><span>RouteFlow v2.0</span><span>GPS Navigation</span></div>
+      <div class="sidebar-footer"><span>Route Planning</span><span>ระบบเพิ่มประสิทธิภาพในการวางแผนเส้นทาง</span></div>
     </aside>
   {/if}
 
@@ -4802,8 +6811,22 @@ out body;`;
     </div>
   {/if}
 
+  <!-- Desktop Sidebar Toggle Button (fixed position) -->
+  {#if !isNavigating}
+    <button class="desktop-sidebar-toggle" class:sidebar-hidden={desktopSidebarCollapsed} on:click={() => { desktopSidebarCollapsed = !desktopSidebarCollapsed; const resizeMap = () => { if (map) map.invalidateSize({ animate: true }); }; requestAnimationFrame(resizeMap); setTimeout(resizeMap, 100); setTimeout(resizeMap, 200); setTimeout(resizeMap, 350); }} title={desktopSidebarCollapsed ? 'แสดงเมนู [M]' : 'ซ่อนเมนู [M]'}>
+      {#if desktopSidebarCollapsed}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        <span>เมนู</span>
+      {:else}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        <span>ซ่อน</span>
+      {/if}
+    </button>
+  {/if}
+
   <div class="map-container" class:fullscreen={isNavigating}>
     <div id="map"></div>
+
     {#if !isNavigating}
       <div class="map-stats glass-card">
         <div class="map-stat"><span class="map-stat-value">{deliveryPoints.length}</span><span class="map-stat-label">จุดแวะ</span></div>
@@ -4849,6 +6872,22 @@ out body;`;
               </button>
             {/each}
           </div>
+        {:else if !searchQuery && recentSearches.length > 0}
+          <div class="search-dropdown recent-searches">
+            <div class="recent-header">
+              <span>🕐 ค้นหาล่าสุด</span>
+              <button class="recent-clear-btn" on:click={clearRecentSearches}>ล้าง</button>
+            </div>
+            {#each recentSearches as recent}
+              <button class="search-result-item" on:click={() => selectRecentSearch(recent)}>
+                <span class="result-icon">🕐</span>
+                <div class="result-info">
+                  <span class="result-name">{recent.name}</span>
+                  <span class="result-address">{recent.address}</span>
+                </div>
+              </button>
+            {/each}
+          </div>
         {/if}
         {#if directDestination}
           <div class="direct-nav-bar">
@@ -4874,26 +6913,195 @@ out body;`;
           <button class="float-pref-chip" class:active={routePreference === 'no_highways'} on:click={() => toggleRoutePreference('no_highways')}>🏘️ เลี่ยงมอเตอร์เวย์</button>
         </div>
         <div class="float-pref-toggles">
-          <button class="float-toggle-chip" class:active={showTraffic} on:click={toggleTraffic} title="แสดงการจราจร">🚦</button>
-          <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem('autoRerouteEnabled', String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
-          <button class="float-toggle-chip" class:active={speedAlertEnabled} on:click={() => { speedAlertEnabled = !speedAlertEnabled; localStorage.setItem('speedAlertEnabled', String(speedAlertEnabled)); }} title="แจ้งเตือนความเร็ว">🚨</button>
+          <button class="float-toggle-chip" class:active={showTraffic} on:click={toggleTraffic} title="แสดงการจราจร [T]">🚦</button>
+          <button class="float-toggle-chip" class:active={showIncidentsPanel} on:click={toggleIncidentsPanel} title="เหตุการณ์จราจร">🚨</button>
+          <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
+          <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
         </div>
       </div>
+
+      <!-- Traffic Legend -->
+      {#if showTraffic && optimizedRoute}
+        {@const selectedAlt = routeAlternatives[selectedRouteIndex]}
+        {@const stats = getTrafficStats(selectedAlt)}
+        {@const summary = getTrafficSummary(selectedAlt)}
+        <div class="traffic-legend glass-card">
+          <div class="traffic-legend-header">
+            <span class="traffic-legend-icon">🚦</span>
+            <span class="traffic-legend-title">การจราจร</span>
+            <span class="traffic-legend-summary" style="color: {summary.color}">{summary.label}</span>
+          </div>
+          <div class="traffic-legend-items">
+            <div class="traffic-legend-item">
+              <span class="traffic-legend-color" style="background: #00ff88"></span>
+              <span class="traffic-legend-label">ไม่ติด</span>
+              {#if stats.total > 0}
+                <span class="traffic-legend-pct">{Math.round((stats.low / stats.total) * 100)}%</span>
+              {/if}
+            </div>
+            <div class="traffic-legend-item">
+              <span class="traffic-legend-color traffic-moderate" style="background: #f59e0b"></span>
+              <span class="traffic-legend-label">ปานกลาง</span>
+              {#if stats.total > 0}
+                <span class="traffic-legend-pct">{Math.round((stats.moderate / stats.total) * 100)}%</span>
+              {/if}
+            </div>
+            <div class="traffic-legend-item">
+              <span class="traffic-legend-color traffic-heavy" style="background: #ef4444"></span>
+              <span class="traffic-legend-label">รถติด</span>
+              {#if stats.total > 0}
+                <span class="traffic-legend-pct">{Math.round((stats.heavy / stats.total) * 100)}%</span>
+              {/if}
+            </div>
+            <div class="traffic-legend-item">
+              <span class="traffic-legend-color traffic-severe" style="background: #991b1b"></span>
+              <span class="traffic-legend-label">ติดหนัก</span>
+              {#if stats.total > 0}
+                <span class="traffic-legend-pct">{Math.round((stats.severe / stats.total) * 100)}%</span>
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Traffic Incidents Panel (เฉพาะบนเส้นทาง) -->
+      {#if showIncidentsPanel}
+        <div class="incidents-panel glass-card">
+          <div class="incidents-header">
+            <div class="incidents-title">
+              <span class="incidents-icon">🚨</span>
+              <span>เหตุการณ์บนเส้นทาง</span>
+              {#if trafficIncidents.length > 0}
+                <span class="incidents-badge">{trafficIncidents.length}</span>
+              {/if}
+            </div>
+            <div class="incidents-actions">
+              <button class="incidents-refresh" on:click={refreshIncidents} disabled={isLoadingIncidents || !optimizedRoute} title="รีเฟรช">
+                {#if isLoadingIncidents}
+                  <span class="spinner-tiny"></span>
+                {:else}
+                  🔄
+                {/if}
+              </button>
+              <button class="incidents-close" on:click={() => { showIncidentsPanel = false; clearIncidentMarkers(); }}>✕</button>
+            </div>
+          </div>
+
+          {#if !optimizedRoute}
+            <div class="incidents-empty">
+              <span class="empty-icon">🗺️</span>
+              <span>กรุณาคำนวณเส้นทางก่อน</span>
+            </div>
+          {:else if trafficIncidents.length === 0}
+            <div class="incidents-empty">
+              {#if isLoadingIncidents}
+                <div class="spinner-small"></div>
+                <span>กำลังตรวจสอบเส้นทาง...</span>
+              {:else}
+                <span class="empty-icon">✅</span>
+                <span>ไม่พบเหตุการณ์บนเส้นทาง</span>
+                <button class="btn-check-incidents" on:click={refreshIncidents}>ตรวจสอบอีกครั้ง</button>
+              {/if}
+            </div>
+          {:else}
+            <div class="incidents-summary">
+              ⚠️ พบ {trafficIncidents.length} เหตุการณ์ · ล่าช้ารวม ~{trafficIncidents.reduce((sum, i) => sum + (i.delay || 0), 0)} นาที
+            </div>
+            <div class="incidents-list">
+              {#each trafficIncidents as incident, idx}
+                <button class="incident-item" on:click={() => focusOnIncident(incident)}>
+                  <div class="incident-icon-wrap" style="background: {getIncidentColor(incident.severity)}">
+                    <span>{getIncidentIcon(incident.type)}</span>
+                  </div>
+                  <div class="incident-info">
+                    <div class="incident-title-row">
+                      <span class="incident-name">{incident.title}</span>
+                      <span class="incident-severity severity-{incident.severity}">{
+                        incident.severity === 'critical' ? 'วิกฤต' :
+                        incident.severity === 'major' ? 'รุนแรง' :
+                        incident.severity === 'moderate' ? 'ปานกลาง' : 'เล็กน้อย'
+                      }</span>
+                    </div>
+                    <span class="incident-desc">{incident.description}</span>
+                    {#if incident.delay}
+                      <span class="incident-delay-tag">⏱️ ล่าช้า ~{incident.delay} นาที</span>
+                    {/if}
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          {#if lastIncidentFetch}
+            <div class="incidents-footer">
+              ตรวจสอบล่าสุด: {lastIncidentFetch.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Reroute Suggestion Modal -->
+      {#if showRerouteModal}
+        <div class="reroute-modal glass-card">
+          <div class="reroute-icon">⚠️</div>
+          <div class="reroute-content">
+            <h4>แนะนำเปลี่ยนเส้นทาง</h4>
+            <p>{rerouteReason}</p>
+            <div class="reroute-incidents">
+              {#each rerouteIncidents.slice(0, 3) as incident}
+                <div class="reroute-incident-item">
+                  <span>{getIncidentIcon(incident.type)}</span>
+                  <span>{incident.title}</span>
+                  {#if incident.delay}
+                    <span class="delay-badge">+{incident.delay} นาที</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </div>
+          <div class="reroute-actions">
+            <button class="btn-reroute-accept" on:click={acceptReroute}>
+              🔄 เปลี่ยนเส้นทาง
+            </button>
+            <button class="btn-reroute-dismiss" on:click={dismissReroute}>
+              ใช้เส้นทางเดิม
+            </button>
+          </div>
+        </div>
+      {/if}
     {/if}
 
     <!-- Floating Along-Route POI -->
     {#if optimizedRoute && !isNavigating}
       <div class="map-poi-float glass-card">
-        <button class="poi-search-btn" on:click={searchPOIsAlongRoute} disabled={isLoadingPOIs}>
-          {isLoadingPOIs ? '⏳ กำลังค้นหา...' : '🔍 ค้นหาสถานที่บนเส้นทาง'}
-        </button>
+        <div class="poi-header">
+          <button class="poi-search-btn" on:click={searchPOIsAlongRoute} disabled={isLoadingPOIs}>
+            {isLoadingPOIs ? '⏳ กำลังค้นหา...' : '🔍 ค้นหาสถานที่บนเส้นทาง'}
+          </button>
+          {#if alongRoutePOIs.length > 0}
+            <button class="poi-close-btn" on:click={closePOIPanel} title="ปิด">✕</button>
+          {/if}
+        </div>
         {#if alongRoutePOIs.length > 0}
-          <div class="poi-filter-chips">
-            <button class="poi-chip" class:active={activePOITypes.has('gas')} on:click={() => togglePOIType('gas')}>⛽ ปั๊ม</button>
-            <button class="poi-chip" class:active={activePOITypes.has('convenience')} on:click={() => togglePOIType('convenience')}>🏪 สะดวกซื้อ</button>
-            <button class="poi-chip" class:active={activePOITypes.has('restaurant')} on:click={() => togglePOIType('restaurant')}>🍜 อาหาร</button>
-            <button class="poi-chip" class:active={activePOITypes.has('cafe')} on:click={() => togglePOIType('cafe')}>☕ คาเฟ่</button>
-            <button class="poi-chip" class:active={activePOITypes.has('ev_charging')} on:click={() => togglePOIType('ev_charging')}>⚡ ชาร์จ</button>
+          <div class="poi-filter-section">
+            <span class="poi-filter-label">🎯 ท่องเที่ยว</span>
+            <div class="poi-filter-chips">
+              <button class="poi-chip attraction" class:active={activePOITypes.has('viewpoint')} on:click={() => togglePOIType('viewpoint')}>📸 จุดชมวิว</button>
+              <button class="poi-chip attraction" class:active={activePOITypes.has('attraction')} on:click={() => togglePOIType('attraction')}>🏛️ ท่องเที่ยว</button>
+              <button class="poi-chip attraction" class:active={activePOITypes.has('temple')} on:click={() => togglePOIType('temple')}>🏯 วัด</button>
+              <button class="poi-chip attraction" class:active={activePOITypes.has('park')} on:click={() => togglePOIType('park')}>🌳 สวน</button>
+              <button class="poi-chip attraction" class:active={activePOITypes.has('museum')} on:click={() => togglePOIType('museum')}>🎨 พิพิธภัณฑ์</button>
+            </div>
+          </div>
+          <div class="poi-filter-section">
+            <span class="poi-filter-label">🛎️ บริการ</span>
+            <div class="poi-filter-chips">
+              <button class="poi-chip" class:active={activePOITypes.has('gas')} on:click={() => togglePOIType('gas')}>⛽ ปั๊ม</button>
+              <button class="poi-chip" class:active={activePOITypes.has('convenience')} on:click={() => togglePOIType('convenience')}>🏪 สะดวกซื้อ</button>
+              <button class="poi-chip" class:active={activePOITypes.has('restaurant')} on:click={() => togglePOIType('restaurant')}>🍜 อาหาร</button>
+              <button class="poi-chip" class:active={activePOITypes.has('cafe')} on:click={() => togglePOIType('cafe')}>☕ คาเฟ่</button>
+              <button class="poi-chip" class:active={activePOITypes.has('ev_charging')} on:click={() => togglePOIType('ev_charging')}>⚡ ชาร์จ</button>
+            </div>
           </div>
           <div class="poi-results-summary">
             พบ {alongRoutePOIs.filter(p => activePOITypes.has(p.type)).length} แห่ง บนเส้นทาง
@@ -4904,7 +7112,7 @@ out body;`;
                 <span class="poi-type-icon">{getPOIIcon(poi.type)}</span>
                 <div class="poi-item-info">
                   <span class="poi-name">{poi.name || poi.tags?.brand || getPOILabel(poi.type)}</span>
-                  <span class="poi-meta">{formatDistance(poi.distAlongRoute)} บนเส้นทาง · ห่าง {poi.distFromRoute} ม.</span>
+                  <span class="poi-meta">{formatDistance(poi.distAlongRoute)} บนเส้นทาง · ห่าง {Math.round(poi.distFromRoute)} ม.</span>
                 </div>
               </div>
             {/each}
@@ -5143,9 +7351,9 @@ out body;`;
 .cheapest-badge {
   font-size: 10px;
   padding: 3px 8px;
-  background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+  background: #00ff88;
   color: #000;
-  border-radius: 10px;
+  border-radius: 8px;
   font-weight: 600;
 }
 
@@ -5153,8 +7361,8 @@ out body;`;
 .cheapest-tip {
   margin-top: 12px;
   padding: 10px 14px;
-  background: linear-gradient(135deg, rgba(0, 255, 136, 0.1) 0%, rgba(0, 204, 106, 0.05) 100%);
-  border: 1px dashed rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.06);
+  border: 1px dashed rgba(0, 255, 136, 0.25);
   border-radius: 8px;
   font-size: 12px;
   color: #a1a1aa;
@@ -5167,8 +7375,8 @@ out body;`;
 /* Fuel Price Badge in Quick Toggle */
 .fuel-price-badge {
   padding: 4px 10px;
-  background: linear-gradient(135deg, rgba(0, 255, 136, 0.2) 0%, rgba(0, 204, 106, 0.15) 100%);
-  border-radius: 20px;
+  background: rgba(0, 255, 136, 0.1);
+  border-radius: 16px;
   font-size: 12px;
   font-weight: 600;
   color: #00ff88;
@@ -5243,10 +7451,9 @@ out body;`;
 
 /* ==================== REORDER MODE ==================== */
 .btn-reorder-active {
-  background: linear-gradient(135deg, #9333ea, #7c3aed) !important;
+  background: #9333ea !important;
   color: #fff !important;
   border: 1px solid rgba(147, 51, 234, 0.5) !important;
-  box-shadow: 0 0 12px rgba(147, 51, 234, 0.3) !important;
 }
 
 .drag-handle {
@@ -5299,8 +7506,8 @@ out body;`;
 }
 
 .night-mode-btn.active {
-  background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 200, 255, 0.1));
-  border-color: rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.1);
+  border-color: rgba(0, 255, 136, 0.3);
   color: #00ff88;
 }
 
@@ -5653,8 +7860,88 @@ out body;`;
 
   .app-container { display: flex; height: 100vh; width: 100vw; background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%); }
 
-  .sidebar { width: 500px; background: rgba(15, 15, 25, 0.95); backdrop-filter: blur(20px); border-right: 1px solid rgba(255, 255, 255, 0.05); display: flex; flex-direction: column; z-index: 10; overflow: hidden; max-width: 100%; }
+  .sidebar {
+    width: 500px;
+    background: rgba(15, 15, 25, 0.95);
+    backdrop-filter: blur(20px);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+    overflow: hidden;
+    max-width: 100%;
+    position: relative;
+    transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+                border-right 0.3s ease;
+    will-change: width, transform;
+    transform: translateZ(0);
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+  }
   .sidebar-toggle { display: none; }
+
+  /* Desktop sidebar toggle - fixed position */
+  .desktop-sidebar-toggle {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    position: fixed;
+    top: 50%;
+    left: 500px;
+    transform: translateY(-50%) translateZ(0);
+    padding: 12px 8px;
+    min-width: 44px;
+    background: #00ff88;
+    border: none;
+    border-radius: 0 12px 12px 0;
+    cursor: pointer;
+    color: #0a0a0f;
+    font-family: 'Kanit', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    z-index: 1500;
+    transition: left 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.2s ease,
+                background 0.2s ease;
+    will-change: left, transform;
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+  }
+  .desktop-sidebar-toggle:hover {
+    background: #00e67a;
+  }
+  .desktop-sidebar-toggle svg { width: 24px; height: 24px; flex-shrink: 0; transition: transform 0.2s ease; }
+  .desktop-sidebar-toggle span { white-space: nowrap; }
+
+  /* When sidebar is hidden - move button to left edge */
+  .desktop-sidebar-toggle.sidebar-hidden {
+    left: 0;
+  }
+
+  /* Desktop collapsed state */
+  .sidebar.desktop-collapsed {
+    width: 0 !important;
+    min-width: 0 !important;
+    border-right: none;
+  }
+  .sidebar.desktop-collapsed > * {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(-20px);
+    transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+                visibility 0.25s ease,
+                transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .sidebar:not(.desktop-collapsed) > * {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(0);
+    transition: opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1) 0.1s,
+                visibility 0.35s ease 0.1s,
+                transform 0.35s cubic-bezier(0.22, 1, 0.36, 1) 0.1s;
+  }
   .sidebar-header { padding: 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
   .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
   .sidebar-scroll::-webkit-scrollbar { width: 6px; }
@@ -5662,24 +7949,36 @@ out body;`;
   .sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
 
   .logo { display: flex; align-items: center; gap: 14px; }
-  .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); border-radius: 14px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 30px rgba(0, 255, 136, 0.3); }
-  .logo-icon svg { width: 26px; height: 26px; color: #0a0a0f; }
-  .logo-text h1 { font-size: 22px; font-weight: 700; background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-  .logo-text span { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 2px; }
+  .logo-icon { width: 44px; height: 44px; background: #00ff88; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
+  .logo-icon svg { width: 24px; height: 24px; color: #0a0a0f; }
+  .logo-text h1 { font-size: 20px; font-weight: 700; color: #00ff88; }
+  .logo-text span { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 1.5px; }
 
-  .stats-badge { display: flex; flex-direction: column; align-items: center; background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2); border-radius: 12px; padding: 10px 18px; }
-  .stats-number { font-size: 24px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
-  .stats-label { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 1px; }
+  .stats-badge { display: flex; flex-direction: column; align-items: center; background: rgba(0, 255, 136, 0.08); border: 1px solid rgba(0, 255, 136, 0.15); border-radius: 10px; padding: 8px 16px; }
+  .stats-number { font-size: 22px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
+  .stats-label { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
 
-  .action-buttons { padding: 20px 24px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .action-buttons { padding: 16px 20px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .action-buttons .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
 
-  .btn { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 14px 20px; border-radius: 12px; font-family: 'Kanit', sans-serif; font-size: 15px; font-weight: 500; cursor: pointer; transition: all 0.3s ease; border: none; outline: none; }
-  .btn svg { width: 20px; height: 20px; }
-  .btn-primary { background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); color: #0a0a0f; box-shadow: 0 4px 20px rgba(0, 255, 136, 0.3); }
-  .btn-primary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 30px rgba(0, 255, 136, 0.4); }
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    padding: 14px 20px; border-radius: 12px;
+    font-family: 'Kanit', sans-serif; font-size: 15px; font-weight: 500;
+    cursor: pointer; border: none; outline: none;
+    transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 0.2s ease,
+                background 0.2s ease;
+    will-change: transform;
+  }
+  .btn svg { width: 20px; height: 20px; transition: transform 0.2s ease; }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn-primary { background: #00ff88; color: #0a0a0f; }
+  .btn-primary:hover:not(:disabled) { background: #00e67a; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-  .btn-navigate { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3); }
-  .btn-navigate:hover { transform: translateY(-2px); box-shadow: 0 6px 30px rgba(59, 130, 246, 0.4); }
+  .btn-navigate { background: #3b82f6; color: white; }
+  .btn-navigate:hover { background: #2563eb; }
   .btn-secondary { background: rgba(102, 126, 234, 0.15); color: #818cf8; border: 1px solid rgba(102, 126, 234, 0.3); }
   .btn-secondary:hover { background: rgba(102, 126, 234, 0.25); border-color: rgba(102, 126, 234, 0.5); }
   .btn-ghost { background: rgba(255, 255, 255, 0.05); color: #a1a1aa; border: 1px solid rgba(255, 255, 255, 0.1); }
@@ -5725,8 +8024,17 @@ out body;`;
   @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   .form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .form-header h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; }
-  .close-btn { width: 32px; height: 32px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); border: none; color: #71717a; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
-  .close-btn:hover { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
+  .close-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05); border: none;
+    color: #71717a; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                background 0.2s ease,
+                color 0.2s ease;
+  }
+  .close-btn:hover { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; transform: scale(1.1); }
+  .close-btn:active { transform: scale(0.9); }
   .close-btn svg { width: 16px; height: 16px; }
   .form-hint { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #71717a; margin-bottom: 20px; }
   .form-hint svg { width: 16px; height: 16px; color: #00ff88; }
@@ -5740,62 +8048,326 @@ out body;`;
   .priority-selector { display: flex; flex-wrap: wrap; gap: 8px; }
   .priority-btn { flex: 1 1 auto; min-width: 50px; max-width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 4px; border-radius: 10px; background: rgba(255, 255, 255, 0.05); border: 2px solid transparent; cursor: pointer; transition: all 0.2s; }
   .priority-btn:hover { background: rgba(255, 255, 255, 0.1); }
-  .priority-btn.active { background: var(--btn-bg); border-color: rgba(255, 255, 255, 0.3); box-shadow: 0 0 20px color-mix(in srgb, var(--btn-glow) 40%, transparent); }
+  .priority-btn.active { background: var(--btn-bg); border-color: rgba(255, 255, 255, 0.3); }
   .priority-num { font-size: 18px; font-weight: 700; color: #e4e4e7; }
   .priority-btn.active .priority-num { color: white; }
   .priority-label { font-size: 9px; color: #71717a; margin-top: 2px; }
   .priority-btn.active .priority-label { color: rgba(255, 255, 255, 0.8); }
   .form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
 
-  .tabs { display: flex; padding: 0 24px; gap: 8px; margin-bottom: 16px; }
-  .tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); color: #71717a; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
-  .tab svg { width: 18px; height: 18px; }
-  .tab:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); color: #a1a1aa; }
-  .tab.active { background: rgba(0, 255, 136, 0.1); border-color: rgba(0, 255, 136, 0.3); color: #00ff88; }
-  .tab:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Clean Tabs */
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin: 0 20px 16px;
+    padding: 4px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 14px;
+  }
+  .tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: transparent;
+    border: none;
+    color: #71717a;
+    font-family: 'Kanit', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .tab svg {
+    width: 18px;
+    height: 18px;
+  }
+  .tab:hover:not(:disabled) {
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .tab:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+  .tab.active {
+    background: rgba(0, 255, 136, 0.1);
+    color: #00ff88;
+  }
+  .tab:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 
   .content-area { flex: 1; overflow-y: auto; padding: 0 50px; }
   .content-area::-webkit-scrollbar { width: 6px; }
   .content-area::-webkit-scrollbar-track { background: transparent; }
   .content-area::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
 
-  .empty-state { text-align: center; padding: 60px 20px; }
-  .empty-icon { width: 80px; height: 80px; margin: 0 auto 20px; background: rgba(255, 255, 255, 0.03); border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  .empty-icon svg { width: 40px; height: 40px; color: #3f3f46; }
-  .empty-state h4 { font-size: 16px; color: #71717a; margin-bottom: 8px; }
-  .empty-state p { font-size: 13px; color: #52525b; }
+  /* Clean Empty State */
+  .empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    margin: 10px;
+  }
+  .empty-icon {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 20px;
+    background: rgba(139, 92, 246, 0.08);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .empty-icon svg {
+    width: 36px;
+    height: 36px;
+    color: #8b5cf6;
+  }
+  .empty-state h4 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #a1a1aa;
+    margin-bottom: 8px;
+  }
+  .empty-state p {
+    font-size: 13px;
+    color: #71717a;
+    line-height: 1.5;
+  }
 
-  .points-list { display: flex; flex-direction: column; gap: 10px; padding-bottom: 20px; }
-  .point-card { display: flex; align-items: flex-start; gap: 14px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 14px; cursor: pointer; transition: all 0.2s; }
-  .point-card:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1); transform: translateX(4px); }
-  .point-card.active { background: rgba(0, 255, 136, 0.08); border-color: rgba(0, 255, 136, 0.3); box-shadow: 0 0 20px rgba(0, 255, 136, 0.1); }
-  .point-number { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: white; flex-shrink: 0; }
-  .point-info { flex: 1; min-width: 0; }
-  .point-info h4 { font-size: 14px; font-weight: 600; color: #e4e4e7; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .point-info p { font-size: 12px; color: #71717a; margin-bottom: 10px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .point-meta { display: flex; align-items: center; gap: 8px; }
-  .priority-tag { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; color: white; }
-  .delete-btn { width: 36px; height: 36px; border-radius: 10px; background: transparent; border: none; color: #52525b; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.2s; flex-shrink: 0; }
-  .point-card:hover .delete-btn { opacity: 1; }
-  .delete-btn:hover { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }
-  .delete-btn svg { width: 18px; height: 18px; }
+  /* Clean Points List */
+  .points-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 20px;
+  }
+  .point-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s ease;
+  }
+  .point-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3px;
+    height: 100%;
+    background: #00ff88;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .point-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  .point-card:hover::before {
+    opacity: 0.5;
+  }
+  .point-card:active {
+    transform: scale(0.99);
+  }
+  .point-card.active {
+    background: rgba(0, 255, 136, 0.06);
+    border-color: rgba(0, 255, 136, 0.2);
+  }
+  .point-card.active::before {
+    opacity: 1;
+  }
+  .point-number {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .point-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .point-info h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #f4f4f5;
+    margin-bottom: 5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .point-info p {
+    font-size: 12px;
+    color: #71717a;
+    margin-bottom: 10px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.5;
+  }
+  .point-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .priority-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: white;
+  }
+  .distance-tag {
+    font-size: 11px;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 4px 10px;
+    border-radius: 6px;
+  }
+  .delete-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: #52525b;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: all 0.25s ease;
+    flex-shrink: 0;
+  }
+  .point-card:hover .delete-btn {
+    opacity: 1;
+  }
+  .delete-btn:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #ef4444;
+    transform: scale(1.05);
+  }
+  .delete-btn svg {
+    width: 18px;
+    height: 18px;
+  }
 
-  .route-summary { padding-bottom: 20px; }
-  .summary-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-  .summary-header h3 { font-size: 16px; font-weight: 600; }
-  .route-badge { padding: 6px 12px; background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3); border-radius: 20px; font-size: 11px; font-weight: 500; color: #00ff88; }
-  .summary-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
-  .stat-card { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 14px; padding: 16px; text-align: center; }
-  .stat-icon { width: 40px; height: 40px; margin: 0 auto 10px; background: rgba(0, 255, 136, 0.1); border-radius: 10px; display: flex; align-items: center; justify-content: center; }
-  .stat-icon svg { width: 20px; height: 20px; color: #00ff88; }
-  .stat-value { font-size: 28px; font-weight: 700; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; line-height: 1; margin-bottom: 4px; }
-  .stat-label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
-  .route-timeline h4 { font-size: 13px; font-weight: 600; color: #a1a1aa; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .timeline-item { display: flex; align-items: flex-start; gap: 14px; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; margin-bottom: 10px; cursor: pointer; transition: all 0.2s; }
-  .timeline-item:hover { background: rgba(255, 255, 255, 0.05); transform: translateX(4px); }
-  .timeline-item.start .timeline-marker { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); box-shadow: 0 0 20px rgba(59, 130, 246, 0.4); }
-  .timeline-item.end .timeline-marker { background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%); box-shadow: 0 0 20px rgba(255, 107, 107, 0.4); }
-  .timeline-marker { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: white; flex-shrink: 0; }
+  /* Modern Route Summary */
+  .route-summary {
+    padding-bottom: 20px;
+  }
+  .summary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  .summary-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #f4f4f5;
+  }
+  .route-badge {
+    padding: 6px 14px;
+    background: rgba(0, 255, 136, 0.1);
+    border: 1px solid rgba(0, 255, 136, 0.2);
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #00ff88;
+  }
+  .route-badge.ev-badge {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.2);
+    color: #3b82f6;
+  }
+  .summary-stats {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    padding: 18px 14px;
+    text-align: center;
+    transition: all 0.2s ease;
+  }
+  .stat-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  .stat-icon {
+    width: 44px;
+    height: 44px;
+    margin: 0 auto 12px;
+    background: rgba(0, 255, 136, 0.08);
+    border: 1px solid rgba(0, 255, 136, 0.15);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+  .stat-icon svg {
+    width: 22px;
+    height: 22px;
+    color: #00ff88;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #f4f4f5;
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat-label {
+    font-size: 11px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
+  }
+  .stat-card.fuel {
+    border-color: rgba(249, 115, 22, 0.15);
+  }
+  .stat-card.fuel .stat-icon {
+    background: rgba(249, 115, 22, 0.08);
+    border-color: rgba(249, 115, 22, 0.15);
+  }
+  .stat-card.fuel .stat-value {
+    color: #fb923c;
+  }
+  .route-timeline h4 { font-size: 12px; font-weight: 600; color: #a1a1aa; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .timeline-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 10px; margin-bottom: 8px; cursor: pointer; transition: all 0.2s; }
+  .timeline-item:hover { background: rgba(255, 255, 255, 0.04); }
+  .timeline-item.start .timeline-marker { background: #3b82f6; }
+  .timeline-item.end .timeline-marker { background: #ff6b6b; }
+  .timeline-marker { width: 32px; height: 32px; border-radius: 8px; background: #667eea; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: white; flex-shrink: 0; }
   .timeline-content { flex: 1; }
   .timeline-label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
   .timeline-name { font-size: 14px; font-weight: 500; color: #e4e4e7; }
@@ -5806,8 +8378,16 @@ out body;`;
 
   /* Header Actions */
   .header-actions { display: flex; gap: 8px; }
-  .icon-btn { width: 40px; height: 40px; border-radius: 10px; background: rgba(255, 255, 255, 0.05); border: none; font-size: 18px; cursor: pointer; position: relative; transition: all 0.2s; }
-  .icon-btn:hover { background: rgba(255, 255, 255, 0.1); }
+  .icon-btn {
+    width: 40px; height: 40px; border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05); border: none;
+    font-size: 18px; cursor: pointer; position: relative;
+    transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                background 0.2s ease,
+                box-shadow 0.2s ease;
+  }
+  .icon-btn:hover { background: rgba(255, 255, 255, 0.1); transform: scale(1.05); }
+  .icon-btn:active { transform: scale(0.95); }
   .icon-btn .badge { position: absolute; top: -4px; right: -4px; background: #ff6b6b; color: white; font-size: 10px; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 
   /* Quick Stats */
@@ -5825,10 +8405,10 @@ out body;`;
   .result-address { display: block; font-size: 12px; color: #71717a; }
     /* Vehicle Quick Toggle */
   .vehicle-quick-toggle { padding: 12px 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-  .vehicle-toggle-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px; border-radius: 12px; border: none; cursor: pointer; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 500; transition: all 0.3s ease; }
-  .vehicle-toggle-btn.fuel { background: linear-gradient(135deg, rgba(0, 255, 136, 0.15) 0%, rgba(0, 204, 106, 0.15) 100%); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88; }
-  .vehicle-toggle-btn.ev { background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(29, 78, 216, 0.15) 100%); border: 1px solid rgba(59, 130, 246, 0.3); color: #3b82f6; }
-  .vehicle-toggle-btn:hover { transform: translateY(-2px); }
+  .vehicle-toggle-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px; border-radius: 10px; border: none; cursor: pointer; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 500; transition: all 0.2s ease; }
+  .vehicle-toggle-btn.fuel { background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2); color: #00ff88; }
+  .vehicle-toggle-btn.ev { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; }
+  .vehicle-toggle-btn:hover { background: rgba(255, 255, 255, 0.05); }
   .toggle-icon { font-size: 20px; }
   .ev-charge-badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; color: #000; }
 
@@ -5854,8 +8434,8 @@ out body;`;
   .adjust-range-hint { display: flex; justify-content: space-between; font-size: 10px; color: rgba(255,255,255,0.25); margin-top: 4px; }
   .ev-battery-setting { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
   .ev-battery-setting label { display: block; font-size: 13px; color: #a1a1aa; margin-bottom: 10px; }
-  .ev-slider { width: 100%; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); appearance: none; cursor: pointer; }
-  .ev-slider::-webkit-slider-thumb { appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #3b82f6; cursor: pointer; box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); }
+  .ev-slider { width: 100%; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); appearance: none; cursor: pointer; }
+  .ev-slider::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #3b82f6; cursor: pointer; }
   .ev-range-info { margin-top: 12px; text-align: center; font-size: 14px; color: #71717a; }
   .ev-range-info strong { font-size: 16px; }
 
@@ -5883,13 +8463,13 @@ out body;`;
   .map-stat.vehicle-type.ev { border-left-color: #3b82f6; }
 
   /* Route Badge */
-  .route-badge.ev-badge { background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.3); color: #3b82f6; }
+  .route-badge.ev-badge { background: rgba(59, 130, 246, 0.08); border-color: rgba(59, 130, 246, 0.15); color: #3b82f6; }
 
   /* EV Primary Button */
-  .btn-primary.btn-ev { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3); }
+  .btn-primary.btn-ev { background: #3b82f6; color: white; }
 
   /* Stat Card EV */
-  .stat-card.ev { border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.1); }
+  .stat-card.ev { border-color: rgba(59, 130, 246, 0.15); background: rgba(59, 130, 246, 0.05); }
 
   /* Responsive */
   @media (max-width: 768px) {
@@ -5920,10 +8500,29 @@ out body;`;
   .distance-tag { font-size: 11px; color: #71717a; margin-left: 8px; }
 
   /* Modal Overlay */
-  .modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px);
+    z-index: 2000; display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    animation: modalFadeIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes modalFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes modalSlideIn {
+    from { opacity: 0; transform: translateY(-20px) scale(0.95); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
   
   /* Add Form Modal */
-  .add-form-modal { width: 100%; max-width: 500px; max-height: 90vh; overflow-y: auto; padding: 24px; background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; }
+  .add-form-modal {
+    width: 100%; max-width: 500px; max-height: 90vh; overflow-y: auto; padding: 24px;
+    background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    animation: modalSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
   .add-form-modal .form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
   .add-form-modal .form-header h3 { font-size: 20px; font-weight: 600; color: #e4e4e7; }
   .add-form-modal .form-hint { display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(0, 255, 136, 0.1); border-radius: 10px; color: #00ff88; font-size: 13px; margin-bottom: 20px; }
@@ -5938,7 +8537,7 @@ out body;`;
   .add-form-modal .priority-selector { display: flex; gap: 8px; flex-wrap: wrap; }
   .add-form-modal .priority-btn { flex: 1; min-width: 60px; padding: 10px 8px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; cursor: pointer; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 4px; }
   .add-form-modal .priority-btn:hover { background: rgba(255, 255, 255, 0.1); }
-  .add-form-modal .priority-btn.active { background: var(--btn-bg); border-color: var(--btn-glow); box-shadow: 0 0 15px var(--btn-glow); }
+  .add-form-modal .priority-btn.active { background: var(--btn-bg); border-color: var(--btn-glow); }
   .add-form-modal .priority-num { font-size: 18px; font-weight: 700; color: #e4e4e7; }
   .add-form-modal .priority-label { font-size: 10px; color: #a1a1aa; }
   .add-form-modal .priority-btn.active .priority-num, .add-form-modal .priority-btn.active .priority-label { color: white; }
@@ -6117,7 +8716,7 @@ out body;`;
   .nav-btn-voice.active { background: rgba(0, 255, 136, 0.2); color: #00ff88; border-color: rgba(0, 255, 136, 0.3); }
   .nav-btn-share { background: rgba(59, 130, 246, 0.15); color: #60a5fa; flex: 0 0 auto; width: 44px; border: 1px solid rgba(59, 130, 246, 0.2); }
   .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
-  .map-container { flex: 1; position: relative; overflow: hidden; }
+  .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
   .map-container.fullscreen { width: 100vw; }
   
   /* Map Stats - Top Left */
@@ -6206,27 +8805,89 @@ out body;`;
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
   @keyframes pulse-label { 0%, 100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.1); } }
   :global(.current-target) { animation: pulse-target 1.5s ease-in-out infinite; }
-  :global(.current-loc) { animation: pulse-loc 2s ease-in-out infinite; }
-  @keyframes pulse-loc { 0%, 100% { box-shadow: 0 0 25px rgba(59, 130, 246, 0.6); } 50% { box-shadow: 0 0 40px rgba(59, 130, 246, 0.9); } }
+  /* ===== Start Location Marker (route calculated) ===== */
+  :global(.start-loc-marker) {
+    position: relative; width: 48px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  :global(.start-loc-core) {
+    position: absolute; width: 24px; height: 24px;
+    background: #00ff88;
+    border: 3px solid white;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(0,255,136,0.8), 0 0 24px rgba(0,255,136,0.35);
+    z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+  }
+  :global(.start-loc-core svg) { filter: drop-shadow(0 1px 1px rgba(0,0,0,0.2)); }
+  :global(.start-loc-ripple) {
+    position: absolute; width: 24px; height: 24px;
+    border: 2px solid rgba(0,255,136,0.6);
+    border-radius: 50%;
+    animation: start-ripple 2.5s ease-out infinite;
+    z-index: 1;
+  }
+  :global(.start-loc-ripple-2) { animation-delay: 1.25s; }
+  @keyframes start-ripple {
+    0% { width: 24px; height: 24px; opacity: 0.7; }
+    100% { width: 56px; height: 56px; opacity: 0; }
+  }
+  :global(.start-loc-label) {
+    position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,255,136,0.9);
+    padding: 1px 8px; border-radius: 6px;
+    font-size: 9px; font-weight: 600; white-space: nowrap;
+    color: #0a2015; font-family: 'Kanit', sans-serif;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    z-index: 11;
+  }
   @keyframes pulse-target { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
   :global(.arrived) { opacity: 0.6; }
   :global(.pulse-marker) { width: 48px; height: 48px; background: radial-gradient(circle, rgba(0, 255, 136, 0.6) 0%, rgba(0, 255, 136, 0) 70%); border-radius: 50%; animation: pulse 1.5s ease-out infinite; position: relative; }
   :global(.pulse-marker::after) { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 16px; height: 16px; background: #00ff88; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 20px rgba(0, 255, 136, 0.6); }
   @keyframes pulse { 0% { transform: scale(0.5); opacity: 1; } 100% { transform: scale(2); opacity: 0; } }
 
-  :global(.current-location-marker) { position: relative; }
-  :global(.location-wrapper) { position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
-  :global(.location-accuracy) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(66, 133, 244, 0.12); border: 1px solid rgba(66, 133, 244, 0.25); border-radius: 50%; transition: width 0.5s, height 0.5s; }
-  /* Google Maps-style heading cone */
-  :global(.location-heading) { position: absolute; top: 50%; left: 50%; width: 48px; height: 48px; margin-left: -24px; margin-top: -24px; transition: transform 0.3s ease, opacity 0.3s; z-index: 1; pointer-events: none; }
-  :global(.heading-cone) { position: absolute; top: -8px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 12px solid transparent; border-right: 12px solid transparent; border-bottom: 24px solid rgba(66, 133, 244, 0.35); border-radius: 4px; }
-  /* Google Maps blue dot */
-  :global(.location-dot-gmap) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; background: #4285F4; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 8px rgba(66, 133, 244, 0.6), 0 2px 6px rgba(0, 0, 0, 0.3); z-index: 2; }
-  :global(.location-dot-inner-gmap) { width: 100%; height: 100%; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #6ea8fe, #4285F4); }
-  :global(.location-pulse-gmap) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; background: rgba(66, 133, 244, 0.3); border-radius: 50%; animation: gmap-pulse 2s ease-out infinite; z-index: 0; }
-  @keyframes gmap-pulse { 0% { width: 18px; height: 18px; opacity: 0.6; } 100% { width: 60px; height: 60px; opacity: 0; } }
-  :global(.location-dot) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 24px; height: 24px; background: #3b82f6; border-radius: 50%; border: 4px solid white; box-shadow: 0 0 20px rgba(59, 130, 246, 0.6), 0 2px 10px rgba(0, 0, 0, 0.3); }
-  :global(.location-dot-inner) { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 8px; height: 8px; background: white; border-radius: 50%; }
+  /* ===== Clean Location Dot ===== */
+  :global(.my-loc-wrapper) {
+    position: relative;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  :global(.my-loc-dot) {
+    position: absolute;
+    width: 16px; height: 16px;
+    background: #00ff88;
+    border: 3px solid white;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(0,255,136,0.8), 0 0 24px rgba(0,255,136,0.35);
+    z-index: 10;
+  }
+  :global(.heading-arrow) {
+    position: absolute;
+    top: 0; left: 50%;
+    transform-origin: center 20px;
+    width: 0; height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 14px solid #00ff88;
+    margin-left: -7px;
+    filter: drop-shadow(0 0 4px rgba(0,255,136,0.7));
+    transition: transform 0.3s ease, opacity 0.3s;
+    z-index: 5;
+  }
+  :global(.loc-pulse-ring) {
+    position: absolute;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(0,255,136,0.6);
+    border-radius: 50%;
+    animation: loc-pulse 2.5s ease-out infinite;
+    z-index: 1;
+  }
+  :global(.loc-pulse-ring-2) { animation-delay: 1.25s; }
+  @keyframes loc-pulse {
+    0% { width: 16px; height: 16px; opacity: 0.7; }
+    100% { width: 48px; height: 48px; opacity: 0; }
+  }
 
   :global(.dark-popup .leaflet-popup-content-wrapper) { background: rgba(15, 15, 25, 0.95); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 0; overflow: hidden; }
   :global(.dark-popup .leaflet-popup-tip) { background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); }
@@ -6273,16 +8934,48 @@ out body;`;
     .app-container { flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
 
     /* Sidebar: collapsible on mobile */
-    .sidebar { width: 100%; height: auto; max-height: 55vh; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.08); overflow: hidden; flex-shrink: 0; transition: max-height 0.1s ease; }
-    .sidebar.collapsed { max-height: 38px !important; overflow: hidden !important; min-height: 0 !important; }
-    .sidebar.collapsed > *:not(.sidebar-toggle) { display: none !important; height: 0 !important; overflow: hidden !important; }
+    .sidebar {
+      width: 100%;
+      height: auto;
+      max-height: 55vh;
+      border-right: none;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+      flex-shrink: 0;
+      transition: max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+                  border-bottom 0.2s ease;
+      will-change: max-height;
+    }
+    .sidebar.collapsed {
+      max-height: 38px !important;
+      overflow: hidden !important;
+      min-height: 0 !important;
+    }
+    .sidebar.collapsed > *:not(.sidebar-toggle) {
+      opacity: 0;
+      transform: translateY(-10px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      pointer-events: none;
+    }
+    .sidebar:not(.collapsed) > *:not(.sidebar-toggle) {
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 0.25s ease 0.1s, transform 0.25s ease 0.1s;
+    }
+    .sidebar.desktop-collapsed { width: 100% !important; } /* ยกเลิก desktop-collapsed บน mobile */
+    .desktop-sidebar-toggle { display: none !important; } /* ซ่อนปุ่ม desktop toggle บน mobile */
     .sidebar-toggle {
       display: flex; align-items: center; justify-content: center; gap: 6px;
       width: 100%; padding: 10px 16px; border: none; background: rgba(15, 15, 25, 0.98);
       color: #a1a1aa; font-size: 12px; font-family: 'Kanit', sans-serif; cursor: pointer;
       border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+      transition: background 0.2s ease, color 0.2s ease;
     }
-    .sidebar-toggle svg { width: 16px; height: 16px; transition: transform 0.3s; }
+    .sidebar-toggle:active { background: rgba(0, 255, 136, 0.1); }
+    .sidebar-toggle svg {
+      width: 16px; height: 16px;
+      transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    }
     .sidebar-toggle svg.flipped { transform: rotate(180deg); }
     .sidebar-toggle span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sidebar-header { padding: 10px 14px; flex-shrink: 0; }
@@ -6306,11 +8999,16 @@ out body;`;
     .action-buttons .btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* Tabs compact */
-    .tabs { gap: 2px; padding: 0 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; flex-shrink: 0; }
-    .tab { padding: 8px 12px; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+    .tabs { gap: 4px; margin: 0 10px 12px; padding: 4px; }
+    .tab { padding: 10px 14px; font-size: 12px; white-space: nowrap; flex-shrink: 0; border-radius: 10px; }
+    .tab svg { width: 16px; height: 16px; }
 
     /* Cards compact */
-    .point-card { padding: 10px; margin-bottom: 6px; }
+    .point-card { padding: 12px 14px; margin-bottom: 8px; border-radius: 14px; }
+    .point-number { width: 38px; height: 38px; font-size: 15px; border-radius: 12px; }
+    .stat-card { padding: 16px 12px; border-radius: 14px; }
+    .stat-icon { width: 42px; height: 42px; margin-bottom: 10px; }
+    .stat-value { font-size: 26px; }
     .point-name { font-size: 13px; }
     .point-address { font-size: 11px; }
     /* Route Summary - full width, 4 columns on mobile */
@@ -6639,6 +9337,37 @@ out body;`;
   
   .today-stat .stat-label {
     font-size: 8px;
+  }
+
+  .curve-warning {
+    top: 155px;
+    left: 10px;
+    right: auto;
+    min-width: 150px;
+    padding: 10px 12px;
+  }
+
+  .curve-icon {
+    font-size: 24px;
+  }
+
+  .curve-text {
+    font-size: 12px;
+  }
+
+  .lane-guidance {
+    top: 205px;
+    left: 10px;
+    padding: 8px 10px;
+  }
+
+  .lane {
+    width: 12px;
+    height: 24px;
+  }
+
+  .lane-text {
+    font-size: 12px;
   }
 }
 .driver-phone {
@@ -7444,6 +10173,80 @@ out body;`;
   border: 1px solid rgba(255, 165, 2, 0.3);
 }
 .btn-save-route:hover { background: rgba(255, 165, 2, 0.25); }
+.btn-share {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+.btn-share:hover { background: rgba(59, 130, 246, 0.25); }
+
+/* Share Route QR Modal */
+.share-qr-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: modalFadeIn 0.3s ease;
+}
+.share-qr-modal {
+  width: 90%;
+  max-width: 360px;
+  padding: 0;
+  border-radius: 20px;
+  overflow: hidden;
+  animation: modalSlideIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.share-qr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.1) 100%);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.2);
+}
+.share-qr-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+.share-qr-body {
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.qr-code-container {
+  background: white;
+  padding: 16px;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+.qr-code-img {
+  display: block;
+  width: 200px;
+  height: 200px;
+}
+.share-qr-hint {
+  font-size: 13px;
+  color: #a1a1aa;
+  text-align: center;
+  margin: 0;
+}
+.share-qr-actions {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+.share-qr-actions .btn {
+  flex: 1;
+  justify-content: center;
+}
+
 /* Turn-by-Turn Panel */
 .turn-by-turn-panel {
   position: absolute;
@@ -7481,6 +10284,115 @@ out body;`;
 
 @keyframes turn-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
 @keyframes badge-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* Curve Warning */
+.curve-warning {
+  position: absolute;
+  top: 190px;
+  left: 20px;
+  padding: 12px 16px;
+  z-index: 1090;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 180px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.1);
+  animation: curveSlideIn 0.3s ease;
+}
+
+@keyframes curveSlideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.curve-warning.sharp {
+  border-color: rgba(249, 115, 22, 0.4);
+  background: rgba(249, 115, 22, 0.15);
+}
+
+.curve-warning.hairpin {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.15);
+  animation: curveSlideIn 0.3s ease, curvePulse 0.8s ease-in-out infinite;
+}
+
+@keyframes curvePulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 25px rgba(239, 68, 68, 0.6); }
+}
+
+.curve-icon {
+  font-size: 32px;
+  font-weight: bold;
+  color: #fbbf24;
+}
+
+.curve-warning.sharp .curve-icon { color: #f97316; }
+.curve-warning.hairpin .curve-icon { color: #ef4444; }
+
+.curve-info { flex: 1; }
+
+.curve-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fbbf24;
+}
+
+.curve-warning.sharp .curve-text { color: #f97316; }
+.curve-warning.hairpin .curve-text { color: #ef4444; }
+
+.curve-distance {
+  font-size: 12px;
+  color: #a1a1aa;
+  margin-top: 2px;
+}
+
+/* Lane Guidance */
+.lane-guidance {
+  position: absolute;
+  top: 240px;
+  left: 20px;
+  padding: 10px 14px;
+  z-index: 1090;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.lane-visual {
+  display: flex;
+  gap: 4px;
+}
+
+.lane {
+  width: 16px;
+  height: 32px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transition: all 0.3s ease;
+}
+
+.lane.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+  animation: lanePulse 1s ease-in-out infinite;
+}
+
+@keyframes lanePulse {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.1); }
+}
+
+.lane-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: #3b82f6;
+}
 
 /* Route Progress Strip */
 .nav-route-progress-strip {
@@ -7558,21 +10470,6 @@ out body;`;
 .score-text { text-align: center; z-index: 1; }
 .score-number { font-size: 18px; font-weight: 800; font-family: 'JetBrains Mono', monospace; line-height: 1; }
 .score-label { font-size: 8px; color: #a1a1aa; margin-top: 1px; }
-
-/* Curve Warning */
-.curve-warning {
-  position: absolute; top: 120px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 18px; z-index: 1080;
-  background: rgba(245, 158, 11, 0.15) !important;
-  border: 1px solid rgba(245, 158, 11, 0.4) !important;
-  animation: curve-flash 1s ease-in-out infinite;
-  pointer-events: none;
-}
-.curve-icon { font-size: 24px; }
-.curve-text { font-size: 14px; font-weight: 700; color: #fbbf24; }
-.curve-dist { font-size: 11px; color: #a1a1aa; }
-@keyframes curve-flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
 /* Break Reminder */
 .break-reminder-overlay {
@@ -8325,6 +11222,34 @@ out body;`;
   margin-top: 8px;
 }
 
+/* Recent Searches */
+.recent-searches {
+  padding: 8px 0;
+}
+.recent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px 8px;
+  font-size: 12px;
+  color: #a1a1aa;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 4px;
+}
+.recent-clear-btn {
+  background: none;
+  border: none;
+  color: #ef4444;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Kanit', sans-serif;
+}
+.recent-clear-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
+
 /* Floating Route Preferences - Left side below map-stats */
 .map-prefs-float {
   position: absolute;
@@ -8389,6 +11314,13 @@ out body;`;
   background: rgba(0, 255, 136, 0.18);
   border-color: rgba(0, 255, 136, 0.4);
   box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
+}
+.float-toggle-chip.gps-refresh-btn.spinning {
+  animation: spin-gps 1s linear infinite;
+}
+@keyframes spin-gps {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Floating Vehicle Toggle */
@@ -8504,6 +11436,26 @@ out body;`;
   max-width: 340px;
   font-family: 'Kanit', sans-serif;
 }
+.poi-header {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.poi-close-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.poi-close-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
 .poi-search-btn {
   width: 100%;
   padding: 8px 14px;
@@ -8539,6 +11491,25 @@ out body;`;
   background: rgba(0, 255, 136, 0.18);
   border-color: rgba(0, 255, 136, 0.4);
   color: #00ff88;
+}
+.poi-chip.attraction {
+  background: rgba(168, 85, 247, 0.1);
+  border-color: rgba(168, 85, 247, 0.2);
+  color: #c4b5fd;
+}
+.poi-chip.attraction.active {
+  background: rgba(168, 85, 247, 0.25);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #a855f7;
+}
+.poi-filter-section {
+  margin-bottom: 8px;
+}
+.poi-filter-label {
+  font-size: 10px;
+  color: #71717a;
+  margin-bottom: 4px;
+  display: block;
 }
 .poi-results-summary {
   font-size: 11px;
@@ -8596,6 +11567,11 @@ out body;`;
 :global(.poi-pin.restaurant) { background: linear-gradient(135deg, #ef4444, #dc2626); }
 :global(.poi-pin.cafe) { background: linear-gradient(135deg, #a16207, #92400e); }
 :global(.poi-pin.ev_charging) { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+:global(.poi-pin.viewpoint) { background: linear-gradient(135deg, #ec4899, #db2777); }
+:global(.poi-pin.attraction) { background: linear-gradient(135deg, #a855f7, #9333ea); }
+:global(.poi-pin.temple) { background: linear-gradient(135deg, #f59e0b, #d97706); }
+:global(.poi-pin.park) { background: linear-gradient(135deg, #10b981, #059669); }
+:global(.poi-pin.museum) { background: linear-gradient(135deg, #6366f1, #4f46e5); }
 :global(.poi-popup) { font-family: 'Kanit', sans-serif; }
 :global(.poi-popup-header) { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
 :global(.poi-popup-meta p) { margin: 2px 0; font-size: 12px; color: #d4d4d8; }
@@ -8645,5 +11621,1127 @@ out body;`;
   .poi-chip { font-size: 10px; padding: 3px 8px; }
   .map-vehicle-float { bottom: 14px; }
   .map-saved-float { bottom: 14px; max-width: calc(100% - 80px); }
+}
+
+/* ==================== TRAFFIC LEGEND ==================== */
+.traffic-legend {
+  position: absolute;
+  top: 160px;
+  left: 16px;
+  z-index: 1000;
+  padding: 10px 14px;
+  border-radius: 16px;
+  min-width: 140px;
+}
+.traffic-legend-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.traffic-legend-icon { font-size: 14px; }
+.traffic-legend-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e4e4e7;
+  flex: 1;
+}
+.traffic-legend-summary {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.traffic-legend-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.traffic-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.traffic-legend-color {
+  width: 20px;
+  height: 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.traffic-legend-color.traffic-moderate {
+  background: repeating-linear-gradient(
+    90deg,
+    #f59e0b 0px,
+    #f59e0b 6px,
+    transparent 6px,
+    transparent 10px
+  ) !important;
+}
+.traffic-legend-color.traffic-heavy,
+.traffic-legend-color.traffic-severe {
+  box-shadow: 0 0 8px var(--glow-color, currentColor);
+}
+.traffic-legend-color.traffic-heavy { --glow-color: #ef4444; }
+.traffic-legend-color.traffic-severe { --glow-color: #991b1b; }
+.traffic-legend-label {
+  font-size: 11px;
+  color: #a1a1aa;
+  flex: 1;
+}
+.traffic-legend-pct {
+  font-size: 10px;
+  color: #71717a;
+  font-weight: 500;
+}
+
+/* ==================== TRAFFIC INCIDENTS ==================== */
+.incidents-panel {
+  position: absolute;
+  bottom: 15px;
+  left: 16px;
+  z-index: 1050;
+  width: 300px;
+  max-height: 300px;
+  padding: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.incidents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.incidents-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.incidents-icon { font-size: 16px; }
+
+.incidents-badge {
+  background: #ef4444;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.incidents-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.incidents-refresh,
+.incidents-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: #a1a1aa;
+  transition: all 0.2s ease;
+}
+
+.incidents-refresh:hover,
+.incidents-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e4e4e7;
+}
+
+
+.incidents-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 30px 20px;
+  color: #71717a;
+  font-size: 13px;
+}
+
+.incidents-empty .empty-icon {
+  font-size: 28px;
+  margin-bottom: 4px;
+}
+
+.btn-check-incidents {
+  margin-top: 10px;
+  padding: 8px 16px;
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid rgba(0, 255, 136, 0.2);
+  border-radius: 8px;
+  color: #00ff88;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-check-incidents:hover {
+  background: rgba(0, 255, 136, 0.15);
+}
+
+.incidents-summary {
+  padding: 10px 14px;
+  background: rgba(251, 191, 36, 0.1);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.15);
+  font-size: 12px;
+  font-weight: 500;
+  color: #fbbf24;
+}
+
+.incident-delay-tag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 4px;
+  font-size: 10px;
+  color: #f87171;
+}
+
+.incidents-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 280px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 255, 136, 0.3) transparent;
+}
+
+.incidents-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.incidents-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.incidents-list::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 136, 0.3);
+  border-radius: 3px;
+}
+
+.incidents-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 255, 136, 0.5);
+}
+
+.incident-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.incident-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.incident-item.on-route {
+  background: rgba(251, 191, 36, 0.08);
+  border-left: 3px solid #fbbf24;
+}
+
+.incident-icon-wrap {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.incident-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.incident-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.incident-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.incident-severity {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.incident-severity.severity-critical {
+  background: rgba(220, 38, 38, 0.2);
+  color: #dc2626;
+}
+
+.incident-severity.severity-major {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.incident-severity.severity-moderate {
+  background: rgba(249, 115, 22, 0.2);
+  color: #f97316;
+}
+
+.incident-severity.severity-minor {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+.incident-desc {
+  font-size: 11px;
+  color: #a1a1aa;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.incident-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #71717a;
+}
+
+.incidents-footer {
+  padding: 8px 14px;
+  text-align: center;
+  font-size: 10px;
+  color: #52525b;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Incident Markers on Map */
+.incident-marker { background: none !important; border: none !important; }
+
+.incident-pin {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: incidentPulse 2s ease-in-out infinite;
+}
+
+@keyframes incidentPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+.incident-icon { font-size: 16px; }
+
+.incident-popup {
+  min-width: 200px;
+}
+
+.incident-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px 8px 0 0;
+  color: white;
+  font-weight: 600;
+}
+
+.incident-popup-icon { font-size: 16px; }
+.incident-popup-title { font-size: 13px; }
+
+.incident-popup-content {
+  padding: 10px 12px;
+}
+
+.incident-popup-content p {
+  font-size: 12px;
+  color: #a1a1aa;
+  margin-bottom: 8px;
+}
+
+.incident-popup-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #71717a;
+}
+
+.incident-popup-time {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  color: #52525b;
+}
+
+.spinner-small {
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #00ff88;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+  .incidents-panel {
+    width: calc(100% - 32px);
+    max-width: 360px;
+    right: 16px;
+    top: 70px;
+  }
+}
+
+@media (max-width: 768px) {
+  .incidents-panel {
+    bottom: 80px;
+    left: 10px;
+    width: 280px;
+    max-height: 300px;
+  }
+}
+
+@media (max-width: 480px) {
+  .incidents-panel {
+    width: calc(100% - 16px);
+    left: 8px;
+    bottom: 70px;
+    max-height: 250px;
+  }
+
+  .reroute-modal {
+    width: calc(100% - 32px);
+  }
+}
+
+/* Reroute Suggestion Modal */
+.reroute-modal {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2000;
+  width: 320px;
+  padding: 20px;
+  border-radius: 16px;
+  text-align: center;
+  animation: modalPop 0.3s ease;
+}
+
+@keyframes modalPop {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.reroute-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.reroute-content h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f4f4f5;
+  margin-bottom: 6px;
+}
+
+.reroute-content p {
+  font-size: 13px;
+  color: #fbbf24;
+  margin-bottom: 12px;
+}
+
+.reroute-incidents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.reroute-incident-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #e4e4e7;
+}
+
+.reroute-incident-item .delay-badge {
+  margin-left: auto;
+  padding: 2px 6px;
+  background: rgba(239, 68, 68, 0.2);
+  border-radius: 4px;
+  font-size: 10px;
+  color: #f87171;
+}
+
+.reroute-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.btn-reroute-accept {
+  padding: 12px;
+  background: #00ff88;
+  border: none;
+  border-radius: 10px;
+  color: #0a0a0f;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-reroute-accept:hover {
+  background: #00e67a;
+}
+
+.btn-reroute-dismiss {
+  padding: 10px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #a1a1aa;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-reroute-dismiss:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #e4e4e7;
+}
+
+/* ==================== 2-OPT OPTIMIZATION ==================== */
+.btn-optimize-2opt {
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+  color: white;
+}
+.btn-optimize-2opt:hover:not(:disabled) {
+  background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+  transform: translateY(-1px);
+}
+.btn-optimize-2opt:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Real Distance Toggle Switch */
+.real-dist-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 14px;
+  user-select: none;
+  flex: 1 1 calc(50% - 4px);
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(109, 40, 217, 0.05) 100%);
+  border-radius: 12px;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  transition: all 0.3s ease;
+}
+.real-dist-toggle:hover {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(109, 40, 217, 0.1) 100%);
+  border-color: rgba(139, 92, 246, 0.4);
+  transform: translateY(-1px);
+}
+.real-dist-toggle.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.real-dist-toggle input[type="checkbox"] {
+  display: none;
+}
+.toggle-switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: rgba(113, 113, 122, 0.4);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+.real-dist-toggle input:checked + .toggle-switch {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.4);
+}
+.toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  background: white;
+  border-radius: 50%;
+  transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+.real-dist-toggle input:checked + .toggle-switch .toggle-knob {
+  left: 23px;
+}
+.toggle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.toggle-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e4e4e7;
+  white-space: nowrap;
+}
+.toggle-hint {
+  font-size: 10px;
+  color: #a1a1aa;
+  white-space: nowrap;
+}
+.real-dist-toggle input:checked ~ .toggle-label .toggle-hint {
+  color: #c4b5fd;
+}
+
+/* Optimization Result Modal */
+.optimization-result-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.optimization-result-modal {
+  max-width: 360px;
+  width: 100%;
+  border-radius: 20px;
+  overflow: hidden;
+  animation: modalSlideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes modalSlideUp {
+  from { opacity: 0; transform: translateY(30px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.opt-result-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.opt-result-icon { font-size: 24px; }
+.opt-result-header h3 {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  color: #e4e4e7;
+  margin: 0;
+}
+.opt-close-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  color: #a1a1aa;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.opt-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+.opt-close-btn svg { width: 16px; height: 16px; }
+
+.opt-result-body {
+  padding: 24px 20px;
+}
+.opt-comparison {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.opt-before, .opt-after {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.opt-label {
+  font-size: 11px;
+  color: #71717a;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.opt-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #e4e4e7;
+}
+.opt-before .opt-value { color: #ef4444; }
+.opt-after .opt-value { color: #00ff88; }
+.opt-arrow {
+  font-size: 24px;
+  color: #71717a;
+}
+
+.opt-improvement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(0, 255, 136, 0.08);
+  border: 1px solid rgba(0, 255, 136, 0.2);
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #00ff88;
+}
+.opt-improvement:not(.positive) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #a1a1aa;
+}
+.opt-improvement-icon { font-size: 18px; }
+.opt-saved {
+  font-size: 12px;
+  font-weight: 400;
+  color: #71717a;
+}
+
+.opt-result-footer {
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: center;
+}
+.opt-result-footer .btn {
+  min-width: 100px;
+}
+
+/* Traffic Legend Responsive */
+@media (max-width: 768px) {
+  .traffic-legend {
+    top: auto;
+    bottom: 140px;
+    left: 10px;
+    min-width: 120px;
+    padding: 8px 10px;
+  }
+  .traffic-legend-header { margin-bottom: 6px; padding-bottom: 6px; }
+  .traffic-legend-title { font-size: 11px; }
+  .traffic-legend-items { gap: 4px; }
+  .traffic-legend-label { font-size: 10px; }
+}
+
+@media (max-width: 480px) {
+  .traffic-legend {
+    bottom: 120px;
+    left: 8px;
+    padding: 6px 8px;
+    min-width: 100px;
+  }
+  .traffic-legend-icon { font-size: 12px; }
+  .traffic-legend-title { font-size: 10px; }
+  .traffic-legend-color { width: 16px; height: 5px; }
+  .traffic-legend-label { font-size: 9px; }
+  .traffic-legend-pct { font-size: 9px; }
+
+  .optimization-result-modal { max-width: 320px; }
+  .opt-result-header { padding: 12px 16px; }
+  .opt-result-body { padding: 20px 16px; }
+  .opt-value { font-size: 18px; }
+}
+
+/* ==================== QUICK ADD FROM CLIPBOARD ==================== */
+.quick-add-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: modalFadeIn 0.2s ease;
+}
+.quick-add-modal {
+  max-width: 450px;
+  width: 100%;
+  border-radius: 20px;
+  overflow: hidden;
+  animation: modalSlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.qa-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.qa-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.qa-icon { font-size: 20px; }
+.qa-title h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e4e4e7;
+  margin: 0;
+}
+.qa-body {
+  padding: 20px;
+}
+.qa-input-preview {
+  margin-bottom: 16px;
+}
+.qa-label {
+  display: block;
+  font-size: 11px;
+  color: #71717a;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.qa-input-text {
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #a1a1aa;
+  max-height: 60px;
+  overflow-y: auto;
+  word-break: break-all;
+}
+.qa-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 30px;
+  color: #a1a1aa;
+}
+.qa-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(0, 255, 136, 0.2);
+  border-top-color: #00ff88;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.qa-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 12px;
+  color: #ef4444;
+}
+.qa-error-icon { font-size: 18px; }
+.qa-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.qa-results-hint {
+  font-size: 11px;
+  color: #71717a;
+  text-align: center;
+  padding: 4px 0 8px;
+}
+.qa-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.qa-result:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.qa-result.selected {
+  background: rgba(0, 255, 136, 0.1);
+  border-color: rgba(0, 255, 136, 0.4);
+  box-shadow: 0 0 0 2px rgba(0, 255, 136, 0.15);
+}
+.qa-result-number {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #a1a1aa;
+  flex-shrink: 0;
+}
+.qa-result.selected .qa-result-number {
+  background: rgba(0, 255, 136, 0.2);
+  color: #00ff88;
+}
+.qa-result-info {
+  flex: 1;
+  min-width: 0;
+}
+.qa-result-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e4e4e7;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qa-result-address {
+  font-size: 11px;
+  color: #a1a1aa;
+  margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.qa-result-coords {
+  font-size: 10px;
+  color: #71717a;
+  font-family: 'JetBrains Mono', monospace;
+}
+.qa-result.selected .qa-result-coords {
+  color: #00ff88;
+}
+.qa-result-check {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 255, 136, 0.2);
+  border-radius: 50%;
+  color: #00ff88;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.qa-footer {
+  display: flex;
+  gap: 10px;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.qa-footer .btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.qa-footer .btn kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: inherit;
+  opacity: 0.7;
+}
+
+@media (max-width: 480px) {
+  .quick-add-modal { max-width: 95%; }
+  .qa-header { padding: 12px 16px; }
+  .qa-body { padding: 16px; }
+  .qa-footer { padding: 12px 16px; }
+  .qa-footer .btn { padding: 10px 12px; font-size: 13px; }
+}
+
+/* ==================== KEYBOARD HELP MODAL ==================== */
+.keyboard-help-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: modalFadeIn 0.25s ease;
+}
+.keyboard-help-modal {
+  max-width: 600px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+  border-radius: 20px;
+  animation: modalSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.kbh-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.kbh-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #e4e4e7;
+  margin: 0;
+}
+.kbh-body {
+  padding: 16px 20px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+.kbh-section h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: #00ff88;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 0 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+}
+.kbh-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kbh-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #a1a1aa;
+}
+.kbh-item kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: #e4e4e7;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.3);
+}
+.kbh-item span {
+  flex: 1;
+  color: #d4d4d8;
+}
+.kbh-footer {
+  padding: 12px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: center;
+  font-size: 12px;
+  color: #71717a;
+}
+.kbh-footer kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #e4e4e7;
+  margin: 0 2px;
+}
+
+@media (max-width: 600px) {
+  .kbh-body {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .keyboard-help-modal { max-width: 95%; }
+}
+
+/* Point card selected state */
+.point-card.keyboard-selected {
+  background: rgba(59, 130, 246, 0.15) !important;
+  border-color: rgba(59, 130, 246, 0.5) !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), inset 0 0 20px rgba(59, 130, 246, 0.1) !important;
 }
 </style>

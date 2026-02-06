@@ -9,7 +9,10 @@
       "Bash(node:*)",
       "Bash(npx vite build)",
       "Bash(npm run build:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(grep:*)",
+      "Bash(dir /b \"C:\\\\Users\\\\MaFuckingGod\\\\Desktop\")",
+      "Bash(dir:*)"
     ]
   }
 }
