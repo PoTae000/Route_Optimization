@@ -61,15 +61,15 @@
 
   // PromptPay Settings
   const promptPaySettings = {
-    id: '0812345678',
-    name: 'บริษัท เดลิเวอรี่ จำกัด'
+    id: '0858256796',
+    name: 'สืบสกุล สวนแก้ว'
   };
 
   // Bank Settings
   const bankSettings = {
-    name: 'ธนาคารกสิกรไทย',
+    name: 'ธนาคารไทยพานิช',
     account: '123-4-56789-0',
-    accountName: 'บริษัท เดลิเวอรี่ จำกัด'
+    accountName: 'สืบสกุล สวนแก้ว'
   };
 
   // Payment History
@@ -571,6 +571,9 @@
   $: totalSpent = paymentHistory.filter(p => p.status === 'paid' || p.status === 'verified').reduce((sum, p) => sum + (p.amount || 0), 0);
 </script>
 
+<svelte:head>
+  <title>ลูกค้า | Route Optimization</title>
+</svelte:head>
 <!-- Toast Notification -->
 {#if notification.show}
   <div class="toast toast-{notification.type}">

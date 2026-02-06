@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx svelte-check:*)",
+      "Bash(wc:*)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx bun check)",
+      "Bash(npx elysia check)",
+      "Bash(node:*)",
+      "Bash(npx vite build)",
+      "Bash(npm run build:*)",
+      "Bash(git checkout:*)"
+    ]
+  }
+}

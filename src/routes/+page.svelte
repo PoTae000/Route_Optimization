@@ -22,6 +22,8 @@
     isLoading = true;
     
     try {
+      // ใช้ Unified Login API - ค้นหาใน 3 ตารางอัตโนมัติ
+      // ลำดับ: drivers -> customers -> users
       const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -44,14 +46,7 @@
           localStorage.removeItem('rememberMe');
         }
         
-        // 🆕 Redirect ตาม role
-        if (data.user.role === 'admin') {
-          goto(`/Admin/${data.user.id}`);
-        } else if (data.user.role === 'customer') {
-          goto(`/factory/${data.user.id}`);
-        } else {
-          goto(`/Home/${data.user.id}`);
-        }
+        redirectByRole(data.user.role, data.user.id);
       }
     } catch (err) {
       error = 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้';
@@ -60,42 +55,47 @@
     isLoading = false;
   }
   
+  function redirectByRole(role: string, id: number) {
+    const r = role.toLowerCase();
+    if (r === 'admin') goto(`/Admin/${id}`);
+    else if (r === 'driver') goto(`/Home/${id}`);
+    else if (r === 'customer') goto(`/factory/${id}`);
+    else if (r === 'user') goto(`/User/${id}`);
+    else goto(`/Home/${id}`);
+  }
+  
   function handleKeyPress(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      handleLogin();
-    }
+    if (e.key === 'Enter') handleLogin();
+  }
+  
+  function selectDemo(type: string) {
+    error = '';
+    if (type === 'admin') { username = 'admin'; password = 'admin123'; }
+    else if (type === 'driver') { username = 'driver1'; password = '1234'; }
+    else if (type === 'customer') { username = 'customer1'; password = 'cust123'; }
+    else if (type === 'user') { username = 'user1'; password = '1234'; }
   }
 
   onMount(() => {
     const remembered = localStorage.getItem('rememberMe');
-    if (remembered) {
-      username = remembered;
-      rememberMe = true;
-    }
+    if (remembered) { username = remembered; rememberMe = true; }
 
     const userStr = localStorage.getItem('user');
     if (userStr) {
-      const user = JSON.parse(userStr);
-      if (user.role === 'admin') {
-        goto(`/Admin/${user.id}`);
-      } else if (user.role === 'customer') {
-        goto(`/Customer/${user.id}`);
-      } else {
-        goto(`/Home/${user.id}`);
-      }
+      try {
+        const user = JSON.parse(userStr);
+        redirectByRole(user.role, user.id);
+      } catch { localStorage.removeItem('user'); }
     }
   });
 </script>
 
 <svelte:head>
   <title>เข้าสู่ระบบ | Route Optimization</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </svelte:head>
 
 <div class="login-container">
-  <!-- Animated Background -->
   <div class="bg-animation">
     <div class="bg-gradient"></div>
     <div class="bg-grid"></div>
@@ -103,11 +103,9 @@
       <div class="shape shape-1"></div>
       <div class="shape shape-2"></div>
       <div class="shape shape-3"></div>
-      <div class="shape shape-4"></div>
     </div>
   </div>
   
-  <!-- Login Card -->
   <div class="login-card">
     <div class="logo-section">
       <div class="logo-icon">
@@ -116,453 +114,271 @@
         </svg>
       </div>
       <h1>Route Optimization</h1>
-      <p>ระบบจัดการเส้นทางการจัดส่ง</p>
+      <p>ระบบการวางแผนเส้นทางก่อนออกเดินทาง</p>
     </div>
     
     <form on:submit|preventDefault={handleLogin} class="login-form">
       {#if error}
         <div class="error-message">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M15 9l-6 6M9 9l6 6"/>
-          </svg>
-          <span>{error}</span>
+          <span>❌</span> {error}
         </div>
       {/if}
       
       <div class="form-group">
-        <label for="username">ชื่อผู้ใช้</label>
+        <label>ชื่อผู้ใช้</label>
         <div class="input-wrapper">
           <span class="input-icon">👤</span>
-          <input type="text" id="username" bind:value={username} on:keypress={handleKeyPress} placeholder="กรอกชื่อผู้ใช้" disabled={isLoading} />
+          <input type="text" bind:value={username} on:keypress={handleKeyPress} placeholder="กรอกชื่อผู้ใช้" disabled={isLoading} />
         </div>
       </div>
       
       <div class="form-group">
-        <label for="password">รหัสผ่าน</label>
+        <label>รหัสผ่าน</label>
         <div class="input-wrapper">
           <span class="input-icon">🔒</span>
-          <input type={showPassword ? 'text' : 'password'} id="password" bind:value={password} on:keypress={handleKeyPress} placeholder="กรอกรหัสผ่าน" disabled={isLoading} />
-          <button type="button" class="toggle-password" on:click={() => showPassword = !showPassword}>
+          <input type={showPassword ? 'text' : 'password'} bind:value={password} on:keypress={handleKeyPress} placeholder="กรอกรหัสผ่าน" disabled={isLoading} />
+          <button type="button" class="toggle-pw" on:click={() => showPassword = !showPassword}>
             {showPassword ? '🙈' : '👁️'}
           </button>
         </div>
       </div>
       
-      <div class="form-options">
-        <label class="checkbox-label">
-          <input type="checkbox" bind:checked={rememberMe} />
-          <span class="checkmark"></span>
-          จดจำฉัน
-        </label>
-      </div>
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={rememberMe} />
+        <span class="checkmark"></span>
+        จดจำฉัน
+      </label>
       
       <button type="submit" class="login-btn" disabled={isLoading}>
         {#if isLoading}
-          <div class="spinner"></div>
-          <span>กำลังเข้าสู่ระบบ...</span>
+          <div class="spinner"></div> กำลังเข้าสู่ระบบ...
         {:else}
-          <span>เข้าสู่ระบบ</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M5 12h14M12 5l7 7-7 7"/>
-          </svg>
+          เข้าสู่ระบบ →
         {/if}
       </button>
     </form>
     
-    <!-- 🆕 Demo Accounts - เพิ่ม Customer -->
     <div class="demo-accounts">
       <p>🔑 บัญชีทดสอบ</p>
-      <div class="demo-list">
-        <button class="demo-btn admin" on:click={() => { username = 'admin'; password = 'admin123'; }}>
-          <div class="demo-icon">👑</div>
-          <div class="demo-info">
-            <span class="demo-role">Admin</span>
-            <span class="demo-cred">admin / admin123</span>
-          </div>
+      <div class="demo-grid">
+        <button class="demo-btn admin" on:click={() => selectDemo('admin')}>
+          <span class="demo-icon">👑</span>
+          <span class="demo-role">Admin</span>
+          <span class="demo-cred">admin / admin123</span>
+          <span class="demo-table">drivers</span>
         </button>
-        <button class="demo-btn driver" on:click={() => { username = 'driver1'; password = '1234'; }}>
-          <div class="demo-icon">🚗</div>
-          <div class="demo-info">
-            <span class="demo-role">Driver</span>
-            <span class="demo-cred">driver1 / 1234</span>
-          </div>
+        <button class="demo-btn driver" on:click={() => selectDemo('driver')}>
+          <span class="demo-icon">🚗</span>
+          <span class="demo-role">Driver</span>
+          <span class="demo-cred">driver1 / 1234</span>
+          <span class="demo-table">drivers</span>
         </button>
-        <button class="demo-btn customer" on:click={() => { username = 'customer1'; password = '1234'; }}>
-          <div class="demo-icon">🛒</div>
-          <div class="demo-info">
-            <span class="demo-role">Customer</span>
-            <span class="demo-cred">customer1 / 1234</span>
-          </div>
+        <button class="demo-btn customer" on:click={() => selectDemo('customer')}>
+          <span class="demo-icon">🛒</span>
+          <span class="demo-role">Customer</span>
+          <span class="demo-cred">customer1 / cust123</span>
+          <span class="demo-table">customers</span>
+        </button>
+        <button class="demo-btn user" on:click={() => selectDemo('user')}>
+          <span class="demo-icon">👤</span>
+          <span class="demo-role">User</span>
+          <span class="demo-cred">user1 / 1234</span>
+          <span class="demo-table">users</span>
         </button>
       </div>
-    </div>
-    
-    <div class="login-footer">
-      <p>© 2024 Route Optimization System v2.0</p>
     </div>
   </div>
   
-  <!-- Side Info -->
   <div class="side-info">
     <div class="info-content">
-      <div class="welcome-badge">
-        <span>🚀</span> Delivery Management System
-      </div>
+      <div class="welcome-badge">🚀 Delivery Management System</div>
       <h2>ยินดีต้อนรับ</h2>
-      <p>ระบบจัดการเส้นทางการจัดส่งอัจฉริยะ<br>ประหยัดเวลา ลดต้นทุน เพิ่มประสิทธิภาพ</p>
+      <p>ระบบจัดการเส้นทางการจัดส่งอัจฉริยะ</p>
       
       <div class="features">
-        <!-- Admin Feature Card -->
         <div class="feature-card admin-card">
-          <div class="feature-glow"></div>
-          <div class="feature-header">
-            <div class="feature-icon-wrapper admin">
-              <span class="feature-emoji">👑</span>
-            </div>
-            <div class="feature-badge">Admin</div>
+          <div class="feature-icon admin">👑</div>
+          <div class="feature-info">
+            <h3>Admin</h3>
+            <p>ศูนย์ควบคุมการจัดส่ง</p>
+            <span class="table-tag">drivers table</span>
           </div>
-          <h3>Admin Dashboard</h3>
-          <p>ศูนย์ควบคุมการจัดส่งทั้งหมด</p>
-          <ul class="feature-list">
-            <li><span>📊</span> ดูภาพรวมสถิติแบบ Real-time</li>
-            <li><span>👥</span> มอบหมายงานให้ Driver</li>
-            <li><span>📍</span> ติดตามตำแหน่งทุกคัน</li>
-          </ul>
         </div>
-        
-        <!-- Driver Feature Card -->
         <div class="feature-card driver-card">
-          <div class="feature-glow"></div>
-          <div class="feature-header">
-            <div class="feature-icon-wrapper driver">
-              <span class="feature-emoji">🚗</span>
-            </div>
-            <div class="feature-badge">Driver</div>
+          <div class="feature-icon driver">🚗</div>
+          <div class="feature-info">
+            <h3>Driver</h3>
+            <p>แอปสำหรับคนขับ</p>
+            <span class="table-tag">drivers table</span>
           </div>
-          <h3>Driver App</h3>
-          <p>แอปสำหรับคนขับมืออาชีพ</p>
-          <ul class="feature-list">
-            <li><span>🗺️</span> คำนวณเส้นทางที่ดีที่สุด</li>
-            <li><span>📡</span> นำทาง GPS แบบ Real-time</li>
-            <li><span>📦</span> รับงานจากลูกค้า</li>
-          </ul>
         </div>
-        
-        <!-- 🆕 Customer Feature Card -->
         <div class="feature-card customer-card">
-          <div class="feature-glow"></div>
-          <div class="feature-header">
-            <div class="feature-icon-wrapper customer">
-              <span class="feature-emoji">🛒</span>
-            </div>
-            <div class="feature-badge">Customer</div>
+          <div class="feature-icon customer">🛒</div>
+          <div class="feature-info">
+            <h3>Customer</h3>
+            <p>สั่งซื้อและติดตาม</p>
+            <span class="table-tag">customers table</span>
           </div>
-          <h3>Customer App</h3>
-          <p>สั่งงานและติดตามได้ง่ายๆ</p>
-          <ul class="feature-list">
-            <li><span>📍</span> ปักหมุดที่อยู่ของคุณ</li>
-            <li><span>🚗</span> เลือกคนขับที่ต้องการ</li>
-            <li><span>📱</span> ติดตามสถานะงาน</li>
-          </ul>
         </div>
-      </div>
-      
-      <!-- Stats Preview -->
-      <div class="stats-preview">
-        <div class="stat-item">
-          <div class="stat-number">99%</div>
-          <div class="stat-label">ความแม่นยำ</div>
+        <div class="feature-card user-card">
+          <div class="feature-icon user">👤</div>
+          <div class="feature-info">
+            <h3>User</h3>
+            <p>ผู้ใช้ทั่วไป</p>
+            <span class="table-tag">users table</span>
+          </div>
         </div>
-        <div class="stat-divider"></div>
-        <div class="stat-item">
-          <div class="stat-number">30%</div>
-          <div class="stat-label">ประหยัดเวลา</div>
-        </div>
-        <div class="stat-divider"></div>
-        <div class="stat-item">
-          <div class="stat-number">24/7</div>
-          <div class="stat-label">ใช้งานได้ตลอด</div>
-        </div>
-      </div>
+      </div> 
     </div>
   </div>
 </div>
 
 <style>
   :global(*) { margin: 0; padding: 0; box-sizing: border-box; }
-  :global(body) { font-family: 'Kanit', sans-serif; background: #0a0a0f; color: #e4e4e7; overflow: hidden; }
+  :global(body) { font-family: 'Kanit', sans-serif; background: #0a0a0f; color: #e4e4e7; }
   
-  .login-container { display: flex; min-height: 100vh; position: relative; }
+  .login-container { display: flex; min-height: 100vh; }
   
-  /* Background Animation */
-  .bg-animation { position: fixed; inset: 0; z-index: 0; overflow: hidden; }
+  .bg-animation { position: fixed; inset: 0; z-index: 0; }
   .bg-gradient { 
     position: absolute; inset: 0; 
-    background: 
-      radial-gradient(ellipse at 20% 20%, rgba(0, 255, 136, 0.15) 0%, transparent 50%),
-      radial-gradient(ellipse at 80% 80%, rgba(102, 126, 234, 0.15) 0%, transparent 50%),
-      radial-gradient(ellipse at 50% 50%, rgba(168, 85, 247, 0.05) 0%, transparent 50%),
-      linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
+    background: radial-gradient(ellipse at 20% 20%, rgba(0,255,136,0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(102,126,234,0.15) 0%, transparent 50%),
+                linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
   }
   .bg-grid { 
     position: absolute; inset: 0; 
-    background-image: linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px), 
-                      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px); 
+    background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), 
+                      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px); 
     background-size: 50px 50px;
   }
-  
-  /* Floating Shapes */
   .floating-shapes { position: absolute; inset: 0; pointer-events: none; }
-  .shape { position: absolute; border-radius: 50%; filter: blur(60px); opacity: 0.5; animation: float 20s ease-in-out infinite; }
-  .shape-1 { width: 400px; height: 400px; background: rgba(0, 255, 136, 0.1); top: 10%; left: 60%; animation-delay: 0s; }
-  .shape-2 { width: 300px; height: 300px; background: rgba(102, 126, 234, 0.1); top: 60%; left: 70%; animation-delay: -5s; }
-  .shape-3 { width: 350px; height: 350px; background: rgba(168, 85, 247, 0.1); top: 30%; left: 50%; animation-delay: -10s; }
-  .shape-4 { width: 250px; height: 250px; background: rgba(255, 217, 61, 0.05); top: 70%; left: 40%; animation-delay: -15s; }
-  @keyframes float {
-    0%, 100% { transform: translate(0, 0) rotate(0deg); }
-    25% { transform: translate(30px, -30px) rotate(5deg); }
-    50% { transform: translate(-20px, 20px) rotate(-5deg); }
-    75% { transform: translate(10px, -10px) rotate(3deg); }
-  }
+  .shape { position: absolute; border-radius: 50%; filter: blur(60px); animation: float 20s ease-in-out infinite; }
+  .shape-1 { width: 300px; height: 300px; background: rgba(0,255,136,0.1); top: 10%; left: 60%; }
+  .shape-2 { width: 250px; height: 250px; background: rgba(102,126,234,0.1); top: 60%; left: 70%; animation-delay: -5s; }
+  .shape-3 { width: 200px; height: 200px; background: rgba(168,85,247,0.1); top: 30%; left: 50%; animation-delay: -10s; }
+  @keyframes float { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-20px,20px); } }
   
-  /* Login Card */
   .login-card { 
-    width: 100%; max-width: 500px; padding: 48px; 
+    width: 100%; max-width: 460px; padding: 40px; 
     display: flex; flex-direction: column; justify-content: center; 
     position: relative; z-index: 10; 
-    background: rgba(15, 15, 25, 0.9); 
-    backdrop-filter: blur(20px); 
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(15,15,25,0.95); backdrop-filter: blur(20px); 
+    border-right: 1px solid rgba(255,255,255,0.05);
   }
   
-  .logo-section { text-align: center; margin-bottom: 40px; }
+  .logo-section { text-align: center; margin-bottom: 20px; }
   .logo-icon { 
-    width: 80px; height: 80px; margin: 0 auto 20px; 
-    background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); 
-    border-radius: 24px; 
-    display: flex; align-items: center; justify-content: center; 
-    box-shadow: 0 10px 40px rgba(0, 255, 136, 0.3);
-    animation: pulse-glow 3s ease-in-out infinite;
+    width: 70px; height: 70px; margin: 0 auto 16px; 
+    background: linear-gradient(135deg, #00ff88, #00cc6a); 
+    border-radius: 20px; display: flex; align-items: center; justify-content: center; 
+    box-shadow: 0 10px 40px rgba(0,255,136,0.3);
   }
-  @keyframes pulse-glow {
-    0%, 100% { box-shadow: 0 10px 40px rgba(0, 255, 136, 0.3); }
-    50% { box-shadow: 0 10px 60px rgba(0, 255, 136, 0.5); }
-  }
-  .logo-icon svg { width: 44px; height: 44px; color: #0a0a0f; }
+  .logo-icon svg { width: 38px; height: 38px; color: #0a0a0f; }
   .logo-section h1 { 
-    font-size: 28px; font-weight: 700; 
-    background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); 
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
-    background-clip: text; margin-bottom: 8px; 
+    font-size: 24px; font-weight: 700; 
+    background: linear-gradient(135deg, #00ff88, #00cc6a); 
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   }
-  .logo-section p { font-size: 14px; color: #71717a; }
+  .logo-section p { font-size: 13px; color: #71717a; }
   
-  .login-form { display: flex; flex-direction: column; gap: 20px; }
+  .system-badge {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 8px 16px; margin-bottom: 20px;
+    background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.2);
+    border-radius: 20px; font-size: 12px; color: #00ff88;
+  }
+  
+  .login-form { display: flex; flex-direction: column; gap: 16px; }
   
   .error-message { 
-    display: flex; align-items: center; gap: 10px; 
-    padding: 14px 16px; 
-    background: rgba(255, 107, 107, 0.1); 
-    border: 1px solid rgba(255, 107, 107, 0.3); 
-    border-radius: 12px; color: #ff6b6b; font-size: 14px;
-    animation: shake 0.5s ease;
+    display: flex; align-items: center; gap: 8px; 
+    padding: 12px; background: rgba(255,107,107,0.1); 
+    border: 1px solid rgba(255,107,107,0.3); border-radius: 10px; 
+    color: #ff6b6b; font-size: 13px;
   }
-  @keyframes shake {
-    0%, 100% { transform: translateX(0); }
-    25% { transform: translateX(-5px); }
-    75% { transform: translateX(5px); }
-  }
-  .error-message svg { width: 20px; height: 20px; flex-shrink: 0; }
   
-  .form-group { display: flex; flex-direction: column; gap: 8px; }
-  .form-group label { font-size: 14px; font-weight: 500; color: #a1a1aa; }
-  
-  .input-wrapper { position: relative; display: flex; align-items: center; }
-  .input-icon { position: absolute; left: 16px; font-size: 16px; z-index: 1; }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-group label { font-size: 13px; color: #a1a1aa; }
+  .input-wrapper { position: relative; }
+  .input-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 14px; }
   .form-group input { 
-    width: 100%; padding: 14px 16px 14px 48px; 
-    background: rgba(0, 0, 0, 0.4); 
-    border: 1px solid rgba(255, 255, 255, 0.1); 
-    border-radius: 12px; color: #e4e4e7; 
-    font-family: 'Kanit', sans-serif; font-size: 15px; 
-    transition: all 0.3s ease; 
+    width: 100%; padding: 12px 14px 12px 42px; 
+    background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.1); 
+    border-radius: 10px; color: #e4e4e7; font-family: 'Kanit'; font-size: 14px;
   }
-  .form-group input:focus { 
-    outline: none; border-color: #00ff88; 
-    box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1); 
-    background: rgba(0, 255, 136, 0.05);
-  }
+  .form-group input:focus { outline: none; border-color: #00ff88; box-shadow: 0 0 0 3px rgba(0,255,136,0.1); }
   .form-group input::placeholder { color: #52525b; }
-  .form-group input:disabled { opacity: 0.6; cursor: not-allowed; }
+  .toggle-pw { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 16px; }
   
-  .toggle-password { 
-    position: absolute; right: 14px; background: none; border: none; 
-    cursor: pointer; font-size: 18px; transition: transform 0.2s;
-  }
-  .toggle-password:hover { transform: scale(1.1); }
-  
-  .form-options { display: flex; justify-content: space-between; align-items: center; }
-  .checkbox-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; color: #a1a1aa; }
+  .checkbox-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: #a1a1aa; }
   .checkbox-label input { display: none; }
-  .checkmark { 
-    width: 20px; height: 20px; border: 2px solid rgba(255, 255, 255, 0.2); 
-    border-radius: 6px; position: relative; transition: all 0.2s; 
-  }
+  .checkmark { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.2); border-radius: 4px; }
   .checkbox-label input:checked + .checkmark { background: #00ff88; border-color: #00ff88; }
-  .checkbox-label input:checked + .checkmark::after { 
-    content: '✓'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
-    color: #0a0a0f; font-size: 12px; font-weight: bold; 
-  }
   
   .login-btn { 
-    display: flex; align-items: center; justify-content: center; gap: 10px; padding: 16px; 
-    background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); 
-    border: none; border-radius: 12px; color: #0a0a0f; 
-    font-family: 'Kanit', sans-serif; font-size: 16px; font-weight: 600; 
-    cursor: pointer; transition: all 0.3s ease; 
-    box-shadow: 0 4px 20px rgba(0, 255, 136, 0.3);
+    padding: 14px; background: linear-gradient(135deg, #00ff88, #00cc6a); 
+    border: none; border-radius: 10px; color: #0a0a0f; 
+    font-family: 'Kanit'; font-size: 15px; font-weight: 600; 
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+    box-shadow: 0 4px 20px rgba(0,255,136,0.3); transition: all 0.3s;
   }
-  .login-btn svg { width: 20px; height: 20px; transition: transform 0.3s; }
-  .login-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 30px rgba(0, 255, 136, 0.4); }
-  .login-btn:hover:not(:disabled) svg { transform: translateX(4px); }
-  .login-btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
-  
-  .spinner { 
-    width: 20px; height: 20px; border: 2px solid rgba(10, 10, 15, 0.3); 
-    border-top-color: #0a0a0f; border-radius: 50%; animation: spin 0.8s linear infinite; 
-  }
+  .login-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 30px rgba(0,255,136,0.4); }
+  .login-btn:disabled { opacity: 0.7; cursor: not-allowed; }
+  .spinner { width: 18px; height: 18px; border: 2px solid rgba(0,0,0,0.2); border-top-color: #0a0a0f; border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   
-  /* Demo Accounts - 3 columns */
-  .demo-accounts { margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.05); }
-  .demo-accounts > p { 
-    font-size: 12px; color: #71717a; text-transform: uppercase; 
-    letter-spacing: 1px; margin-bottom: 12px; text-align: center;
-  }
-  .demo-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .demo-accounts { margin-top: 24px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.05); }
+  .demo-accounts > p { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; text-align: center; }
+  .demo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
   .demo-btn { 
-    display: flex; flex-direction: column; align-items: center; gap: 6px; 
-    padding: 12px 8px; background: rgba(255, 255, 255, 0.03); 
-    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; 
-    cursor: pointer; transition: all 0.3s ease;
+    display: flex; flex-direction: column; align-items: center; gap: 2px; 
+    padding: 10px 8px; background: rgba(255,255,255,0.03); 
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; 
+    cursor: pointer; transition: all 0.3s;
   }
-  .demo-icon { font-size: 24px; }
-  .demo-info { display: flex; flex-direction: column; align-items: center; }
-  .demo-role { font-size: 12px; font-weight: 600; color: #e4e4e7; }
-  .demo-cred { font-size: 9px; color: #71717a; font-family: monospace; }
+  .demo-icon { font-size: 20px; }
+  .demo-role { font-size: 11px; font-weight: 600; color: #e4e4e7; }
+  .demo-cred { font-size: 8px; color: #71717a; font-family: monospace; }
+  .demo-table { font-size: 7px; color: #52525b; }
+  .demo-btn.admin:hover { background: rgba(255,217,61,0.1); border-color: rgba(255,217,61,0.3); }
+  .demo-btn.driver:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); }
+  .demo-btn.customer:hover { background: rgba(139,92,246,0.1); border-color: rgba(139,92,246,0.3); }
+  .demo-btn.user:hover { background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.3); }
   
-  .demo-btn.admin:hover { background: rgba(255, 217, 61, 0.1); border-color: rgba(255, 217, 61, 0.3); transform: translateY(-2px); }
-  .demo-btn.driver:hover { background: rgba(0, 255, 136, 0.1); border-color: rgba(0, 255, 136, 0.3); transform: translateY(-2px); }
-  .demo-btn.customer:hover { background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3); transform: translateY(-2px); }
+  .footer { margin-top: 24px; text-align: center; }
+  .footer p { font-size: 11px; color: #52525b; }
+  .footer .sub { font-size: 9px; color: #3f3f46; margin-top: 4px; }
   
-  .login-footer { margin-top: 32px; text-align: center; font-size: 12px; color: #52525b; }
+  .side-info { flex: 1; display: flex; align-items: center; padding: 40px; position: relative; z-index: 5; }
+  .info-content { max-width: 600px; }
+  .welcome-badge { display: inline-block; padding: 8px 16px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.2); border-radius: 20px; font-size: 13px; color: #00ff88; margin-bottom: 20px; }
+  .info-content h2 { font-size: 40px; font-weight: 700; margin-bottom: 12px; background: linear-gradient(135deg, #fff, #a1a1aa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .info-content > p { font-size: 16px; color: #71717a; margin-bottom: 32px; }
   
-  /* Side Info */
-  .side-info { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 60px; position: relative; z-index: 5; }
-  .info-content { max-width: 700px; }
+  .features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px; }
+  .feature-card { display: flex; align-items: center; gap: 12px; padding: 16px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; transition: all 0.3s; }
+  .feature-card:hover { transform: translateY(-4px); }
+  .admin-card:hover { border-color: rgba(255,217,61,0.3); }
+  .driver-card:hover { border-color: rgba(0,255,136,0.3); }
+  .customer-card:hover { border-color: rgba(139,92,246,0.3); }
+  .user-card:hover { border-color: rgba(59,130,246,0.3); }
+  .feature-icon { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+  .feature-icon.admin { background: rgba(255,217,61,0.2); }
+  .feature-icon.driver { background: rgba(0,255,136,0.2); }
+  .feature-icon.customer { background: rgba(139,92,246,0.2); }
+  .feature-icon.user { background: rgba(59,130,246,0.2); }
+  .feature-info h3 { font-size: 14px; color: #e4e4e7; margin-bottom: 2px; }
+  .feature-info p { font-size: 11px; color: #71717a; margin-bottom: 4px; }
+  .table-tag { font-size: 9px; color: #52525b; background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; }
   
-  .welcome-badge {
-    display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px;
-    background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 30px; font-size: 13px; color: #00ff88; margin-bottom: 24px;
-  }
+  .db-info { padding: 20px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; }
+  .db-info h4 { font-size: 14px; color: #a1a1aa; margin-bottom: 16px; text-align: center; }
+  .db-tables { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+  .db-item { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 16px; background: rgba(0,0,0,0.3); border-radius: 8px; font-size: 12px; color: #00ff88; }
+  .db-item span { font-size: 20px; }
+  .db-item small { font-size: 10px; color: #71717a; }
   
-  .info-content h2 { 
-    font-size: 52px; font-weight: 700; margin-bottom: 16px; 
-    background: linear-gradient(135deg, #ffffff 0%, #a1a1aa 100%); 
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
-  }
-  .info-content > p { font-size: 18px; color: #71717a; margin-bottom: 48px; line-height: 1.6; }
-  
-  /* Feature Cards - 3 columns */
-  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 48px; }
-  
-  .feature-card { 
-    position: relative; padding: 20px; background: rgba(255, 255, 255, 0.02); 
-    border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 20px; 
-    transition: all 0.4s ease; overflow: hidden;
-  }
-  .feature-glow {
-    position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
-    opacity: 0; transition: opacity 0.4s ease; pointer-events: none;
-  }
-  .admin-card .feature-glow { background: radial-gradient(circle, rgba(255, 217, 61, 0.15) 0%, transparent 50%); }
-  .driver-card .feature-glow { background: radial-gradient(circle, rgba(0, 255, 136, 0.15) 0%, transparent 50%); }
-  .customer-card .feature-glow { background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, transparent 50%); }
-  
-  .feature-card:hover { transform: translateY(-8px); border-color: rgba(255, 255, 255, 0.1); }
-  .feature-card:hover .feature-glow { opacity: 1; }
-  
-  .admin-card:hover { border-color: rgba(255, 217, 61, 0.3); }
-  .driver-card:hover { border-color: rgba(0, 255, 136, 0.3); }
-  .customer-card:hover { border-color: rgba(139, 92, 246, 0.3); }
-  
-  .feature-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-  .feature-icon-wrapper { 
-    width: 48px; height: 48px; border-radius: 14px; 
-    display: flex; align-items: center; justify-content: center; position: relative;
-  }
-  .feature-icon-wrapper.admin { 
-    background: linear-gradient(135deg, rgba(255, 217, 61, 0.2) 0%, rgba(255, 165, 2, 0.2) 100%);
-    box-shadow: 0 8px 32px rgba(255, 217, 61, 0.2);
-  }
-  .feature-icon-wrapper.driver { 
-    background: linear-gradient(135deg, rgba(0, 255, 136, 0.2) 0%, rgba(0, 204, 106, 0.2) 100%);
-    box-shadow: 0 8px 32px rgba(0, 255, 136, 0.2);
-  }
-  .feature-icon-wrapper.customer { 
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2) 0%, rgba(109, 40, 217, 0.2) 100%);
-    box-shadow: 0 8px 32px rgba(139, 92, 246, 0.2);
-  }
-  .feature-emoji { font-size: 24px; }
-  
-  .feature-badge {
-    padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.5px;
-  }
-  .admin-card .feature-badge { background: rgba(255, 217, 61, 0.15); color: #ffd93d; }
-  .driver-card .feature-badge { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
-  .customer-card .feature-badge { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
-  
-  .feature-card h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; margin-bottom: 6px; }
-  .feature-card > p { font-size: 12px; color: #71717a; margin-bottom: 12px; }
-  
-  .feature-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
-  .feature-list li { 
-    display: flex; align-items: center; gap: 8px; font-size: 11px; color: #a1a1aa;
-    padding: 6px 10px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; transition: all 0.2s;
-  }
-  .feature-list li:hover { background: rgba(255, 255, 255, 0.05); transform: translateX(4px); }
-  .feature-list li span { font-size: 12px; }
-  
-  /* Stats Preview */
-  .stats-preview {
-    display: flex; align-items: center; justify-content: center; gap: 32px;
-    padding: 24px 32px; background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px;
-  }
-  .stat-item { text-align: center; }
-  .stat-number { 
-    font-size: 32px; font-weight: 700; 
-    background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
-  }
-  .stat-label { font-size: 13px; color: #71717a; margin-top: 4px; }
-  .stat-divider { width: 1px; height: 40px; background: rgba(255, 255, 255, 0.1); }
-  
-  /* Responsive */
-  @media (max-width: 1400px) { 
-    .features { grid-template-columns: 1fr; }
-  }
-  @media (max-width: 1024px) { 
-    .side-info { display: none; } 
-    .login-card { max-width: 100%; border-right: none; } 
-  }
-  @media (max-width: 480px) { 
-    .login-card { padding: 32px 24px; } 
-    .logo-icon { width: 64px; height: 64px; } 
-    .logo-section h1 { font-size: 24px; } 
-    .demo-list { grid-template-columns: 1fr; } 
-  }
+  @media (max-width: 1024px) { .side-info { display: none; } .login-card { max-width: 100%; } }
+  @media (max-width: 480px) { .login-card { padding: 24px 20px; } .demo-grid { grid-template-columns: 1fr 1fr; } }
 </style>

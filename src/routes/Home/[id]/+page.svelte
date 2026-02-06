@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
-  import { page } from '$app/stores'; 
+  import { page } from '$app/stores';
 
   let currentUser: any = null;
   let customerOrders: any[] = [];
@@ -21,19 +21,20 @@
   let routeLayer: any = null;
   let glowLayer: any = null;
   let markers: any[] = [];
-
   const API_URL = 'http://localhost:3000/api';
 
   let newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
-
   let isOptimizing = false;
   let showAddForm = false;
   let clickMarker: any = null;
+
   let notification = { show: false, message: '', type: 'success' as 'success' | 'error' | 'warning' };
   let activeTab: 'points' | 'customers' | 'route' = 'points';
   let activePointId: number | null = null;
   let isNavigating = false;
-  let currentLocation: { lat: number; lng: number } | null = null;
+
+  // ขั้นตอนที่ 1: แก้ type currentLocation
+  let currentLocation: { lat: number; lng: number; heading?: number | null; speed?: number | null } | null = null;
   let currentLocationMarker: any = null;
   let watchId: number | null = null;
   let currentTargetIndex = 0;
@@ -47,6 +48,7 @@
   let navigationInterval: any = null;
   let arrivedPoints: number[] = [];
   let accuracy = 0;
+
   let currentRouteId: number | null = null;
   let isProcessingDelivery = false;
 
@@ -54,59 +56,51 @@
   let totalDeliveriesToday = 0;
   let completedDeliveries = 0;
   let averageDeliveryTime = 0;
-  
-  
+
   // Speed tracking
   let currentSpeed = 0;
   let maxSpeed = 0;
   let speedHistory: number[] = [];
   let lastPosition: { lat: number; lng: number; time: number } | null = null;
-  
+
   // ETA & Time
   let estimatedArrivalTime: Date | null = null;
   let navigationStartTime: Date | null = null;
   let elapsedTime = 0;
-  
+
   // Weather (mock)
   let weather = { temp: 32, condition: 'sunny', humidity: 65 };
-  
+
   // Traffic status
   let trafficStatus: 'smooth' | 'moderate' | 'heavy' = 'smooth';
-  
+
   // Fuel estimation
   let fuelConsumption = 0;
   let fuelCostEstimate = 0;
   const FUEL_PRICE_PER_LITER = 42;
   const KM_PER_LITER = 15;
-
   type VehicleType = 'fuel' | 'ev';
   let vehicleType: VehicleType = 'fuel';
-  const ELECTRICITY_PRICE_PER_KWH = 4.5; // ค่าไฟต่อหน่วย
-  const KWH_PER_100KM = 15; // กินไฟ 15 kWh ต่อ 100 km
-  let evBatteryCapacity = 60; // kWh - ความจุแบตเตอรี่
-  let evCurrentCharge = 80; // % - ระดับแบตปัจจุบัน
-  let evRangePerCharge = 400; // km - ระยะทางต่อการชาร์จเต็ม
-
-  // Calculated values
-  let evEnergyConsumption = 0; // kWh
+  const ELECTRICITY_PRICE_PER_KWH = 4.5;
+  const KWH_PER_100KM = 15;
+  let evBatteryCapacity = 60;
+  let evCurrentCharge = 80;
+  let evRangePerCharge = 400;
+  let evEnergyConsumption = 0;
   let evCostEstimate = 0;
-  let evRemainingRange = 0; // km
-  let evBatteryAfterTrip = 0; // %
-  
+  let evRemainingRange = 0;
+  let evBatteryAfterTrip = 0;
+
   // Voice navigation
   let voiceEnabled = true;
-  
+
   // Settings panel
   let showSettings = false;
-  
-  // Filter & Sort
-  let sortBy: 'priority' | 'distance' | 'name' = 'priority';
-  let filterPriority: number | null = null;
-  
+
   // Multi-select
   let selectedPoints: number[] = [];
   let isMultiSelectMode = false;
-  
+
   interface ChargingStation {
     id: number;
     name: string;
@@ -124,7 +118,7 @@
     stopNumber?: number;
     estimatedChargingTime?: number;
   }
-  // Delivery history
+
   interface DeliveryRecord {
     id: number;
     pointId: number | string;
@@ -138,18 +132,16 @@
   }
   let deliveryHistory: DeliveryRecord[] = [];
   let showHistory = false;
-  
-  // Battery status
+
   let batteryLevel = 100;
   let isCharging = false;
-
   let chargingStations: ChargingStation[] = [];
   let chargingStationMarkers: any[] = [];
   let showChargingStations = true;
   let isLoadingStations = false;
   let selectedChargingStation: ChargingStation | null = null;
   let routeChargingStops: ChargingStation[] = [];
- 
+
   $: driverInfo = currentUser ? {
     name: currentUser.name || 'ไม่ระบุชื่อ',
     id: `DRV-${currentUser.id}`,
@@ -160,26 +152,25 @@
     role: currentUser.role || 'driver'
   } : { name: 'กำลังโหลด...', id: '-', vehicle: '-', plateNumber: '-', phone: '-', avatar: '👤', role: 'driver' };
 
-  // Break time tracking
   let isOnBreak = false;
   let breakStartTime: Date | null = null;
   let totalBreakTime = 0;
-  
-  $: filteredPoints = filterPriority === null ? deliveryPoints : deliveryPoints.filter(p => p.priority === filterPriority);
+
+  $: filteredPoints = deliveryPoints;
   $: {
-  const distanceKm = remainingDistance / 1000;
-  if (vehicleType === 'fuel') {
-    fuelConsumption = distanceKm / KM_PER_LITER;
-    fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER;
-  } else {
-    evEnergyConsumption = (distanceKm / 100) * KWH_PER_100KM;
-    evCostEstimate = evEnergyConsumption * ELECTRICITY_PRICE_PER_KWH;
-    evRemainingRange = (evCurrentCharge / 100) * evRangePerCharge;
-    const energyUsedPercent = (evEnergyConsumption / evBatteryCapacity) * 100;
-    evBatteryAfterTrip = Math.max(0, evCurrentCharge - energyUsedPercent);
+    const distanceKm = remainingDistance / 1000;
+    if (vehicleType === 'fuel') {
+      fuelConsumption = distanceKm / KM_PER_LITER;
+      fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER;
+    } else {
+      evEnergyConsumption = (distanceKm / 100) * KWH_PER_100KM;
+      evCostEstimate = evEnergyConsumption * ELECTRICITY_PRICE_PER_KWH;
+      evRemainingRange = (evCurrentCharge / 100) * evRangePerCharge;
+      const energyUsedPercent = (evEnergyConsumption / evBatteryCapacity) * 100;
+      evBatteryAfterTrip = Math.max(0, evCurrentCharge - energyUsedPercent);
+    }
   }
-}
-  
+
   $: allDeliveryPoints = [
     ...deliveryPoints.map(p => ({ ...p, isCustomerOrder: false })),
     ...(includeCustomersInRoute ? customerOrders.filter(o => o.status === 'accepted').map(o => ({
@@ -189,165 +180,1598 @@
       payment_method: o.payment_method || 'cash', payment_status: o.payment_status || 'pending'
     })) : [])
   ];
-  
-  // Alert system
+
   let alerts: { id: number; type: string; message: string; time: Date }[] = [];
   let showAlerts = false;
-
-  // GPS status
   let lastGPSWarningTime = 0;
   let gpsStatus: 'excellent' | 'good' | 'weak' | 'poor' = 'good';
 
+  // ==================== ขั้นตอนที่ 2: REAL-TIME NAVIGATION VARIABLES ====================
+  interface TurnInstruction {
+    type: string;
+    modifier?: string;
+    instruction: string;
+    distance: number;
+    duration: number;
+    location: [number, number];
+    streetName?: string;
+    voiceInstruction?: string;
+  }
+  let routeInstructions: TurnInstruction[] = [];
+  let currentInstructionIndex = 0;
+  let currentInstruction: TurnInstruction | null = null;
+  let nextInstruction: TurnInstruction | null = null;
+  let distanceToNextTurn = 0;
+  let lastVoiceDistance = 999;
+  let voiceQueue: string[] = [];
+  let isSpeaking = false;
+  let mapRotationEnabled = false;
+  let currentHeading = 0;
+  let headingHistory: number[] = [];
+  let isOffRoute = false;
+  let offRouteDistance = 0;
+  let isRerouting = false;
+  let lastRerouteTime = 0;
+  const REROUTE_THRESHOLD = 50;
+  const REROUTE_COOLDOWN = 10000;
+  let gpsAccuracyHistory: number[] = [];
+  let lastGPSUpdate = 0;
+  let gpsUpdateCount = 0;
+  const ARRIVAL_THRESHOLD = 30;
+  let isApproachingDestination = false;
+  let hasAnnouncedApproaching = false;
+
   // ==================== HELPER FUNCTIONS ====================
-  function getAcceptedCustomerOrdersCount(): number { return customerOrders.filter(o => o.status === 'accepted').length; }
-  function getPendingCustomerOrdersCount(): number { return customerOrders.filter(o => o.status === 'pending').length; }
-  
+  function getAcceptedCustomerOrdersCount(): number {
+    return customerOrders.filter(o => o.status === 'accepted').length;
+  }
+ 
+  function getPendingCustomerOrdersCount(): number {
+    return customerOrders.filter(o => o.status === 'pending').length;
+  }
+
   function getPaymentMethodText(method: string): string {
-    const m: Record<string, string> = { 'cash': '💵 เงินสด', 'promptpay': '📱 พร้อมเพย์', 'transfer': '🏦 โอนเงิน', 'credit_card': '💳 บัตรเครดิต' };
+    const m: Record<string, string> = {
+      'cash': '💵 เงินสด',
+      'promptpay': '📱 พร้อมเพย์',
+      'transfer': '🏦 โอนเงิน',
+      'credit_card': '💳 บัตรเครดิต'
+    };
     return m[method] || method;
   }
+
   function getPaymentStatusText(status: string): string {
-    const s: Record<string, string> = { 'pending': '⏳ รอชำระ', 'paid': '✅ ชำระแล้ว', 'verified': '✓ ยืนยันแล้ว', 'failed': '❌ ไม่สำเร็จ' };
+    const s: Record<string, string> = {
+      'pending': '⏳ รอชำระ',
+      'paid': '✅ ชำระแล้ว',
+      'verified': '✓ ยืนยันแล้ว',
+      'failed': '❌ ไม่สำเร็จ'
+    };
     return s[status] || status;
   }
+
   function getPaymentStatusColor(status: string): string {
-    const c: Record<string, string> = { 'pending': '#ffc107', 'paid': '#00ff88', 'verified': '#3b82f6', 'failed': '#ef4444' };
+    const c: Record<string, string> = {
+      'pending': '#ffc107',
+      'paid': '#00ff88',
+      'verified': '#3b82f6',
+      'failed': '#ef4444'
+    };
     return c[status] || '#71717a';
   }
 
   async function confirmCashPayment(orderId: number) {
     try {
-      const res = await fetch(`${API_URL}/driver/confirm-cash/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
+      const res = await fetch(`${API_URL}/driver/confirm-cash/${orderId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driver_id: currentUser.id })
+      });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       showNotification('ยืนยันรับเงินสดสำเร็จ! 💵', 'success');
       speak('รับเงินสดเรียบร้อย');
       await loadCustomerOrders();
-    } catch (err: any) { showNotification(err.message || 'ยืนยันไม่สำเร็จ', 'error'); }
+    } catch (err: any) {
+      showNotification(err.message || 'ยืนยันไม่สำเร็จ', 'error');
+    }
   }
 
-  onMount(async () => {
-    const userStr = localStorage.getItem('user');
-    if (!userStr) { goto('/'); return; }
-
-    currentUser = JSON.parse(userStr);
-    const savedVehicleType = localStorage.getItem('vehicleType');
-    if (savedVehicleType === 'ev' || savedVehicleType === 'fuel') {
-      vehicleType = savedVehicleType;
-    }
-    const savedEVCharge = localStorage.getItem('evCurrentCharge');
-    if (savedEVCharge) evCurrentCharge = parseFloat(savedEVCharge);
-    const urlId = $page.params.id;
-    if (Number(urlId) !== currentUser.id) { goto(`/Home/${currentUser.id}`); return; }
-    
+  async function loadCustomerOrders() {
+    if (!currentUser?.id) return;
     try {
-      L = await import('leaflet');
-      await import('leaflet/dist/leaflet.css');
-
-      map = L.map('map', { zoomControl: false }).setView([13.7465, 100.5348], 12);
-      L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-      const tileLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
-        attribution: '© CartoDB © OSM', maxZoom: 19,
-        errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
-      }).addTo(map);
-
-      tileLayer.on('tileerror', (error: any) => { setTimeout(() => { error.tile.src = error.tile.src; }, 1000); });
-
-      setTimeout(() => map.invalidateSize(), 100);
-      setTimeout(() => map.invalidateSize(), 500);
-      setTimeout(() => map.invalidateSize(), 1000);
-      
-      window.addEventListener('resize', () => { setTimeout(() => map.invalidateSize(), 100); });
-
-      map.on('click', (e: any) => {
-        if (isNavigating) return;
-        if (clickMarker) clickMarker.remove();
-        newPoint.lat = parseFloat(e.latlng.lat.toFixed(6));
-        newPoint.lng = parseFloat(e.latlng.lng.toFixed(6));
-        clickMarker = L.marker([e.latlng.lat, e.latlng.lng], {
-          icon: L.divIcon({ className: 'click-marker', html: `<div class="pulse-marker"></div>`, iconSize: [48, 48], iconAnchor: [24, 24] })
-        }).addTo(map);
-        showAddForm = true;
-      });
-
-      await loadDeliveryPoints();
-      await loadCustomerOrders();
-      await loadTodayStats();
-      await loadDeliveryHistory();
-      initExtraFeatures();
-
-      setInterval(() => { loadCustomerOrders(); }, 30000);
-    } catch (error) {
-      console.error('Map init error:', error);
-      showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
+      const res = await fetch(`${API_URL}/driver/customer-orders?driver_id=${currentUser.id}`);
+      const data = await res.json();
+      if (!data.error && Array.isArray(data)) {
+        customerOrders = data;
+        displayCustomerMarkers();
+      }
+    } catch (err) {
+      console.error('Error loading customer orders:', err);
     }
-  });
+  }
 
-  onDestroy(() => { stopNavigation(); });
+  function displayCustomerMarkers() {
+    if (!L || !map) return;
+    customerMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch(e) {}
+    });
+    customerMarkers = [];
+    if (!showCustomerOrders || isNavigating) return;
+
+    customerOrders.filter(o => o.status !== 'completed').forEach((order) => {
+      const marker = L.marker([order.lat, order.lng], {
+        icon: L.divIcon({
+          className: 'customer-order-marker',
+          html: `<div class="customer-pin ${order.status === 'accepted' ? 'accepted' : 'pending'}"><span>🛒</span><div class="customer-info"><div class="customer-name">${order.customer_name}</div><div class="order-status">${order.status === 'accepted' ? '✅ รับแล้ว' : '⏳ รอรับงาน'}</div></div></div>`,
+          iconSize: [120, 60], iconAnchor: [60, 30]
+        })
+      }).addTo(map);
+      marker.bindPopup(`<div class="customer-popup"><div class="popup-header customer-header"><span class="popup-icon">${order.customer_avatar || '👤'}</span><span class="popup-status">${order.status === 'accepted' ? 'รับงานแล้ว' : 'รอรับงาน'}</span></div><div class="popup-content"><h4>${order.customer_name}</h4><p class="popup-phone">📞 ${order.customer_phone || '-'}</p><p class="popup-address">📍 ${order.address}</p>${order.notes ? `<p class="popup-notes">📝 ${order.notes}</p>` : ''}</div></div>`, { className: 'dark-popup customer-dark-popup' });
+      customerMarkers.push(marker);
+    });
+  }
+
+  async function acceptCustomerOrder(orderId: number) {
+    try {
+      const res = await fetch(`${API_URL}/driver/accept-order/${orderId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driver_id: currentUser.id })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showNotification('รับงานสำเร็จ!', 'success');
+      await loadCustomerOrders();
+    } catch (err: any) {
+      showNotification(err.message || 'รับงานไม่สำเร็จ', 'error');
+    }
+  }
+
+  async function completeCustomerOrder(orderId: number, orderName?: string) {
+    try {
+      const res = await fetch(`${API_URL}/driver/complete-order/${orderId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driver_id: currentUser.id })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      const order = customerOrders.find(o => o.id === orderId);
+      if (order) {
+        const record: DeliveryRecord = {
+          id: data.id || Date.now(),
+          pointId: `customer-${orderId}`,
+          pointName: `🛒 ${order.customer_name}`,
+          address: order.address || '',
+          status: 'success',
+          timestamp: new Date(),
+          lat: order.lat,
+          lng: order.lng,
+          isCustomerOrder: true
+        };
+        deliveryHistory = [...deliveryHistory, record];
+        completedDeliveries++;
+      }
+      showNotification('เสร็จงานสำเร็จ!', 'success');
+      speak(`ส่ง ${orderName || order?.customer_name || 'ลูกค้า'} สำเร็จ`);
+      await loadCustomerOrders();
+    } catch (err: any) {
+      showNotification(err.message || 'บันทึกไม่สำเร็จ', 'error');
+    }
+  }
+
+  async function loadTodayStats() {
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/deliveries/stats/today?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error) return;
+      completedDeliveries = data.completed || 0;
+      totalDeliveriesToday = (data.completed || 0) + (data.pending || 0);
+    } catch (err) {
+      console.error('Load stats error:', err);
+    }
+  }
+
+  async function loadDeliveryHistory() {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', '50');
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/deliveries/history?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error || !Array.isArray(data)) return;
+      deliveryHistory = data.map((d: any) => ({
+        id: d.id,
+        pointId: d.point_id,
+        pointName: d.point_name,
+        address: d.address || '',
+        status: d.status === 'completed' ? 'success' : 'skipped',
+        timestamp: new Date(d.delivered_at),
+        lat: parseFloat(d.lat),
+        lng: parseFloat(d.lng)
+      }));
+    } catch (err) {
+      console.error('Load history error:', err);
+    }
+  }
+
+  async function loadDeliveryPoints() {
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/points?${params.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      deliveryPoints = Array.isArray(data) ? data.map((p: any) => ({
+        id: Number(p.id),
+        name: p.name || 'ไม่มีชื่อ',
+        address: p.address || 'ไม่มีที่อยู่',
+        lat: Number(p.lat),
+        lng: Number(p.lng),
+        priority: Number(p.priority || 3),
+        driver_id: p.driver_id ? Number(p.driver_id) : null,
+        driver_name: p.driver_name || null
+      })) : [];
+      displayPoints();
+    } catch (err) {
+      console.error(err);
+      showNotification('โหลดข้อมูลไม่สำเร็จ', 'error');
+    }
+  }
+
+  function displayPoints() {
+    if (!L || !map) return;
+    markers.forEach(m => m.remove());
+    markers = [];
+    deliveryPoints.forEach((point, i) => {
+      const colors = getPriorityGradient(point.priority);
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({
+          className: 'custom-marker',
+          html: `<div class="marker-pin" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};"><span>${i + 1}</span></div>`,
+          iconSize: [44, 44],
+          iconAnchor: [22, 22]
+        })
+      }).addTo(map);
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${colors.bg}"><span class="popup-number">${i + 1}</span><span class="popup-priority">P${point.priority}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
+      markers.push(marker);
+    });
+  }
+
+  async function addDeliveryPoint() {
+    if (!newPoint.name.trim() || !newPoint.address.trim()) {
+      showNotification('กรุณากรอกข้อมูลให้ครบ', 'error');
+      return;
+    }
+    try {
+      const payload = { ...newPoint, driver_id: currentUser?.id || null };
+      const res = await fetch(`${API_URL}/points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.error || !res.ok) throw new Error(data.error || 'เพิ่มไม่สำเร็จ');
+      await loadDeliveryPoints();
+      if (data.id) {
+        activePointId = data.id;
+        setTimeout(() => {
+          const element = document.getElementById(`point-${data.id}`);
+          if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
+      }
+      showAddForm = false;
+      if (clickMarker) clickMarker.remove();
+      newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
+      showNotification('เพิ่มจุดส่งสำเร็จ', 'success');
+    } catch (err) {
+      showNotification('เพิ่มไม่สำเร็จ', 'error');
+    }
+  }
+
+  async function deletePoint(id: number, name: string) {
+    if (!confirm(`ลบ "${name}" ใช่หรือไม่?`)) return;
+    try {
+      const params = new URLSearchParams();
+      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
+      if (currentUser?.role) params.append('role', currentUser.role);
+      const res = await fetch(`${API_URL}/points/${id}?${params.toString()}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.error || !res.ok) throw new Error(data.error || 'ลบไม่สำเร็จ');
+      await loadDeliveryPoints();
+      if (optimizedRoute) clearRoute();
+      showNotification('ลบสำเร็จ', 'success');
+    } catch (err) {
+      showNotification('ลบไม่สำเร็จ', 'error');
+    }
+  }
+
+  // ==================== TURN-BY-TURN FUNCTIONS ====================
+  function getModifierInThai(modifier: string | undefined): string {
+    const modifiers: Record<string, string> = {
+      'uturn': 'กลับรถ',
+      'sharp right': 'เลี้ยวขวาหักศอก',
+      'right': 'เลี้ยวขวา',
+      'slight right': 'ชิดขวา',
+      'straight': 'ตรงไป',
+      'slight left': 'ชิดซ้าย',
+      'left': 'เลี้ยวซ้าย',
+      'sharp left': 'เลี้ยวซ้ายหักศอก'
+    };
+    return modifiers[modifier || 'straight'] || 'ตรงไป';
+  }
+
+  function getInstructionIcon(modifier: string | undefined): string {
+    const icons: Record<string, string> = {
+      'uturn': '↩️',
+      'sharp right': '↱',
+      'right': '➡️',
+      'slight right': '↗️',
+      'straight': '⬆️',
+      'slight left': '↖️',
+      'left': '⬅️',
+      'sharp left': '↰'
+    };
+    return icons[modifier || 'straight'] || '⬆️';
+  }
+
+  function parseRouteInstructions(routeData: any): TurnInstruction[] {
+    if (!routeData?.legs) return [];
+    const instructions: TurnInstruction[] = [];
+
+    for (const leg of routeData.legs) {
+      if (!leg.steps) continue;
+
+      for (const step of leg.steps) {
+        const maneuver = step.maneuver || {};
+        let voiceInstruction = '';
+        const distanceText = formatDistanceForVoice(step.distance);
+        const modifier = maneuver.modifier || 'straight';
+        const modifierThai = getModifierInThai(modifier);
+
+        if (maneuver.type === 'depart') {
+          voiceInstruction = `เริ่มต้นเส้นทาง ${step.name ? `บน ${step.name}` : ''}`;
+        } else if (maneuver.type === 'arrive') {
+          voiceInstruction = 'ถึงจุดหมายแล้ว';
+        } else if (maneuver.type === 'turn') {
+          voiceInstruction = `${distanceText} ${modifierThai}`;
+          if (step.name) voiceInstruction += ` เข้าสู่ ${step.name}`;
+        } else if (maneuver.type === 'roundabout' || maneuver.type === 'rotary') {
+          voiceInstruction = `${distanceText} เข้าวงเวียน ออกทางออกที่ ${maneuver.exit || 1}`;
+        } else {
+          voiceInstruction = `${distanceText} ${modifierThai}`;
+        }
+
+        instructions.push({
+          type: maneuver.type || 'turn',
+          modifier,
+          instruction: voiceInstruction,
+          distance: step.distance || 0,
+          duration: step.duration || 0,
+          location: maneuver.location || [0, 0],
+          streetName: step.name,
+          voiceInstruction
+        });
+      }
+    }
+    return instructions;
+  }
+
+  function formatDistanceForVoice(meters: number): string {
+    if (meters < 100) return `อีก ${Math.round(meters / 10) * 10} เมตร`;
+    if (meters < 1000) return `อีก ${Math.round(meters / 50) * 50} เมตร`;
+    return `อีก ${(meters / 1000).toFixed(1)} กิโลเมตร`;
+  }
+
+  function updateCurrentInstruction() {
+    if (!currentLocation || routeInstructions.length === 0) return;
+
+    let closestIndex = currentInstructionIndex;
+    let minDistance = Infinity;
+
+    for (let i = currentInstructionIndex; i < routeInstructions.length; i++) {
+      const inst = routeInstructions[i];
+      const dist = getDistance(currentLocation.lat, currentLocation.lng, inst.location[1], inst.location[0]);
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestIndex = i;
+      }
+      if (dist > minDistance + 50) break;
+    }
+
+    if (minDistance < 30 && closestIndex < routeInstructions.length - 1) {
+      closestIndex++;
+    }
+
+    currentInstructionIndex = closestIndex;
+    currentInstruction = routeInstructions[closestIndex] || null;
+    nextInstruction = routeInstructions[closestIndex + 1] || null;
+
+    if (currentInstruction) {
+      distanceToNextTurn = getDistance(
+        currentLocation.lat,
+        currentLocation.lng,
+        currentInstruction.location[1],
+        currentInstruction.location[0]
+      );
+      announceInstruction();
+    }
+  }
+
+  function announceInstruction() {
+    if (!voiceEnabled || !currentInstruction) return;
+
+    const dist = distanceToNextTurn;
+
+    if (dist <= 200 && dist > 150 && lastVoiceDistance > 200) {
+      speak(currentInstruction.voiceInstruction || currentInstruction.instruction, 'normal');
+      lastVoiceDistance = dist;
+    } else if (dist <= 100 && dist > 60 && lastVoiceDistance > 100) {
+      speak(`อีก 100 เมตร ${getModifierInThai(currentInstruction.modifier)}`, 'normal');
+      lastVoiceDistance = dist;
+    } else if (dist <= 50 && dist > 20 && lastVoiceDistance > 50) {
+      speak(`${getModifierInThai(currentInstruction.modifier)} เลย`, 'high');
+      lastVoiceDistance = dist;
+    } else if (dist > 200) {
+      lastVoiceDistance = 999;
+    }
+  }
+
+  // ==================== AUTO REROUTE ====================
+  function checkOffRoute() {
+    if (!currentLocation || !optimizedRoute?.route?.geometry) return;
+
+    const routeCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+    let minDist = Infinity;
+
+    for (const coord of routeCoords) {
+      const dist = getDistance(currentLocation.lat, currentLocation.lng, coord[0], coord[1]);
+      if (dist < minDist) minDist = dist;
+    }
+
+    offRouteDistance = minDist;
+
+    if (minDist > REROUTE_THRESHOLD) {
+      if (!isOffRoute) {
+        isOffRoute = true;
+        showNotification('⚠️ คุณออกนอกเส้นทาง', 'warning');
+        speak('คุณออกนอกเส้นทาง กำลังคำนวณเส้นทางใหม่', 'high');
+      }
+      attemptReroute();
+    } else {
+      isOffRoute = false;
+    }
+  }
+
+  async function attemptReroute() {
+    const now = Date.now();
+    if (isRerouting || now - lastRerouteTime < REROUTE_COOLDOWN) return;
+
+    isRerouting = true;
+    lastRerouteTime = now;
+    showNotification('🔄 กำลังคำนวณเส้นทางใหม่...', 'warning');
+
+    try {
+      await recalculateRouteFromCurrentPosition();
+      isOffRoute = false;
+      speak('คำนวณเส้นทางใหม่เรียบร้อย', 'normal');
+      showNotification('✅ คำนวณเส้นทางใหม่สำเร็จ', 'success');
+    } catch (error) {
+      console.error('Reroute failed:', error);
+      showNotification('❌ ไม่สามารถคำนวณเส้นทางใหม่ได้', 'error');
+    } finally {
+      isRerouting = false;
+    }
+  }
+
+  // ==================== ENHANCED GPS TRACKING ====================
+  function handleGPSUpdate(position: GeolocationPosition) {
+    const { latitude, longitude, accuracy: acc, heading, speed } = position.coords;
+    const now = Date.now();
+
+    gpsAccuracyHistory.push(acc);
+    if (gpsAccuracyHistory.length > 10) gpsAccuracyHistory.shift();
+
+    const avgAccuracy = gpsAccuracyHistory.reduce((a, b) => a + b, 0) / gpsAccuracyHistory.length;
+    if (avgAccuracy < 10) gpsStatus = 'excellent';
+    else if (avgAccuracy < 30) gpsStatus = 'good';
+    else if (avgAccuracy < 50) gpsStatus = 'weak';
+    else gpsStatus = 'poor';
+
+    accuracy = acc;
+    lastGPSUpdate = now;
+    gpsUpdateCount++;
+
+    if (currentLocation) {
+      const jumpDistance = getDistance(currentLocation.lat, currentLocation.lng, latitude, longitude);
+      const timeDiff = (now - (lastPosition?.time || now)) / 1000;
+      if (jumpDistance > 100 && timeDiff < 2) {
+        console.warn('GPS jump detected, ignoring');
+        return;
+      }
+    }
+
+    currentLocation = { lat: latitude, lng: longitude, heading, speed };
+
+    if (lastPosition) {
+      const distance = getDistance(lastPosition.lat, lastPosition.lng, latitude, longitude);
+      const timeDiff = (now - lastPosition.time) / 1000;
+      if (timeDiff > 0) {
+        const calculatedSpeed = (distance / timeDiff) * 3.6;
+        currentSpeed = speed !== null ? speed * 3.6 : currentSpeed * 0.7 + calculatedSpeed * 0.3;
+        if (currentSpeed > maxSpeed) maxSpeed = currentSpeed;
+        speedHistory.push(currentSpeed);
+        if (speedHistory.length > 30) speedHistory.shift();
+      }
+    }
+    lastPosition = { lat: latitude, lng: longitude, time: now };
+
+    if (heading !== null && !isNaN(heading)) {
+      headingHistory.push(heading);
+      if (headingHistory.length > 5) headingHistory.shift();
+      currentHeading = headingHistory.reduce((a, b) => a + b, 0) / headingHistory.length;
+    }
+
+    if (isNavigating) {
+      updateNavigationState();
+    }
+  }
+
+  function updateNavigationState() {
+    if (!currentLocation || !optimizedRoute) return;
+
+    updateCurrentLocationMarker();
+    checkOffRoute();
+    updateCurrentInstruction();
+    updateRouteDisplayForNavigation();
+    checkArrivalAtDestination();
+    updateNavigationMarkers();
+    updateETA();
+
+    if (mapRotationEnabled && currentHeading) {
+      rotateMarker();
+    }
+
+    map.panTo([currentLocation.lat, currentLocation.lng], { animate: true, duration: 0.5 });
+  }
+
+  function checkArrivalAtDestination() {
+    if (!currentLocation || !optimizedRoute) return;
+
+    const target = optimizedRoute.optimized_order[currentTargetIndex];
+    if (!target || target.id === -1) return;
+
+    const dist = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
+    distanceToNextPoint = dist;
+
+    if (dist < 100 && !hasAnnouncedApproaching) {
+      hasAnnouncedApproaching = true;
+      isApproachingDestination = true;
+      speak(`ใกล้ถึง ${target.name} แล้ว`, 'normal');
+      showNotification(`📍 ใกล้ถึง ${target.name}`, 'success');
+    }
+
+    if (dist < ARRIVAL_THRESHOLD) {
+      speak(`ถึง ${target.name} แล้ว`, 'high');
+      showNotification(`🎉 ถึง ${target.name} แล้ว!`, 'success');
+    }
+
+    if (dist > 150) {
+      hasAnnouncedApproaching = false;
+      isApproachingDestination = false;
+    }
+  }
+
+  function rotateMarker() {
+    if (!currentLocationMarker) return;
+    const el = currentLocationMarker.getElement?.();
+    if (el) {
+      const arrow = el.querySelector('.heading-arrow') as HTMLElement;
+      if (arrow) {
+        arrow.style.transform = `rotate(${currentHeading}deg)`;
+      }
+    }
+  }
+
+  function toggleMapRotation() {
+    mapRotationEnabled = !mapRotationEnabled;
+    showNotification(mapRotationEnabled ? '🧭 เปิดหมุนตามทิศทาง' : '🔒 ล็อคทิศเหนือ', 'success');
+  }
+
+  // ==================== ENHANCED VOICE NAVIGATION ====================
+  let thaiVoice: SpeechSynthesisVoice | null = null;
+
+  function initVoiceNavigation() {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    const loadVoices = () => {
+      const voices = speechSynthesis.getVoices();
+      thaiVoice = voices.find(v => v.lang === 'th-TH') ||
+                  voices.find(v => v.lang.startsWith('th')) ||
+                  voices.find(v => v.name.toLowerCase().includes('thai')) ||
+                  null;
+    };
+
+    loadVoices();
+    speechSynthesis.onvoiceschanged = loadVoices;
+  }
+
+  function speak(text: string, priority: 'low' | 'normal' | 'high' = 'normal') {
+    if (!voiceEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    if (priority === 'high') {
+      speechSynthesis.cancel();
+    }
+
+    if (voiceQueue.length > 3) {
+      voiceQueue = voiceQueue.slice(-2);
+    }
+
+    voiceQueue.push(text);
+    processVoiceQueue();
+  }
+
+  function processVoiceQueue() {
+    if (isSpeaking || voiceQueue.length === 0) return;
+
+    isSpeaking = true;
+    const text = voiceQueue.shift()!;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'th-TH';
+    utterance.rate = 1.0;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    if (thaiVoice) {
+      utterance.voice = thaiVoice;
+    }
+
+    utterance.onend = () => {
+      isSpeaking = false;
+      setTimeout(processVoiceQueue, 300);
+    };
+
+    utterance.onerror = () => {
+      isSpeaking = false;
+      processVoiceQueue();
+    };
+
+    speechSynthesis.speak(utterance);
+  }
+
+  async function callOSRMProxy(waypoints: string, steps: boolean = false): Promise<any> {
+    const res = await fetch(`${API_URL}/route/osrm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints, steps })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (data.code !== 'Ok' || !data.routes?.[0]) throw new Error('ไม่สามารถคำนวณเส้นทางได้');
+    return data;
+  }
+
+  async function optimizeRoute() {
+    if (allDeliveryPoints.length < 1) {
+      showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error');
+      return;
+    }
+    isOptimizing = true;
+    try {
+      const startPoint = await getCurrentLocationAsStart();
+      const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
+      const waypoints = [`${startPoint.lng},${startPoint.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
+
+      const data = await callOSRMProxy(waypoints, true);
+
+      optimizedRoute = {
+        route: { geometry: data.routes[0].geometry },
+        total_distance: data.routes[0].distance,
+        total_time: data.routes[0].duration,
+        optimized_order: [{ ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ', id: -1 }, ...sortedPoints],
+        routeData: data.routes[0]
+      };
+      remainingDistance = data.routes[0].distance;
+      remainingTime = data.routes[0].duration;
+
+      routeInstructions = parseRouteInstructions(data.routes[0]);
+
+      displayOptimizedRoute();
+      activeTab = 'route';
+      showNotification('คำนวณเส้นทางสำเร็จ', 'success');
+    } catch (err: any) {
+      showNotification(err.message || 'คำนวณไม่สำเร็จ', 'error');
+    } finally {
+      isOptimizing = false;
+    }
+  }
+
+  function sortByNearestNeighbor(start: { lat: number; lng: number }, points: any[]): any[] {
+    const sorted: any[] = [];
+    const remaining = [...points];
+    let currentPos = start;
+    while (remaining.length > 0) {
+      let nearestIndex = 0;
+      let nearestScore = Infinity;
+      remaining.forEach((point, index) => {
+        const dist = getDistance(currentPos.lat, currentPos.lng, point.lat, point.lng);
+        const priorityBonus = point.isCustomerOrder ? 500 : (point.priority ? (6 - point.priority) * 100 : 0);
+        const score = dist - priorityBonus;
+        if (score < nearestScore) {
+          nearestScore = score;
+          nearestIndex = index;
+        }
+      });
+      const nearest = remaining.splice(nearestIndex, 1)[0];
+      sorted.push(nearest);
+      currentPos = { lat: nearest.lat, lng: nearest.lng };
+    }
+    return sorted;
+  }
+
+  function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new Error('เบราว์เซอร์ไม่รองรับ GPS'));
+        return;
+      }
+
+      if (currentLocation) {
+        resolve({ lat: currentLocation.lat, lng: currentLocation.lng });
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          resolve({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          });
+        },
+        (error) => {
+          navigator.geolocation.getCurrentPosition(
+            (position) => {
+              resolve({
+                lat: position.coords.latitude,
+                lng: position.coords.longitude
+              });
+            },
+            (err) => {
+              let msg = 'ไม่สามารถระบุตำแหน่งได้';
+              if (err.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
+              if (err.code === 2) msg = 'GPS ไม่พร้อมใช้งาน - ลองเปิด Location ในเครื่อง';
+              if (err.code === 3) msg = 'หมดเวลา - ลองอีกครั้ง';
+              reject(new Error(msg));
+            },
+            {
+              enableHighAccuracy: false,
+              timeout: 30000,
+              maximumAge: 60000
+            }
+          );
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 30000
+        }
+      );
+    });
+  }
+
+  function displayOptimizedRoute() {
+    if (!L || !map || !optimizedRoute?.route?.geometry) return;
+    if (routeLayer) routeLayer.remove();
+    if (glowLayer) glowLayer.remove();
+    const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+    glowLayer = L.polyline(coords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    routeLayer = L.polyline(coords, { color: '#00ff88', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    map.fitBounds(routeLayer.getBounds(), { padding: [80, 80] });
+    markers.forEach(m => m.remove());
+    markers = [];
+    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
+    customerMarkers = [];
+    optimizedRoute.optimized_order.forEach((point: any, i: number) => {
+      const isStart = i === 0;
+      const isCurrentLocation = isStart && point.id === -1;
+      const isCustomer = point.isCustomerOrder;
+
+      let gradient, glow;
+      if (isCurrentLocation) { gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'; glow = '#3b82f6'; }
+      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
+      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
+
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({
+          className: 'route-marker',
+          html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''} ${isCustomer ? 'customer-route' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}</div>`,
+          iconSize: [52, 52],
+          iconAnchor: [26, 26]
+        })
+      }).addTo(map);
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${gradient}"><span class="popup-number">${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : isCustomer ? 'ลูกค้า' : 'จุดส่ง'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p>${point.customer_phone ? `<p>📞 ${point.customer_phone}</p>` : ''}</div></div>`, { className: 'dark-popup' });
+      markers.push(marker);
+    });
+  }
+
+  function clearRoute() {
+    if (routeLayer) { try { map.removeLayer(routeLayer); } catch (e) {} routeLayer = null; }
+    if (glowLayer) { try { map.removeLayer(glowLayer); } catch (e) {} glowLayer = null; }
+    if (markers && markers.length > 0) {
+      for (let i = 0; i < markers.length; i++) {
+        try { if (markers[i]) map.removeLayer(markers[i]); } catch (e) {}
+      }
+      markers = [];
+    }
+    if (clickMarker) { try { map.removeLayer(clickMarker); } catch (e) {} clickMarker = null; }
+    optimizedRoute = null;
+    arrivedPoints = [];
+    currentTargetIndex = 0;
+    displayPoints();
+    displayCustomerMarkers();
+  }
+
+  function startNavigation() {
+    if (!optimizedRoute) return;
+    if (!navigator.geolocation) {
+      showNotification('เบราว์เซอร์ไม่รองรับ GPS', 'error');
+      return;
+    }
+    isNavigating = true;
+    currentTargetIndex = 1;
+    arrivedPoints = [0];
+    traveledPath = [];
+    remainingDistance = optimizedRoute.total_distance;
+    remainingTime = optimizedRoute.total_time;
+    navigationStartTime = new Date();
+    elapsedTime = 0;
+    speedHistory = [];
+    maxSpeed = 0;
+    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
+    customerMarkers = [];
+
+    currentInstructionIndex = 0;
+    lastVoiceDistance = 999;
+    hasAnnouncedApproaching = false;
+    isApproachingDestination = false;
+    isOffRoute = false;
+    isRerouting = false;
+
+    if (optimizedRoute.routeData && routeInstructions.length === 0) {
+      routeInstructions = parseRouteInstructions(optimizedRoute.routeData);
+    }
+
+    watchId = navigator.geolocation.watchPosition(
+      handleGPSUpdate,
+      handleGeoError,
+      {
+        enableHighAccuracy: true,
+        timeout: 30000,
+        maximumAge: 5000
+      }
+    );
+
+    navigationInterval = setInterval(() => {
+      updateNavigationInfo();
+      updateETA();
+      updateFuelEstimate();
+      updateStatistics();
+    }, 1000);
+
+    speak('เริ่มนำทาง');
+    addAlert('navigation', 'เริ่มการนำทาง');
+    showNotification('เริ่มนำทางแล้ว', 'success');
+    updateNavigationMarkers();
+
+    const firstTarget = optimizedRoute.optimized_order[currentTargetIndex];
+    if (firstTarget) {
+      map.setView([firstTarget.lat, firstTarget.lng], 17);
+      speak(`มุ่งหน้าไปยัง ${firstTarget.name}`, 'normal');
+    }
+
+    setTimeout(() => { map.invalidateSize(); }, 100);
+  }
+
+  function stopNavigation() {
+    isNavigating = false;
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    if (navigationInterval) {
+      clearInterval(navigationInterval);
+      navigationInterval = null;
+    }
+    if (currentLocationMarker) {
+      currentLocationMarker.remove();
+      currentLocationMarker = null;
+    }
+    if (traveledLayer) {
+      traveledLayer.remove();
+      traveledLayer = null;
+    }
+    if (remainingRouteLayer) {
+      remainingRouteLayer.remove();
+      remainingRouteLayer = null;
+    }
+    if (remainingGlowLayer) {
+      remainingGlowLayer.remove();
+      remainingGlowLayer = null;
+    }
+    currentLocation = null;
+    currentTargetIndex = 0;
+    arrivedPoints = [];
+    traveledPath = [];
+    routeInstructions = [];
+    currentInstructionIndex = 0;
+    isOffRoute = false;
+    isRerouting = false;
+    if (optimizedRoute) {
+      displayOptimizedRoute();
+    }
+    displayCustomerMarkers();
+    showNotification('หยุดนำทางแล้ว', 'success');
+  }
+
+  function updateCurrentLocationMarker() {
+    if (!L || !map || !currentLocation) return;
+    const accuracySize = Math.min(accuracy * 2, 100);
+
+    if (currentLocationMarker) {
+      currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
+      const el = currentLocationMarker.getElement?.();
+      if (el) {
+        const accEl = el.querySelector('.location-accuracy') as HTMLElement;
+        if (accEl) {
+          accEl.style.width = `${accuracySize}px`;
+          accEl.style.height = `${accuracySize}px`;
+        }
+      }
+    } else {
+      currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
+        icon: L.divIcon({
+          className: 'current-location-marker',
+          html: `
+            <div class="location-wrapper">
+              <div class="location-accuracy" style="width: ${accuracySize}px; height: ${accuracySize}px;"></div>
+              <div class="location-dot">
+                <div class="heading-arrow">▲</div>
+                <div class="location-dot-inner"></div>
+              </div>
+              <div class="location-pulse"></div>
+            </div>
+          `,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        }),
+        zIndexOffset: 1000
+      }).addTo(map);
+    }
+  }
+
+  function updateNavigationMarkers() {
+    if (!L || !map || !optimizedRoute) return;
+    if (markers && markers.length > 0) {
+      markers.forEach((m) => {
+        try { if (m && map) map.removeLayer(m); } catch(e) {}
+      });
+    }
+    markers = [];
+    optimizedRoute.optimized_order.forEach((point: any, i: number) => {
+      const isArrived = arrivedPoints.includes(i);
+      const isCurrent = i === currentTargetIndex;
+      const isStart = point.id === -1;
+      const isCustomer = point.isCustomerOrder;
+      let gradient, glow;
+      if (isArrived) { gradient = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'; glow = '#6b7280'; }
+      else if (isCurrent) { gradient = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'; glow = '#f59e0b'; }
+      else if (isStart) { gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)'; glow = '#00ff88'; }
+      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
+      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
+      const displayNumber = isStart ? '📍' : (isArrived ? '✓' : (isCustomer ? '🛒' : i));
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({
+          className: 'route-marker',
+          html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${displayNumber}</span>${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}</div>`,
+          iconSize: [52, 52],
+          iconAnchor: [26, 26]
+        })
+      }).addTo(map);
+      markers.push(marker);
+    });
+  }
+
+  function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+// ==================== MULTI-SELECT FUNCTIONS ====================
+
+function toggleMultiSelect() {
+  isMultiSelectMode = !isMultiSelectMode;
+  if (!isMultiSelectMode) {
+    selectedPoints = [];
+  }
+}
+
+// ==================== BREAK TIME FUNCTIONS ====================
+
+function startBreak() {
+  isOnBreak = true;
+  breakStartTime = new Date();
+  showNotification('เริ่มพักเบรค', 'success');
+  addAlert('break', 'คนขับเริ่มพักเบรค');
+}
+  function addAlert(type: string, message: string) {
+    const alert = { id: Date.now(), type, message, time: new Date() };
+    alerts = [alert, ...alerts].slice(0, 50);
+  }
+
+  function clearAlerts() {
+    alerts = [];
+  }
+
+  function dismissAlert(id: number) {
+    alerts = alerts.filter(a => a.id !== id);
+  }
+
+function endBreak() {
+  if (breakStartTime) {
+    const breakDuration = Date.now() - breakStartTime.getTime();
+    totalBreakTime += breakDuration;
+  }
+  isOnBreak = false;
+  breakStartTime = null;
+  showNotification('สิ้นสุดพักเบรค', 'success');
+  addAlert('break', 'คนขับกลับมาทำงาน');
+}
+
+function formatBreakTime(): string {
+  let totalMs = totalBreakTime;
+  if (isOnBreak && breakStartTime) {
+    totalMs += Date.now() - breakStartTime.getTime();
+  }
+  const mins = Math.floor(totalMs / 60000);
+  return `${mins} นาที`;
+}
+
+function togglePointSelection(id: number) {
+  if (selectedPoints.includes(id)) {
+    selectedPoints = selectedPoints.filter(p => p !== id);
+  } else {
+    selectedPoints = [...selectedPoints, id];
+  }
+}
+
+function selectAllPoints() {
+  selectedPoints = deliveryPoints.map(p => p.id);
+}
+
+function deselectAllPoints() {
+  selectedPoints = [];
+}
+
+async function deleteSelectedPoints() {
+  if (selectedPoints.length === 0) return;
+  if (!confirm(`ลบ ${selectedPoints.length} จุดที่เลือก?`)) return;
+  
+  for (const id of selectedPoints) {
+    try {
+      await fetch(`${API_URL}/points/${id}`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Delete error:', err);
+    }
+  }
+  
+  await loadDeliveryPoints();
+  selectedPoints = [];
+  isMultiSelectMode = false;
+  showNotification(`ลบจุดสำเร็จ`, 'success');
+}
+  function formatDistance(meters: number): string {
+    if (meters < 1000) {
+      return `${Math.round(meters)} ม.`;
+    }
+    return `${(meters / 1000).toFixed(1)} กม.`;
+  }
+
+  function formatTime(seconds: number): string {
+    const mins = Math.round(seconds / 60);
+    if (mins < 60) {
+      return `${mins} นาที`;
+    }
+    const hours = Math.floor(mins / 60);
+    const remainMins = mins % 60;
+    return `${hours} ชม. ${remainMins} นาที`;
+  }
+
+  function centerOnCurrentLocation() {
+    if (currentLocation && map) {
+      map.setView([currentLocation.lat, currentLocation.lng], 17, { animate: true });
+    }
+  }
+
+  async function recalculateRouteFromCurrentPosition() {
+    if (!currentLocation || !optimizedRoute) return;
+    try {
+      const remainingPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+      if (remainingPoints.length === 0) {
+        showNotification('ส่งครบทุกจุดแล้ว!', 'success');
+        stopNavigation();
+        clearAllMarkersAndLayers();
+        return;
+      }
+      const sortedPoints = sortByNearestNeighbor(currentLocation, remainingPoints);
+      const waypoints = [`${currentLocation.lng},${currentLocation.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
+
+      const data = await callOSRMProxy(waypoints, true);
+
+      optimizedRoute = {
+        route: { geometry: data.routes[0].geometry },
+        total_distance: data.routes[0].distance,
+        total_time: data.routes[0].duration,
+        optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints],
+        routeData: data.routes[0]
+      };
+      remainingDistance = data.routes[0].distance;
+      remainingTime = data.routes[0].duration;
+      currentTargetIndex = 1;
+      arrivedPoints = [0];
+
+      routeInstructions = parseRouteInstructions(data.routes[0]);
+      currentInstructionIndex = 0;
+      lastVoiceDistance = 999;
+
+      clearAllRouteLayers();
+      updateRouteDisplayForNavigation();
+      updateNavigationMarkers();
+      const nextTarget = optimizedRoute.optimized_order[currentTargetIndex];
+      if (nextTarget) {
+        map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true });
+      }
+    } catch (err) {
+      console.error('Error recalculating route:', err);
+      currentTargetIndex = 1;
+      arrivedPoints = [0];
+      clearAllRouteLayers();
+      updateRouteDisplayForNavigation();
+      updateNavigationMarkers();
+    }
+  }
+
+  async function markDeliverySuccess() {
+    if (isProcessingDelivery) {
+      showNotification('กำลังประมวลผล...', 'warning');
+      return;
+    }
+    if (!optimizedRoute?.optimized_order) {
+      showNotification('ไม่มีเส้นทาง', 'error');
+      return;
+    }
+    const deliveredPoint = optimizedRoute.optimized_order[currentTargetIndex];
+    if (!deliveredPoint) {
+      showNotification('ไม่พบจุดส่ง', 'error');
+      return;
+    }
+    isProcessingDelivery = true;
+    try {
+      if (deliveredPoint.isCustomerOrder) {
+        await completeCustomerOrder(deliveredPoint.orderId, deliveredPoint.name);
+        const pointIdToRemove = deliveredPoint.id;
+        optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+        const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+        if (remainingDeliveryPoints.length === 0) {
+          showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success');
+          speak('ส่งครบทุกจุดแล้ว');
+          stopNavigation();
+          clearAllMarkersAndLayers();
+          optimizedRoute = null;
+          await loadDeliveryPoints();
+          await loadCustomerOrders();
+          await loadTodayStats();
+        } else {
+          addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+          currentTargetIndex = 1;
+          arrivedPoints = [0];
+          hasAnnouncedApproaching = false;
+          if (currentLocation) {
+            await recalculateRouteFromCurrentPosition();
+          } else {
+            updateNavigationMarkers();
+          }
+        }
+        isProcessingDelivery = false;
+        return;
+      }
+
+      const payload: any = {
+        point_id: Number(deliveredPoint.id),
+        point_name: String(deliveredPoint.name),
+        address: deliveredPoint.address || '',
+        lat: Number(deliveredPoint.lat),
+        lng: Number(deliveredPoint.lng),
+        notes: `ส่งสำเร็จ - ${new Date().toLocaleString('th-TH')}`
+      };
+      if (currentRouteId) payload.route_id = Number(currentRouteId);
+      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
+      if (currentUser?.name) payload.driver_name = String(currentUser.name);
+
+      const res = await fetch(`${API_URL}/deliveries/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errorText}`);
+      }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      const record: DeliveryRecord = {
+        id: data.history_id || Date.now(),
+        pointId: deliveredPoint.id,
+        pointName: deliveredPoint.name,
+        address: deliveredPoint.address || '',
+        status: 'success',
+        timestamp: new Date(),
+        lat: deliveredPoint.lat,
+        lng: deliveredPoint.lng
+      };
+      deliveryHistory = [...deliveryHistory, record];
+      completedDeliveries++;
+
+      const pointIdToRemove = deliveredPoint.id;
+      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
+
+      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+      if (remainingDeliveryPoints.length === 0) {
+        showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success');
+        speak('ส่งครบทุกจุดแล้ว');
+        stopNavigation();
+        clearAllMarkersAndLayers();
+        optimizedRoute = null;
+        await loadDeliveryPoints();
+        await loadCustomerOrders();
+        await loadTodayStats();
+      } else {
+        showNotification(`✅ ส่ง ${deliveredPoint.name} สำเร็จ`, 'success');
+        speak(`ส่ง ${deliveredPoint.name} สำเร็จ`);
+        addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+        currentTargetIndex = 1;
+        arrivedPoints = [0];
+        hasAnnouncedApproaching = false;
+        if (currentLocation) {
+          await recalculateRouteFromCurrentPosition();
+        } else {
+          updateNavigationMarkers();
+        }
+      }
+    } catch (err: any) {
+      showNotification(`บันทึกไม่สำเร็จ: ${err.message}`, 'error');
+    } finally {
+      isProcessingDelivery = false;
+    }
+  }
+
+  async function skipToNextPoint() {
+    if (isProcessingDelivery) {
+      showNotification('กำลังประมวลผล...', 'warning');
+      return;
+    }
+    if (!optimizedRoute?.optimized_order) {
+      showNotification('ไม่มีเส้นทาง', 'error');
+      return;
+    }
+    const skippedPoint = optimizedRoute.optimized_order[currentTargetIndex];
+    if (!skippedPoint) {
+      showNotification('ไม่พบจุดที่จะข้าม', 'error');
+      return;
+    }
+    if (skippedPoint.isCustomerOrder) {
+      showNotification('ไม่สามารถข้ามงานลูกค้าได้ - กรุณาส่งให้เสร็จ', 'error');
+      return;
+    }
+    isProcessingDelivery = true;
+    try {
+      const payload: any = {
+        point_id: Number(skippedPoint.id),
+        point_name: String(skippedPoint.name),
+        address: skippedPoint.address || '',
+        lat: Number(skippedPoint.lat),
+        lng: Number(skippedPoint.lng),
+        notes: `ข้ามจุดส่ง - ${new Date().toLocaleString('th-TH')}`
+      };
+      if (currentRouteId) payload.route_id = Number(currentRouteId);
+      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
+      if (currentUser?.name) payload.driver_name = String(currentUser.name);
+
+      const res = await fetch(`${API_URL}/deliveries/skip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errorText}`);
+      }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      const record: DeliveryRecord = {
+        id: data.history_id || Date.now(),
+        pointId: skippedPoint.id,
+        pointName: skippedPoint.name,
+        address: skippedPoint.address || '',
+        status: 'skipped',
+        timestamp: new Date(),
+        lat: skippedPoint.lat,
+        lng: skippedPoint.lng
+      };
+      deliveryHistory = [...deliveryHistory, record];
+
+      const pointIdToRemove = skippedPoint.id;
+      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
+      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
+
+      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
+      if (remainingDeliveryPoints.length === 0) {
+        showNotification('🎉 ครบทุกจุดแล้ว!', 'success');
+        speak('ครบทุกจุดแล้ว');
+        stopNavigation();
+        clearAllMarkersAndLayers();
+        optimizedRoute = null;
+        await loadDeliveryPoints();
+        await loadCustomerOrders();
+        await loadTodayStats();
+      } else {
+        showNotification(`⏭️ ข้าม ${skippedPoint.name}`, 'warning');
+        addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
+        currentTargetIndex = 1;
+        arrivedPoints = [0];
+        hasAnnouncedApproaching = false;
+        if (currentLocation) {
+          await recalculateRouteFromCurrentPosition();
+        } else {
+          updateNavigationMarkers();
+        }
+      }
+    } catch (err: any) {
+      showNotification(`ข้ามไม่สำเร็จ: ${err.message}`, 'error');
+    } finally {
+      isProcessingDelivery = false;
+    }
+  }
+
+  function updateRouteDisplayForNavigation() {
+    if (!L || !map || !optimizedRoute?.route?.geometry) return;
+    const fullRouteCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+    let startIndex = 0;
+    if (currentLocation) {
+      let minStartDist = Infinity;
+      fullRouteCoords.forEach((coord, idx) => {
+        const dist = getDistance(currentLocation.lat, currentLocation.lng, coord[0], coord[1]);
+        if (dist < minStartDist) {
+          minStartDist = dist;
+          startIndex = idx;
+        }
+      });
+    }
+    clearAllRouteLayers();
+    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
+    if (startIndex > 0) {
+      const traveledCoords = fullRouteCoords.slice(0, startIndex + 1);
+      traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: 5, opacity: 0.6, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    }
+    const remainingCoords = fullRouteCoords.slice(startIndex);
+    if (remainingCoords.length > 1) {
+      remainingGlowLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+      remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 5, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    }
+  }
+
+  function clearAllRouteLayers() {
+    if (remainingRouteLayer && map.hasLayer(remainingRouteLayer)) { map.removeLayer(remainingRouteLayer); } remainingRouteLayer = null;
+    if (remainingGlowLayer && map.hasLayer(remainingGlowLayer)) { map.removeLayer(remainingGlowLayer); } remainingGlowLayer = null;
+    if (routeLayer && map.hasLayer(routeLayer)) { map.removeLayer(routeLayer); } routeLayer = null;
+    if (glowLayer && map.hasLayer(glowLayer)) { map.removeLayer(glowLayer); } glowLayer = null;
+  }
+
+  function updateETA() {
+    if (remainingDistance > 0 && currentSpeed > 5) {
+      const hoursRemaining = (remainingDistance / 1000) / currentSpeed;
+      const msRemaining = hoursRemaining * 3600 * 1000;
+      estimatedArrivalTime = new Date(Date.now() + msRemaining);
+    } else if (remainingDistance > 0) {
+      const hoursRemaining = (remainingDistance / 1000) / 30;
+      const msRemaining = hoursRemaining * 3600 * 1000;
+      estimatedArrivalTime = new Date(Date.now() + msRemaining);
+    }
+  }
+
+  function formatETA(date: Date | null): string {
+    if (!date) return '--:--';
+    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function updateFuelEstimate() {
+    const distanceKm = remainingDistance / 1000;
+    fuelConsumption = distanceKm / KM_PER_LITER;
+    fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER;
+  }
+
+  function toggleVoice() {
+    voiceEnabled = !voiceEnabled;
+    showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success');
+  }
+
+  function getGPSStatusColor(): string {
+    switch (gpsStatus) {
+      case 'excellent': return '#00ff88';
+      case 'good': return '#ffd93d';
+      case 'weak': return '#ffa502';
+      case 'poor': return '#ff6b6b';
+      default: return '#71717a';
+    }
+  }
+
+  function getGPSStatusText(): string {
+    switch (gpsStatus) {
+      case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`;
+      case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`;
+      case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`;
+      case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`;
+      default: return 'กำลังค้นหา GPS...';
+    }
+  }
+
+  function getGPSIcon(): string {
+    switch (gpsStatus) {
+      case 'excellent': return '📡';
+      case 'good': return '📶';
+      case 'weak': return '📉';
+      case 'poor': return '⚠️';
+      default: return '🔍';
+    }
+  }
+
+  function handleGeoError(error: GeolocationPositionError) {
+    console.error('GPS Error:', error);
+    let msg = 'ไม่สามารถระบุตำแหน่งได้';
+    if (error.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
+    if (error.code === 2) msg = 'ไม่สามารถระบุตำแหน่งได้';
+    if (error.code === 3) msg = 'หมดเวลาการระบุตำแหน่ง';
+    showNotification(msg, 'error');
+  }
+
+  function updateNavigationInfo() {
+    if (!currentLocation || !optimizedRoute) return;
+    const routeCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+    const nearestIndex = findNearestPointIndex(routeCoords, currentLocation);
+    let totalRemaining = 0;
+    for (let i = nearestIndex; i < routeCoords.length - 1; i++) {
+      totalRemaining += getDistance(routeCoords[i][0], routeCoords[i][1], routeCoords[i + 1][0], routeCoords[i + 1][1]);
+    }
+    remainingDistance = totalRemaining;
+    remainingTime = (totalRemaining / 1000) / 30 * 3600;
+    if (currentTargetIndex < optimizedRoute.optimized_order.length) {
+      const target = optimizedRoute.optimized_order[currentTargetIndex];
+      distanceToNextPoint = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
+    }
+  }
+
+  function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
+    let minDist = Infinity;
+    let nearestIndex = 0;
+    coords.forEach((coord, index) => {
+      const dist = getDistance(location.lat, location.lng, coord[0], coord[1]);
+      if (dist < minDist) {
+        minDist = dist;
+        nearestIndex = index;
+      }
+    });
+    return nearestIndex;
+  }
+
+  function clearAllMarkersAndLayers() {
+    if (markers && markers.length > 0) {
+      markers.forEach((m) => {
+        try { if (m && map) map.removeLayer(m); } catch(e) {}
+      });
+      markers = [];
+    }
+    if (routeLayer && map) { try { map.removeLayer(routeLayer); } catch(e) {} routeLayer = null; }
+    if (glowLayer && map) { try { map.removeLayer(glowLayer); } catch(e) {} glowLayer = null; }
+    if (remainingRouteLayer && map) { try { map.removeLayer(remainingRouteLayer); } catch(e) {} remainingRouteLayer = null; }
+    if (remainingGlowLayer && map) { try { map.removeLayer(remainingGlowLayer); } catch(e) {} remainingGlowLayer = null; }
+    if (traveledLayer && map) { try { map.removeLayer(traveledLayer); } catch(e) {} traveledLayer = null; }
+    if (clickMarker && map) { try { map.removeLayer(clickMarker); } catch(e) {} clickMarker = null; }
+    if (map && L) {
+      map.eachLayer((layer: any) => {
+        if (layer instanceof L.Marker && layer !== currentLocationMarker) {
+          try { map.removeLayer(layer); } catch(e) {}
+        }
+      });
+    }
+  }
 
   function getCostEstimate(): number {
-  return vehicleType === 'fuel' ? fuelCostEstimate : evCostEstimate;
-}
+    return vehicleType === 'fuel' ? fuelCostEstimate : evCostEstimate;
+  }
 
-function getCostLabel(): string {
-  return vehicleType === 'fuel' ? 'ค่าน้ำมัน' : 'ค่าไฟฟ้า';
-}
+  function getCostLabel(): string {
+    return vehicleType === 'fuel' ? 'ค่าน้ำมัน' : 'ค่าไฟฟ้า';
+  }
 
-function getCostIcon(): string {
-  return vehicleType === 'fuel' ? '⛽' : '🔋';
-}
+  function getCostIcon(): string {
+    return vehicleType === 'fuel' ? '⛽' : '🔋';
+  }
 
-function getVehicleIcon(): string {
-  return vehicleType === 'fuel' ? '🚗' : '🚙';
-}
-function clearChargingStations() {
-  chargingStations = [];
-  chargingStationMarkers.forEach(m => {
-    try { map.removeLayer(m); } catch(e) {}
-  });
-  chargingStationMarkers = [];
-  routeChargingStops = [];
-  showNotification('ล้างสถานีชาร์จแล้ว', 'success');
-}
+  function getVehicleIcon(): string {
+    return vehicleType === 'fuel' ? '🚗' : '🚙';
+  }
 
-function toggleVehicleType() {
-  vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
-  localStorage.setItem('vehicleType', vehicleType);
-  showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
-}
-async function loadNearbyChargingStations() {
-    // ถ้าไม่มี GPS ให้ใช้ตำแหน่ง default (กรุงเทพ) หรือจุดบนแผนที่
+  function clearChargingStations() {
+    chargingStations = [];
+    chargingStationMarkers.forEach(m => {
+      try { map.removeLayer(m); } catch(e) {}
+    });
+    chargingStationMarkers = [];
+    routeChargingStops = [];
+    showNotification('ล้างสถานีชาร์จแล้ว', 'success');
+  }
+
+  function toggleVehicleType() {
+    vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
+    localStorage.setItem('vehicleType', vehicleType);
+    showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
+  }
+
+  async function loadNearbyChargingStations() {
     let searchLat: number;
     let searchLng: number;
-    
+
     if (currentLocation) {
       searchLat = currentLocation.lat;
       searchLng = currentLocation.lng;
     } else if (map) {
-      // ใช้ตำแหน่งกลางแผนที่ปัจจุบัน
       const center = map.getCenter();
       searchLat = center.lat;
       searchLng = center.lng;
       showNotification('ค้นหาสถานีชาร์จบริเวณแผนที่', 'success');
     } else {
-      // Default: กรุงเทพ
       searchLat = 13.7563;
       searchLng = 100.5018;
       showNotification('ค้นหาสถานีชาร์จในกรุงเทพฯ', 'success');
     }
-
     isLoadingStations = true;
     try {
       const res = await fetch(
         `${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20`
       );
       const data = await res.json();
-      
+
       if (data.error) {
         throw new Error(data.error);
       }
-      
+
       chargingStations = data;
       displayChargingStationMarkers();
       showNotification(`พบ ${chargingStations.length} สถานีชาร์จ`, 'success');
@@ -361,19 +1785,16 @@ async function loadNearbyChargingStations() {
 
   function displayChargingStationMarkers() {
     if (!L || !map) return;
-    
-    // ลบ markers เก่า
+
     chargingStationMarkers.forEach(m => {
       try { map.removeLayer(m); } catch(e) {}
     });
     chargingStationMarkers = [];
-
     if (!showChargingStations) return;
-
     chargingStations.forEach((station) => {
       const isRouteStop = routeChargingStops.some(s => s.id === station.id);
       const powerText = station.powerKW ? `${station.powerKW}kW` : '';
-      
+
       const marker = L.marker([station.lat, station.lng], {
         icon: L.divIcon({
           className: 'ev-station-marker',
@@ -388,7 +1809,6 @@ async function loadNearbyChargingStations() {
           iconAnchor: [24, 48]
         })
       }).addTo(map);
-
       marker.bindPopup(`
         <div class="ev-popup">
           <div class="ev-popup-header">
@@ -415,30 +1835,25 @@ async function loadNearbyChargingStations() {
           ` : ''}
         </div>
       `, { className: 'dark-popup ev-dark-popup', maxWidth: 300 });
-
       chargingStationMarkers.push(marker);
     });
   }
 
-  // คำนวณเส้นทางสำหรับรถ EV พร้อมสถานีชาร์จ
   async function optimizeEVRoute() {
     if (allDeliveryPoints.length < 1) {
       showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error');
       return;
     }
-
     isOptimizing = true;
     try {
       const startPoint = await getCurrentLocationAsStart();
       const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
-      
-      // สร้าง waypoints
+
       const waypoints = [
         { lat: startPoint.lat, lng: startPoint.lng },
         ...sortedPoints.map((p: any) => ({ lat: p.lat, lng: p.lng }))
       ];
 
-      // เรียก EV optimized route API
       const res = await fetch(`${API_URL}/route/ev-optimized`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -450,14 +1865,11 @@ async function loadNearbyChargingStations() {
           minChargeAtArrival: 15
         })
       });
-
       const data = await res.json();
-
       if (data.error) {
         throw new Error(data.error);
       }
 
-      // อัพเดทข้อมูลเส้นทาง
       optimizedRoute = {
         route: { geometry: data.route.geometry },
         total_distance: data.route.distance,
@@ -467,18 +1879,14 @@ async function loadNearbyChargingStations() {
           ...sortedPoints
         ]
       };
-
       remainingDistance = data.route.distance;
       remainingTime = data.route.duration;
 
-      // อัพเดทข้อมูล EV
       evBatteryAfterTrip = data.battery.estimatedChargeAtArrival;
-      
-      // เก็บสถานีชาร์จที่ต้องแวะ
+
       routeChargingStops = data.chargingStops || [];
-      
+
       if (routeChargingStops.length > 0) {
-        // เพิ่มสถานีชาร์จเข้า chargingStations เพื่อแสดงบนแผนที่
         const existingIds = new Set(chargingStations.map(s => s.id));
         for (const stop of routeChargingStops) {
           if (!existingIds.has(stop.id)) {
@@ -486,11 +1894,9 @@ async function loadNearbyChargingStations() {
           }
         }
       }
-
       displayOptimizedRoute();
       displayChargingStationMarkers();
-      
-      // แสดงข้อความสรุป
+
       if (data.battery.needsCharging && routeChargingStops.length > 0) {
         showNotification(
           `⚡ ต้องแวะชาร์จ ${routeChargingStops.length} จุด! แบตจะเหลือ ${data.battery.estimatedChargeAtArrival.toFixed(0)}%`,
@@ -505,33 +1911,29 @@ async function loadNearbyChargingStations() {
       } else {
         showNotification('คำนวณเส้นทาง EV สำเร็จ', 'success');
       }
-
       activeTab = 'route';
-
     } catch (err: any) {
       console.error('EV Route error:', err);
       showNotification(err.message || 'คำนวณเส้นทางไม่สำเร็จ', 'error');
-      
-      // Fallback เป็นเส้นทางปกติ
+
       await optimizeRoute();
     } finally {
       isOptimizing = false;
     }
   }
 
-  // Toggle แสดง/ซ่อนสถานีชาร์จ
   function toggleChargingStations() {
     showChargingStations = !showChargingStations;
     displayChargingStationMarkers();
   }
 
-  // ไปยังสถานีชาร์จที่เลือก
   function navigateToChargingStation(station: ChargingStation) {
     if (map) {
       map.flyTo([station.lat, station.lng], 16, { duration: 0.8 });
     }
     selectedChargingStation = station;
   }
+
   async function smartOptimizeRoute() {
     if (vehicleType === 'ev') {
       await optimizeEVRoute();
@@ -540,676 +1942,242 @@ async function loadNearbyChargingStations() {
     }
   }
 
-function getEVBatteryColor(): string {
-  if (evCurrentCharge > 50) return '#00ff88';
-  if (evCurrentCharge > 20) return '#ffa502';
-  return '#ff6b6b';
-}
-
-function isEVRangeSufficient(): boolean {
-  return evRemainingRange >= (remainingDistance / 1000);
-}
-
-function saveVehicleSettings() {
-  localStorage.setItem('vehicleType', vehicleType);
-  localStorage.setItem('evCurrentCharge', String(evCurrentCharge));
-  showNotification('บันทึกการตั้งค่ารถสำเร็จ', 'success');
-}
-  async function loadCustomerOrders() {
-    if (!currentUser?.id) return;
-    try {
-      const res = await fetch(`${API_URL}/driver/customer-orders?driver_id=${currentUser.id}`);
-      const data = await res.json();
-      if (!data.error && Array.isArray(data)) { customerOrders = data; displayCustomerMarkers(); }
-    } catch (err) { console.error('Error loading customer orders:', err); }
+  function getEVBatteryColor(): string {
+    if (evCurrentCharge > 50) return '#00ff88';
+    if (evCurrentCharge > 20) return '#ffa502';
+    return '#ff6b6b';
   }
 
-  function displayCustomerMarkers() {
-    if (!L || !map) return;
-    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
-    customerMarkers = [];
-    if (!showCustomerOrders || isNavigating) return;
-    
-    customerOrders.filter(o => o.status !== 'completed').forEach((order) => {
-      const marker = L.marker([order.lat, order.lng], {
-        icon: L.divIcon({
-          className: 'customer-order-marker',
-          html: `<div class="customer-pin ${order.status === 'accepted' ? 'accepted' : 'pending'}"><span>🛒</span><div class="customer-info"><div class="customer-name">${order.customer_name}</div><div class="order-status">${order.status === 'accepted' ? '✅ รับแล้ว' : '⏳ รอรับงาน'}</div></div></div>`,
-          iconSize: [120, 60], iconAnchor: [60, 30]
-        })
+  function isEVRangeSufficient(): boolean {
+    return evRemainingRange >= (remainingDistance / 1000);
+  }
+
+  function saveVehicleSettings() {
+    localStorage.setItem('vehicleType', vehicleType);
+    localStorage.setItem('evCurrentCharge', String(evCurrentCharge));
+    showNotification('บันทึกการตั้งค่ารถสำเร็จ', 'success');
+  }
+
+  function getTrafficColor(): string {
+    switch (trafficStatus) {
+      case 'heavy': return '#ff6b6b';
+      case 'moderate': return '#ffa502';
+      default: return '#00ff88';
+    }
+  }
+
+  function getTrafficLabel(): string {
+    switch (trafficStatus) {
+      case 'heavy': return 'รถติดมาก';
+      case 'moderate': return 'รถปานกลาง';
+      default: return 'รถไม่ติด';
+    }
+  }
+
+  function updateTrafficStatus() {
+    const hour = new Date().getHours();
+    if ((hour >= 7 && hour <= 9) || (hour >= 16 && hour <= 19)) {
+      trafficStatus = 'heavy';
+    } else if ((hour >= 11 && hour <= 13)) {
+      trafficStatus = 'moderate';
+    } else {
+      trafficStatus = 'smooth';
+    }
+  }
+
+  function getWeatherIcon(): string {
+    switch (weather.condition) {
+      case 'sunny': return '☀️';
+      case 'cloudy': return '☁️';
+      case 'rainy': return '🌧️';
+      default: return '🌤️';
+    }
+  }
+
+  function getBatteryColor(): string {
+    if (batteryLevel > 50) return '#00ff88';
+    if (batteryLevel > 20) return '#ffa502';
+    return '#ff6b6b';
+  }
+
+  function getPriorityGradient(p: number) {
+    const colorMap: Record<number, { bg: string; glow: string }> = {
+      1: { bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%)', glow: '#ff6b6b' },
+      2: { bg: 'linear-gradient(135deg, #ffa502 0%, #ff7f00 100%)', glow: '#ffa502' },
+      3: { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', glow: '#667eea' },
+      4: { bg: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', glow: '#a855f7' },
+      5: { bg: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)', glow: '#6b7280' }
+    };
+    return colorMap[p] || colorMap[3];
+  }
+
+  function getPriorityLabel(p: number) {
+    const labels: Record<number, string> = {
+      1: 'ด่วนมาก',
+      2: 'ด่วน',
+      3: 'ปกติ',
+      4: 'ไม่เร่ง',
+      5: 'ยืดหยุ่น'
+    };
+    return labels[p] || 'ปกติ';
+  }
+
+  function showNotification(msg: string, type: 'success' | 'error' | 'warning') {
+    notification = { show: true, message: msg, type };
+    setTimeout(() => notification.show = false, 3500);
+  }
+
+  function focusOnPoint(lat: number, lng: number) {
+    if (map) {
+      map.flyTo([lat, lng], 16, { duration: 0.8 });
+    }
+  }
+
+
+  function updateStatistics() {
+    totalDeliveriesToday = deliveryPoints.length + getSuccessCount();
+    if (navigationStartTime) {
+      elapsedTime = Date.now() - navigationStartTime.getTime();
+    }
+    if (completedDeliveries > 0) {
+      averageDeliveryTime = elapsedTime / completedDeliveries;
+    }
+  }
+
+  async function updateBatteryStatus() {
+    if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
+      try {
+        const battery: any = await (navigator as any).getBattery();
+        batteryLevel = Math.round(battery.level * 100);
+        isCharging = battery.charging;
+      } catch (e) {}
+    }
+  }
+
+  function exportRouteData() {
+    const data = {
+      driver: driverInfo,
+      route: optimizedRoute,
+      points: deliveryPoints,
+      statistics: {
+        totalPoints: totalDeliveriesToday,
+        completed: completedDeliveries,
+        totalDistance: optimizedRoute?.total_distance,
+        totalTime: optimizedRoute?.total_time
+      },
+      exportedAt: new Date().toISOString()
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `route-export-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showNotification('ส่งออกข้อมูลสำเร็จ', 'success');
+  }
+
+  function emergencyStop() {
+    if (confirm('ต้องการหยุดฉุกเฉินใช่หรือไม่?')) {
+      stopNavigation();
+      addAlert('emergency', 'หยุดฉุกเฉิน!');
+      speak('หยุดฉุกเฉิน');
+      showNotification('หยุดฉุกเฉินแล้ว', 'error');
+    }
+  }
+
+  function initExtraFeatures() {
+    updateTrafficStatus();
+    updateBatteryStatus();
+    setInterval(() => {
+      updateTrafficStatus();
+      updateStatistics();
+      updateETA();
+      updateFuelEstimate();
+    }, 60000);
+    setInterval(updateBatteryStatus, 300000);
+  }
+
+  function cancelAddForm() {
+    showAddForm = false;
+    if (clickMarker) clickMarker.remove();
+    newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
+  }
+
+  function getSuccessCount(): number {
+    return deliveryHistory.filter(d => d.status === 'success').length;
+  }
+
+  function getSkippedCount(): number {
+    return deliveryHistory.filter(d => d.status === 'skipped').length;
+  }
+
+  function getRemainingPointsCount(): number {
+    if (!optimizedRoute) return allDeliveryPoints.length;
+    return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length;
+  }
+
+  function formatHistoryTime(date: Date): string {
+    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  onMount(async () => {
+    const userStr = localStorage.getItem('user');
+    if (!userStr) { goto('/'); return; }
+    currentUser = JSON.parse(userStr);
+    const savedVehicleType = localStorage.getItem('vehicleType');
+    if (savedVehicleType === 'ev' || savedVehicleType === 'fuel') {
+      vehicleType = savedVehicleType;
+    }
+    const savedEVCharge = localStorage.getItem('evCurrentCharge');
+    if (savedEVCharge) evCurrentCharge = parseFloat(savedEVCharge);
+    const urlId = $page.params.id;
+    if (Number(urlId) !== currentUser.id) { goto(`/Home/${currentUser.id}`); return; }
+
+    try {
+      L = await import('leaflet');
+      await import('leaflet/dist/leaflet.css');
+      map = L.map('map', { zoomControl: false }).setView([13.7465, 100.5348], 12);
+      L.control.zoom({ position: 'bottomright' }).addTo(map);
+      const tileLayer = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png', {
+        attribution: '© CartoDB © OSM', maxZoom: 19,
+        errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
       }).addTo(map);
+      tileLayer.on('tileerror', (error: any) => { setTimeout(() => { error.tile.src = error.tile.src; }, 1000); });
+      setTimeout(() => map.invalidateSize(), 100);
+      setTimeout(() => map.invalidateSize(), 500);
+      setTimeout(() => map.invalidateSize(), 1000);
 
-      marker.bindPopup(`<div class="customer-popup"><div class="popup-header customer-header"><span class="popup-icon">${order.customer_avatar || '👤'}</span><span class="popup-status">${order.status === 'accepted' ? 'รับงานแล้ว' : 'รอรับงาน'}</span></div><div class="popup-content"><h4>${order.customer_name}</h4><p class="popup-phone">📞 ${order.customer_phone || '-'}</p><p class="popup-address">📍 ${order.address}</p>${order.notes ? `<p class="popup-notes">📝 ${order.notes}</p>` : ''}</div></div>`, { className: 'dark-popup customer-dark-popup' });
-      customerMarkers.push(marker);
-    });
-  }
-
-  async function acceptCustomerOrder(orderId: number) {
-    try {
-      const res = await fetch(`${API_URL}/driver/accept-order/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      showNotification('รับงานสำเร็จ!', 'success');
-      await loadCustomerOrders();
-    } catch (err: any) { showNotification(err.message || 'รับงานไม่สำเร็จ', 'error'); }
-  }
-
-  async function completeCustomerOrder(orderId: number, orderName?: string) {
-    try {
-      const res = await fetch(`${API_URL}/driver/complete-order/${orderId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ driver_id: currentUser.id }) });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      
-      const order = customerOrders.find(o => o.id === orderId);
-      if (order) {
-        const record: DeliveryRecord = { id: data.id || Date.now(), pointId: `customer-${orderId}`, pointName: `🛒 ${order.customer_name}`, address: order.address || '', status: 'success', timestamp: new Date(), lat: order.lat, lng: order.lng, isCustomerOrder: true };
-        deliveryHistory = [...deliveryHistory, record];
-        completedDeliveries++;
-      }
-      showNotification('เสร็จงานสำเร็จ!', 'success');
-      speak(`ส่ง ${orderName || order?.customer_name || 'ลูกค้า'} สำเร็จ`);
-      await loadCustomerOrders();
-    } catch (err: any) { showNotification(err.message || 'บันทึกไม่สำเร็จ', 'error'); }
-  }
-
-  async function loadTodayStats() {
-    try {
-      const params = new URLSearchParams();
-      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-      if (currentUser?.role) params.append('role', currentUser.role);
-      const res = await fetch(`${API_URL}/deliveries/stats/today?${params.toString()}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.error) return;
-      completedDeliveries = data.completed || 0;
-      totalDeliveriesToday = (data.completed || 0) + (data.pending || 0);
-    } catch (err) { console.error('Load stats error:', err); }
-  }
-
-  async function loadDeliveryHistory() {
-    try {
-      const params = new URLSearchParams();
-      params.append('limit', '50');
-      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-      if (currentUser?.role) params.append('role', currentUser.role);
-      const res = await fetch(`${API_URL}/deliveries/history?${params.toString()}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.error || !Array.isArray(data)) return;
-      deliveryHistory = data.map((d: any) => ({ id: d.id, pointId: d.point_id, pointName: d.point_name, address: d.address || '', status: d.status === 'completed' ? 'success' : 'skipped', timestamp: new Date(d.delivered_at), lat: parseFloat(d.lat), lng: parseFloat(d.lng) }));
-    } catch (err) { console.error('Load history error:', err); }
-  }
-
-  async function loadDeliveryPoints() {
-    try {
-      const params = new URLSearchParams();
-      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-      if (currentUser?.role) params.append('role', currentUser.role);
-      const res = await fetch(`${API_URL}/points?${params.toString()}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      deliveryPoints = Array.isArray(data) ? data.map((p: any) => ({ id: Number(p.id), name: p.name || 'ไม่มีชื่อ', address: p.address || 'ไม่มีที่อยู่', lat: Number(p.lat), lng: Number(p.lng), priority: Number(p.priority || 3), driver_id: p.driver_id ? Number(p.driver_id) : null, driver_name: p.driver_name || null })) : [];
-      displayPoints();
-    } catch (err) { console.error(err); showNotification('โหลดข้อมูลไม่สำเร็จ', 'error'); }
-  }
-
-  function displayPoints() {
-    if (!L || !map) return;
-    markers.forEach(m => m.remove());
-    markers = [];
-    deliveryPoints.forEach((point, i) => {
-      const colors = getPriorityGradient(point.priority);
-      const marker = L.marker([point.lat, point.lng], {
-        icon: L.divIcon({ className: 'custom-marker', html: `<div class="marker-pin" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};"><span>${i + 1}</span></div>`, iconSize: [44, 44], iconAnchor: [22, 22] })
-      }).addTo(map);
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${colors.bg}"><span class="popup-number">${i + 1}</span><span class="popup-priority">P${point.priority}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
-      markers.push(marker);
-    });
-  }
-
-  async function addDeliveryPoint() {
-    if (!newPoint.name.trim() || !newPoint.address.trim()) { showNotification('กรุณากรอกข้อมูลให้ครบ', 'error'); return; }
-    try {
-      const payload = { ...newPoint, driver_id: currentUser?.id || null };
-      const res = await fetch(`${API_URL}/points`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      const data = await res.json();
-      if (data.error || !res.ok) throw new Error(data.error || 'เพิ่มไม่สำเร็จ');
-      await loadDeliveryPoints();
-      if (data.id) { activePointId = data.id; setTimeout(() => { const element = document.getElementById(`point-${data.id}`); if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 100); }
-      showAddForm = false;
-      if (clickMarker) clickMarker.remove();
-      newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
-      showNotification('เพิ่มจุดส่งสำเร็จ', 'success');
-    } catch (err) { showNotification('เพิ่มไม่สำเร็จ', 'error'); }
-  }
-
-  async function deletePoint(id: number, name: string) {
-    if (!confirm(`ลบ "${name}" ใช่หรือไม่?`)) return;
-    try {
-      const params = new URLSearchParams();
-      if (currentUser?.id) params.append('driver_id', String(currentUser.id));
-      if (currentUser?.role) params.append('role', currentUser.role);
-      const res = await fetch(`${API_URL}/points/${id}?${params.toString()}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (data.error || !res.ok) throw new Error(data.error || 'ลบไม่สำเร็จ');
-      await loadDeliveryPoints();
-      if (optimizedRoute) clearRoute();
-      showNotification('ลบสำเร็จ', 'success');
-    } catch (err) { showNotification('ลบไม่สำเร็จ', 'error'); }
-  }
-
-  // ==================== OSRM via Backend Proxy ====================
-  async function callOSRMProxy(waypoints: string): Promise<any> {
-    const res = await fetch(`${API_URL}/route/osrm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ waypoints })
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    if (data.code !== 'Ok' || !data.routes?.[0]) throw new Error('ไม่สามารถคำนวณเส้นทางได้');
-    return data;
-  }
-
-  async function optimizeRoute() {
-    if (allDeliveryPoints.length < 1) { showNotification('ต้องมีอย่างน้อย 1 จุดส่ง', 'error'); return; }
-    isOptimizing = true;
-    try {
-      const startPoint = await getCurrentLocationAsStart();
-      const sortedPoints = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
-      const waypoints = [`${startPoint.lng},${startPoint.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
-      
-      // ใช้ Backend Proxy
-      const data = await callOSRMProxy(waypoints);
-      
-      optimizedRoute = { route: { geometry: data.routes[0].geometry }, total_distance: data.routes[0].distance, total_time: data.routes[0].duration, optimized_order: [{ ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้นของคุณ', id: -1 }, ...sortedPoints] };
-      remainingDistance = data.routes[0].distance;
-      remainingTime = data.routes[0].duration;
-      displayOptimizedRoute();
-      activeTab = 'route';
-      showNotification('คำนวณเส้นทางสำเร็จ', 'success');
-    } catch (err: any) { showNotification(err.message || 'คำนวณไม่สำเร็จ', 'error'); }
-    finally { isOptimizing = false; }
-  }
-
-  function sortByNearestNeighbor(start: { lat: number; lng: number }, points: any[]): any[] {
-    const sorted: any[] = [];
-    const remaining = [...points];
-    let currentPos = start;
-    while (remaining.length > 0) {
-      let nearestIndex = 0;
-      let nearestScore = Infinity;
-      remaining.forEach((point, index) => {
-        const dist = getDistance(currentPos.lat, currentPos.lng, point.lat, point.lng);
-        const priorityBonus = point.isCustomerOrder ? 500 : (point.priority ? (6 - point.priority) * 100 : 0);
-        const score = dist - priorityBonus;
-        if (score < nearestScore) { nearestScore = score; nearestIndex = index; }
+      window.addEventListener('resize', () => { setTimeout(() => map.invalidateSize(), 100); });
+      map.on('click', (e: any) => {
+        if (isNavigating) return;
+        if (clickMarker) clickMarker.remove();
+        newPoint.lat = parseFloat(e.latlng.lat.toFixed(6));
+        newPoint.lng = parseFloat(e.latlng.lng.toFixed(6));
+        clickMarker = L.marker([e.latlng.lat, e.latlng.lng], {
+          icon: L.divIcon({ className: 'click-marker', html: `<div class="pulse-marker"></div>`, iconSize: [48, 48], iconAnchor: [24, 24] })
+        }).addTo(map);
+        showAddForm = true;
       });
-      const nearest = remaining.splice(nearestIndex, 1)[0];
-      sorted.push(nearest);
-      currentPos = { lat: nearest.lat, lng: nearest.lng };
+      await loadDeliveryPoints();
+      await loadCustomerOrders();
+      await loadTodayStats();
+      await loadDeliveryHistory();
+      initExtraFeatures();
+      initVoiceNavigation();
+      setInterval(() => { loadCustomerOrders(); }, 30000);
+    } catch (error) {
+      console.error('Map init error:', error);
+      showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
     }
-    return sorted;
-  }
+  });
 
-  function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) { reject(new Error('เบราว์เซอร์ไม่รองรับ GPS')); return; }
-      navigator.geolocation.getCurrentPosition(
-        (position) => { resolve({ lat: position.coords.latitude, lng: position.coords.longitude }); },
-        (error) => {
-          let msg = 'ไม่สามารถระบุตำแหน่งได้';
-          if (error.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
-          if (error.code === 2) msg = 'ไม่สามารถระบุตำแหน่งได้';
-          if (error.code === 3) msg = 'หมดเวลาการระบุตำแหน่ง';
-          reject(new Error(msg));
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      );
-    });
-  }
-
-  function displayOptimizedRoute() {
-    if (!L || !map || !optimizedRoute?.route?.geometry) return;
-    if (routeLayer) routeLayer.remove();
-    if (glowLayer) glowLayer.remove();
-
-    const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-    glowLayer = L.polyline(coords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-    routeLayer = L.polyline(coords, { color: '#00ff88', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-    map.fitBounds(routeLayer.getBounds(), { padding: [80, 80] });
-
-    markers.forEach(m => m.remove());
-    markers = [];
-    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
-    customerMarkers = [];
-
-    optimizedRoute.optimized_order.forEach((point: any, i: number) => {
-      const isStart = i === 0;
-      const isCurrentLocation = isStart && point.id === -1;
-      const isCustomer = point.isCustomerOrder;
-      
-      let gradient, glow;
-      if (isCurrentLocation) { gradient = 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'; glow = '#3b82f6'; }
-      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
-      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
-
-      const marker = L.marker([point.lat, point.lng], {
-        icon: L.divIcon({ className: 'route-marker', html: `<div class="marker-pin route-pin ${isCurrentLocation ? 'current-loc' : ''} ${isCustomer ? 'customer-route' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span>${isCurrentLocation ? '<div class="marker-label">คุณอยู่ที่นี่</div>' : ''}</div>`, iconSize: [52, 52], iconAnchor: [26, 26] })
-      }).addTo(map);
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${gradient}"><span class="popup-number">${isCurrentLocation ? '📍' : isCustomer ? '🛒' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : isCustomer ? 'ลูกค้า' : 'จุดส่ง'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p>${point.customer_phone ? `<p>📞 ${point.customer_phone}</p>` : ''}</div></div>`, { className: 'dark-popup' });
-      markers.push(marker);
-    });
-  }
-
-  function clearRoute() {
-    if (routeLayer) { try { map.removeLayer(routeLayer); } catch (e) {} routeLayer = null; }
-    if (glowLayer) { try { map.removeLayer(glowLayer); } catch (e) {} glowLayer = null; }
-    if (markers && markers.length > 0) { for (let i = 0; i < markers.length; i++) { try { if (markers[i]) map.removeLayer(markers[i]); } catch (e) {} } markers = []; }
-    if (clickMarker) { try { map.removeLayer(clickMarker); } catch (e) {} clickMarker = null; }
-    optimizedRoute = null;
-    arrivedPoints = [];
-    currentTargetIndex = 0;
-    displayPoints();
-    displayCustomerMarkers();
-  }
-
-  function startNavigation() {
-    if (!optimizedRoute) return;
-    if (!navigator.geolocation) { showNotification('เบราว์เซอร์ไม่รองรับ GPS', 'error'); return; }
-    isNavigating = true;
-    currentTargetIndex = 1;
-    arrivedPoints = [0];
-    traveledPath = [];
-    remainingDistance = optimizedRoute.total_distance;
-    remainingTime = optimizedRoute.total_time;
-    navigationStartTime = new Date();
-    elapsedTime = 0;
-    speedHistory = [];
-    maxSpeed = 0;
-    customerMarkers.forEach(m => { try { map.removeLayer(m); } catch(e) {} });
-    customerMarkers = [];
-    watchId = navigator.geolocation.watchPosition(updatePosition, handleGeoError, { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 });
-    navigationInterval = setInterval(() => { updateNavigationInfo(); updateETA(); updateFuelEstimate(); updateStatistics(); }, 1000);
-    speak('เริ่มนำทาง');
-    addAlert('navigation', 'เริ่มการนำทาง');
-    showNotification('เริ่มนำทางแล้ว', 'success');
-    updateNavigationMarkers();
-    const firstTarget = optimizedRoute.optimized_order[currentTargetIndex];
-    if (firstTarget) { map.setView([firstTarget.lat, firstTarget.lng], 16); }
-    setTimeout(() => { map.invalidateSize(); }, 100);
-  }
-
-  function stopNavigation() {
-    isNavigating = false;
-    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-    if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
-    if (currentLocationMarker) { currentLocationMarker.remove(); currentLocationMarker = null; }
-    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
-    if (remainingRouteLayer) { remainingRouteLayer.remove(); remainingRouteLayer = null; }
-    if (remainingGlowLayer) { remainingGlowLayer.remove(); remainingGlowLayer = null; }
-    currentLocation = null;
-    currentTargetIndex = 0;
-    arrivedPoints = [];
-    traveledPath = [];
-    if (optimizedRoute) { displayOptimizedRoute(); }
-    displayCustomerMarkers();
-    showNotification('หยุดนำทางแล้ว', 'success');
-  }
-
-  function updatePosition(position: GeolocationPosition) {
-    const { latitude, longitude, accuracy: acc } = position.coords;
-    currentLocation = { lat: latitude, lng: longitude };
-    accuracy = acc;
-    checkGPSAccuracy(acc);
-    calculateSpeed(latitude, longitude);
-    updateCurrentLocationMarker();
-    updateRouteDisplayForNavigation();
-    updateNavigationMarkers();
-    checkArrival();
-    if (isNavigating) { map.setView([latitude, longitude], map.getZoom(), { animate: true }); }
-  }
-
-  function checkGPSAccuracy(acc: number) {
-    const now = Date.now();
-    if (acc < 10) { gpsStatus = 'excellent'; }
-    else if (acc < 30) { gpsStatus = 'good'; }
-    else if (acc < 50) { gpsStatus = 'weak'; }
-    else { gpsStatus = 'poor'; }
-    if (acc > 50 && now - lastGPSWarningTime > 30000) {
-      lastGPSWarningTime = now;
-      showNotification(`⚠️ สัญญาณ GPS อ่อน (${Math.round(acc)}m) - ลองออกไปที่โล่ง`, 'warning');
-      if (voiceEnabled) { speak('สัญญาณ GPS อ่อน กรุณาออกไปที่โล่ง'); }
-    }
-  }
-
-  function getGPSStatusColor(): string {
-    switch (gpsStatus) { case 'excellent': return '#00ff88'; case 'good': return '#ffd93d'; case 'weak': return '#ffa502'; case 'poor': return '#ff6b6b'; default: return '#71717a'; }
-  }
-  function getGPSStatusText(): string {
-    switch (gpsStatus) { case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`; case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`; case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`; case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`; default: return 'กำลังค้นหา GPS...'; }
-  }
-  function getGPSIcon(): string {
-    switch (gpsStatus) { case 'excellent': return '📡'; case 'good': return '📶'; case 'weak': return '📉'; case 'poor': return '⚠️'; default: return '🔍'; }
-  }
-
-  function handleGeoError(error: GeolocationPositionError) {
-    console.error('GPS Error:', error);
-    let msg = 'ไม่สามารถระบุตำแหน่งได้';
-    if (error.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
-    if (error.code === 2) msg = 'ไม่สามารถระบุตำแหน่งได้';
-    if (error.code === 3) msg = 'หมดเวลาการระบุตำแหน่ง';
-    showNotification(msg, 'error');
-  }
-
-  function updateCurrentLocationMarker() {
-    if (!L || !map || !currentLocation) return;
-    if (currentLocationMarker) { currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]); }
-    else {
-      currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
-        icon: L.divIcon({ className: 'current-location-marker', html: `<div class="location-accuracy" style="width: ${Math.min(accuracy * 2, 100)}px; height: ${Math.min(accuracy * 2, 100)}px;"></div><div class="location-dot"><div class="location-dot-inner"></div></div>`, iconSize: [24, 24], iconAnchor: [12, 12] }),
-        zIndexOffset: 1000
-      }).addTo(map);
-    }
-  }
-
-  function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
-    let minDist = Infinity;
-    let nearestIndex = 0;
-    coords.forEach((coord, index) => { const dist = getDistance(location.lat, location.lng, coord[0], coord[1]); if (dist < minDist) { minDist = dist; nearestIndex = index; } });
-    return nearestIndex;
-  }
-
-  function updateNavigationMarkers() {
-    if (!L || !map || !optimizedRoute) return;
-    if (markers && markers.length > 0) { markers.forEach((m) => { try { if (m && map) map.removeLayer(m); } catch(e) {} }); }
-    markers = [];
-    optimizedRoute.optimized_order.forEach((point: any, i: number) => {
-      const isArrived = arrivedPoints.includes(i);
-      const isCurrent = i === currentTargetIndex;
-      const isStart = point.id === -1;
-      const isCustomer = point.isCustomerOrder;
-      let gradient, glow;
-      if (isArrived) { gradient = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'; glow = '#6b7280'; }
-      else if (isCurrent) { gradient = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'; glow = '#f59e0b'; }
-      else if (isStart) { gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)'; glow = '#00ff88'; }
-      else if (isCustomer) { gradient = 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)'; glow = '#8b5cf6'; }
-      else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
-      const displayNumber = isStart ? '📍' : (isArrived ? '✓' : (isCustomer ? '🛒' : i));
-      const marker = L.marker([point.lat, point.lng], {
-        icon: L.divIcon({ className: 'route-marker', html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${displayNumber}</span>${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}</div>`, iconSize: [52, 52], iconAnchor: [26, 26] })
-      }).addTo(map);
-      markers.push(marker);
-    });
-  }
-
-  function checkArrival() {
-    if (!currentLocation || !optimizedRoute) return;
-    const target = optimizedRoute.optimized_order[currentTargetIndex];
-    if (!target) return;
-    const dist = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
-    distanceToNextPoint = dist;
-  }
-
-  function updateNavigationInfo() {
-    if (!currentLocation || !optimizedRoute) return;
-    const routeCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-    const nearestIndex = findNearestPointIndex(routeCoords, currentLocation);
-    let totalRemaining = 0;
-    for (let i = nearestIndex; i < routeCoords.length - 1; i++) { totalRemaining += getDistance(routeCoords[i][0], routeCoords[i][1], routeCoords[i + 1][0], routeCoords[i + 1][1]); }
-    remainingDistance = totalRemaining;
-    remainingTime = (totalRemaining / 1000) / 30 * 3600;
-    if (currentTargetIndex < optimizedRoute.optimized_order.length) {
-      const target = optimizedRoute.optimized_order[currentTargetIndex];
-      distanceToNextPoint = getDistance(currentLocation.lat, currentLocation.lng, target.lat, target.lng);
-    }
-  }
-
-  function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
-
-  function formatDistance(meters: number): string { if (meters < 1000) { return `${Math.round(meters)} ม.`; } return `${(meters / 1000).toFixed(1)} กม.`; }
-  function formatTime(seconds: number): string { const mins = Math.round(seconds / 60); if (mins < 60) { return `${mins} นาที`; } const hours = Math.floor(mins / 60); const remainMins = mins % 60; return `${hours} ชม. ${remainMins} นาที`; }
-  function centerOnCurrentLocation() { if (currentLocation && map) { map.setView([currentLocation.lat, currentLocation.lng], 17, { animate: true }); } }
-
-  async function skipToNextPoint() {
-    if (isProcessingDelivery) { showNotification('กำลังประมวลผล...', 'warning'); return; }
-    if (!optimizedRoute?.optimized_order) { showNotification('ไม่มีเส้นทาง', 'error'); return; }
-    const skippedPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
-    if (!skippedPoint) { showNotification('ไม่พบจุดที่จะข้าม', 'error'); return; }
-    if (skippedPoint.isCustomerOrder) { showNotification('ไม่สามารถข้ามงานลูกค้าได้ - กรุณาส่งให้เสร็จ', 'error'); return; }
-    isProcessingDelivery = true;
-    try {
-      const payload: any = { point_id: Number(skippedPoint.id), point_name: String(skippedPoint.name), address: skippedPoint.address || '', lat: Number(skippedPoint.lat), lng: Number(skippedPoint.lng), notes: `ข้ามจุดส่ง - ${new Date().toLocaleString('th-TH')}` };
-      if (currentRouteId) payload.route_id = Number(currentRouteId);
-      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
-      if (currentUser?.name) payload.driver_name = String(currentUser.name);
-      const res = await fetch(`${API_URL}/deliveries/skip`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!res.ok) { const errorText = await res.text(); throw new Error(`HTTP ${res.status}: ${errorText}`); }
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      const record: DeliveryRecord = { id: data.history_id || Date.now(), pointId: skippedPoint.id, pointName: skippedPoint.name, address: skippedPoint.address || '', status: 'skipped', timestamp: new Date(), lat: skippedPoint.lat, lng: skippedPoint.lng };
-      deliveryHistory = [...deliveryHistory, record];
-      const pointIdToRemove = skippedPoint.id;
-      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
-      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
-      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
-      if (remainingDeliveryPoints.length === 0) {
-        showNotification('🎉 ครบทุกจุดแล้ว!', 'success'); speak('ครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
-        await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
-      } else {
-        showNotification(`⏭️ ข้าม ${skippedPoint.name}`, 'warning'); addAlert('navigation', `ข้ามจุด: ${skippedPoint.name}`);
-        currentTargetIndex = 1; arrivedPoints = [0];
-        if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
-      }
-    } catch (err: any) { showNotification(`ข้ามไม่สำเร็จ: ${err.message}`, 'error'); }
-    finally { isProcessingDelivery = false; }
-  }
- 
-  async function markDeliverySuccess() {
-    if (isProcessingDelivery) { showNotification('กำลังประมวลผล...', 'warning'); return; }
-    if (!optimizedRoute?.optimized_order) { showNotification('ไม่มีเส้นทาง', 'error'); return; }
-    const deliveredPoint = optimizedRoute.optimized_order.find((p: any) => p.id !== -1);
-    if (!deliveredPoint) { showNotification('ไม่พบจุดส่ง', 'error'); return; }
-    isProcessingDelivery = true;
-    try {
-      if (deliveredPoint.isCustomerOrder) {
-        await completeCustomerOrder(deliveredPoint.orderId, deliveredPoint.name);
-        const pointIdToRemove = deliveredPoint.id;
-        optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
-        const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
-        if (remainingDeliveryPoints.length === 0) {
-          showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success'); speak('ส่งครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
-          await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
-        } else {
-          addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
-          currentTargetIndex = 1; arrivedPoints = [0];
-          if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
-        }
-        isProcessingDelivery = false; return;
-      }
-      const payload: any = { point_id: Number(deliveredPoint.id), point_name: String(deliveredPoint.name), address: deliveredPoint.address || '', lat: Number(deliveredPoint.lat), lng: Number(deliveredPoint.lng), notes: `ส่งสำเร็จ - ${new Date().toLocaleString('th-TH')}` };
-      if (currentRouteId) payload.route_id = Number(currentRouteId);
-      if (currentUser?.id) payload.driver_id = Number(currentUser.id);
-      if (currentUser?.name) payload.driver_name = String(currentUser.name);
-      const res = await fetch(`${API_URL}/deliveries/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!res.ok) { const errorText = await res.text(); throw new Error(`HTTP ${res.status}: ${errorText}`); }
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      const record: DeliveryRecord = { id: data.history_id || Date.now(), pointId: deliveredPoint.id, pointName: deliveredPoint.name, address: deliveredPoint.address || '', status: 'success', timestamp: new Date(), lat: deliveredPoint.lat, lng: deliveredPoint.lng };
-      deliveryHistory = [...deliveryHistory, record];
-      completedDeliveries++;
-      const pointIdToRemove = deliveredPoint.id;
-      optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
-      deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
-      const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
-      if (remainingDeliveryPoints.length === 0) {
-        showNotification('🎉 ส่งครบทุกจุดแล้ว!', 'success'); speak('ส่งครบทุกจุดแล้ว'); stopNavigation(); clearAllMarkersAndLayers(); optimizedRoute = null;
-        await loadDeliveryPoints(); await loadCustomerOrders(); await loadTodayStats();
-      } else {
-        showNotification(`✅ ส่ง ${deliveredPoint.name} สำเร็จ`, 'success'); speak(`ส่ง ${deliveredPoint.name} สำเร็จ`); addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
-        currentTargetIndex = 1; arrivedPoints = [0];
-        if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
-      }
-    } catch (err: any) { showNotification(`บันทึกไม่สำเร็จ: ${err.message}`, 'error'); }
-    finally { isProcessingDelivery = false; }
-  }
-
-  function clearAllMarkersAndLayers() {
-    if (markers && markers.length > 0) { markers.forEach((m) => { try { if (m && map) map.removeLayer(m); } catch(e) {} }); markers = []; }
-    if (routeLayer && map) { try { map.removeLayer(routeLayer); } catch(e) {} routeLayer = null; }
-    if (glowLayer && map) { try { map.removeLayer(glowLayer); } catch(e) {} glowLayer = null; }
-    if (remainingRouteLayer && map) { try { map.removeLayer(remainingRouteLayer); } catch(e) {} remainingRouteLayer = null; }
-    if (remainingGlowLayer && map) { try { map.removeLayer(remainingGlowLayer); } catch(e) {} remainingGlowLayer = null; }
-    if (traveledLayer && map) { try { map.removeLayer(traveledLayer); } catch(e) {} traveledLayer = null; }
-    if (clickMarker && map) { try { map.removeLayer(clickMarker); } catch(e) {} clickMarker = null; }
-    if (map && L) { map.eachLayer((layer: any) => { if (layer instanceof L.Marker && layer !== currentLocationMarker) { try { map.removeLayer(layer); } catch(e) {} } }); }
-  }
-
-  async function recalculateRouteFromCurrentPosition() {
-    if (!currentLocation || !optimizedRoute) return;
-    try {
-      const remainingPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
-      if (remainingPoints.length === 0) { showNotification('ส่งครบทุกจุดแล้ว!', 'success'); stopNavigation(); clearAllMarkersAndLayers(); return; }
-      const sortedPoints = sortByNearestNeighbor(currentLocation, remainingPoints);
-      const waypoints = [`${currentLocation.lng},${currentLocation.lat}`, ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)].join(';');
-      
-      // ใช้ Backend Proxy
-      const data = await callOSRMProxy(waypoints);
-      
-      optimizedRoute = { route: { geometry: data.routes[0].geometry }, total_distance: data.routes[0].distance, total_time: data.routes[0].duration, optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints] };
-      remainingDistance = data.routes[0].distance;
-      remainingTime = data.routes[0].duration;
-      currentTargetIndex = 1;
-      arrivedPoints = [0];
-      clearAllRouteLayers();
-      updateRouteDisplayForNavigation();
-      updateNavigationMarkers();
-      const nextTarget = optimizedRoute.optimized_order[currentTargetIndex];
-      if (nextTarget) { map.setView([nextTarget.lat, nextTarget.lng], 15, { animate: true }); }
-    } catch (err) {
-      console.error('Error recalculating route:', err);
-      currentTargetIndex = 1; arrivedPoints = [0];
-      clearAllRouteLayers(); updateRouteDisplayForNavigation(); updateNavigationMarkers();
-    }
-  }
-
-  function formatHistoryTime(date: Date): string { return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }); }
-  function getSuccessCount(): number { return deliveryHistory.filter(d => d.status === 'success').length; }
-  function getSkippedCount(): number { return deliveryHistory.filter(d => d.status === 'skipped').length; }
-  function getRemainingPointsCount(): number { if (!optimizedRoute) return allDeliveryPoints.length; return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length; }
-
-  function updateRouteDisplayForNavigation() {
-    if (!L || !map || !optimizedRoute?.route?.geometry) return;
-    const fullRouteCoords: [number, number][] = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-    const currentTarget = optimizedRoute.optimized_order[currentTargetIndex];
-    if (!currentTarget) return;
-    let startIndex = 0;
-    if (currentLocation) { let minStartDist = Infinity; fullRouteCoords.forEach((coord, idx) => { const dist = getDistance(currentLocation.lat, currentLocation.lng, coord[0], coord[1]); if (dist < minStartDist) { minStartDist = dist; startIndex = idx; } }); }
-    clearAllRouteLayers();
-    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
-    if (startIndex > 0) { const traveledCoords = fullRouteCoords.slice(0, startIndex + 1); traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: 5, opacity: 0.6, lineCap: 'round', lineJoin: 'round' }).addTo(map); }
-    const remainingCoords = fullRouteCoords.slice(startIndex);
-    if (remainingCoords.length > 1) {
-      remainingGlowLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 12, opacity: 0.3, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-      remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: 5, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-    }
-    let totalRemaining = 0;
-    for (let i = startIndex; i < fullRouteCoords.length - 1; i++) { totalRemaining += getDistance(fullRouteCoords[i][0], fullRouteCoords[i][1], fullRouteCoords[i + 1][0], fullRouteCoords[i + 1][1]); }
-    remainingDistance = totalRemaining;
-    remainingTime = (totalRemaining / 1000) / 30 * 3600;
-  }
-
-  function clearAllRouteLayers() {
-    if (remainingRouteLayer && map.hasLayer(remainingRouteLayer)) { map.removeLayer(remainingRouteLayer); } remainingRouteLayer = null;
-    if (remainingGlowLayer && map.hasLayer(remainingGlowLayer)) { map.removeLayer(remainingGlowLayer); } remainingGlowLayer = null;
-    if (routeLayer && map.hasLayer(routeLayer)) { map.removeLayer(routeLayer); } routeLayer = null;
-    if (glowLayer && map.hasLayer(glowLayer)) { map.removeLayer(glowLayer); } glowLayer = null;
-  }
-
-  function calculateSpeed(newLat: number, newLng: number) {
-    const now = Date.now();
-    if (lastPosition) { const distance = getDistance(lastPosition.lat, lastPosition.lng, newLat, newLng); const timeDiff = (now - lastPosition.time) / 1000; if (timeDiff > 0) { currentSpeed = (distance / timeDiff) * 3.6; if (currentSpeed > maxSpeed) maxSpeed = currentSpeed; speedHistory.push(currentSpeed); if (speedHistory.length > 60) speedHistory.shift(); } }
-    lastPosition = { lat: newLat, lng: newLng, time: now };
-  }
-
-  function updateETA() {
-    if (remainingDistance > 0 && currentSpeed > 5) { const hoursRemaining = (remainingDistance / 1000) / currentSpeed; const msRemaining = hoursRemaining * 3600 * 1000; estimatedArrivalTime = new Date(Date.now() + msRemaining); }
-    else if (remainingDistance > 0) { const hoursRemaining = (remainingDistance / 1000) / 30; const msRemaining = hoursRemaining * 3600 * 1000; estimatedArrivalTime = new Date(Date.now() + msRemaining); }
-  }
-  function formatETA(date: Date | null): string { if (!date) return '--:--'; return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }); }
-
-  function updateFuelEstimate() { const distanceKm = remainingDistance / 1000; fuelConsumption = distanceKm / KM_PER_LITER; fuelCostEstimate = fuelConsumption * FUEL_PRICE_PER_LITER; }
-
-  // Voice Navigation
-  let thaiVoice: SpeechSynthesisVoice | null = null;
-  function loadThaiVoice() { if (typeof window === 'undefined' || !('speechSynthesis' in window)) return; const voices = speechSynthesis.getVoices(); thaiVoice = voices.find(v => v.lang === 'th-TH') || voices.find(v => v.lang.startsWith('th')) || voices.find(v => v.name.toLowerCase().includes('thai')) || null; }
-  function speak(text: string) { if (!voiceEnabled || typeof window === 'undefined') return; if (!('speechSynthesis' in window)) return; speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(text); utterance.lang = 'th-TH'; utterance.rate = 0.9; utterance.pitch = 1; utterance.volume = 1; if (thaiVoice) { utterance.voice = thaiVoice; } else { loadThaiVoice(); if (thaiVoice) { utterance.voice = thaiVoice; } } speechSynthesis.speak(utterance); }
-  if (typeof window !== 'undefined' && 'speechSynthesis' in window) { loadThaiVoice(); speechSynthesis.onvoiceschanged = () => { loadThaiVoice(); }; }
-  function toggleVoice() { voiceEnabled = !voiceEnabled; showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success'); }
-
-  // Traffic Status
-  function updateTrafficStatus() { const hour = new Date().getHours(); if ((hour >= 7 && hour <= 9) || (hour >= 16 && hour <= 19)) { trafficStatus = 'heavy'; } else if ((hour >= 11 && hour <= 13)) { trafficStatus = 'moderate'; } else { trafficStatus = 'smooth'; } }
-  function getTrafficColor(): string { switch (trafficStatus) { case 'heavy': return '#ff6b6b'; case 'moderate': return '#ffa502'; default: return '#00ff88'; } }
-  function getTrafficLabel(): string { switch (trafficStatus) { case 'heavy': return 'รถติดมาก'; case 'moderate': return 'รถปานกลาง'; default: return 'รถไม่ติด'; } }
-
-  // Filter & Sort
-  function sortPoints() { deliveryPoints = [...deliveryPoints].sort((a, b) => { switch (sortBy) { case 'priority': return a.priority - b.priority; case 'name': return a.name.localeCompare(b.name, 'th'); case 'distance': if (!currentLocation) return 0; const distA = getDistance(currentLocation.lat, currentLocation.lng, a.lat, a.lng); const distB = getDistance(currentLocation.lat, currentLocation.lng, b.lat, b.lng); return distA - distB; default: return 0; } }); displayPoints(); }
-  function filterByPriority(priority: number | null) { filterPriority = priority; }
-
-  // Multi-select
-  function toggleMultiSelect() { isMultiSelectMode = !isMultiSelectMode; if (!isMultiSelectMode) { selectedPoints = []; } }
-  function togglePointSelection(id: number) { if (selectedPoints.includes(id)) { selectedPoints = selectedPoints.filter(p => p !== id); } else { selectedPoints = [...selectedPoints, id]; } }
-  function selectAllPoints() { selectedPoints = deliveryPoints.map(p => p.id); }
-  function deselectAllPoints() { selectedPoints = []; }
-  async function deleteSelectedPoints() { if (selectedPoints.length === 0) return; if (!confirm(`ลบ ${selectedPoints.length} จุดที่เลือก?`)) return; for (const id of selectedPoints) { try { await fetch(`${API_URL}/points/${id}`, { method: 'DELETE' }); } catch (err) { console.error('Delete error:', err); } } await loadDeliveryPoints(); selectedPoints = []; isMultiSelectMode = false; showNotification(`ลบจุดสำเร็จ`, 'success'); }
-
-  // Break time
-  function startBreak() { isOnBreak = true; breakStartTime = new Date(); showNotification('เริ่มพักเบรค', 'success'); addAlert('break', 'คนขับเริ่มพักเบรค'); }
-  function endBreak() { if (breakStartTime) { const breakDuration = Date.now() - breakStartTime.getTime(); totalBreakTime += breakDuration; } isOnBreak = false; breakStartTime = null; showNotification('สิ้นสุดพักเบรค', 'success'); addAlert('break', 'คนขับกลับมาทำงาน'); }
-  function formatBreakTime(): string { let totalMs = totalBreakTime; if (isOnBreak && breakStartTime) { totalMs += Date.now() - breakStartTime.getTime(); } const mins = Math.floor(totalMs / 60000); return `${mins} นาที`; }
-
-  // Alerts
-  function addAlert(type: string, message: string) { const alert = { id: Date.now(), type, message, time: new Date() }; alerts = [alert, ...alerts].slice(0, 50); }
-  function clearAlerts() { alerts = []; }
-  function dismissAlert(id: number) { alerts = alerts.filter(a => a.id !== id); }
-
-  // Statistics
-  function updateStatistics() { totalDeliveriesToday = deliveryPoints.length + getSuccessCount(); if (navigationStartTime) { elapsedTime = Date.now() - navigationStartTime.getTime(); } if (completedDeliveries > 0) { averageDeliveryTime = elapsedTime / completedDeliveries; } }
-
-  // Weather
-  function getWeatherIcon(): string { switch (weather.condition) { case 'sunny': return '☀️'; case 'cloudy': return '☁️'; case 'rainy': return '🌧️'; default: return '🌤️'; } }
-
-  // Battery
-  async function updateBatteryStatus() { if (typeof navigator !== 'undefined' && 'getBattery' in navigator) { try { const battery: any = await (navigator as any).getBattery(); batteryLevel = Math.round(battery.level * 100); isCharging = battery.charging; } catch (e) {} } }
-  function getBatteryColor(): string { if (batteryLevel > 50) return '#00ff88'; if (batteryLevel > 20) return '#ffa502'; return '#ff6b6b'; }
-
-  // Export
-  function exportRouteData() { const data = { driver: driverInfo, route: optimizedRoute, points: deliveryPoints, statistics: { totalPoints: totalDeliveriesToday, completed: completedDeliveries, totalDistance: optimizedRoute?.total_distance, totalTime: optimizedRoute?.total_time }, exportedAt: new Date().toISOString() }; const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `route-export-${new Date().toISOString().split('T')[0]}.json`; a.click(); URL.revokeObjectURL(url); showNotification('ส่งออกข้อมูลสำเร็จ', 'success'); }
-
-  // Emergency
-  function emergencyStop() { if (confirm('ต้องการหยุดฉุกเฉินใช่หรือไม่?')) { stopNavigation(); addAlert('emergency', 'หยุดฉุกเฉิน!'); speak('หยุดฉุกเฉิน'); showNotification('หยุดฉุกเฉินแล้ว', 'error'); } }
-
-  // Init
-  function initExtraFeatures() { updateTrafficStatus(); updateBatteryStatus(); setInterval(() => { updateTrafficStatus(); updateStatistics(); updateETA(); updateFuelEstimate(); }, 60000); setInterval(updateBatteryStatus, 300000); }
-
-  function cancelAddForm() { showAddForm = false; if (clickMarker) clickMarker.remove(); newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 }; }
-
-  function getPriorityGradient(p: number) { const colorMap: Record<number, { bg: string; glow: string }> = { 1: { bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%)', glow: '#ff6b6b' }, 2: { bg: 'linear-gradient(135deg, #ffa502 0%, #ff7f00 100%)', glow: '#ffa502' }, 3: { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', glow: '#667eea' }, 4: { bg: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', glow: '#a855f7' }, 5: { bg: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)', glow: '#6b7280' } }; return colorMap[p] || colorMap[3]; }
-  function getPriorityLabel(p: number) { const labels: Record<number, string> = { 1: 'ด่วนมาก', 2: 'ด่วน', 3: 'ปกติ', 4: 'ไม่เร่ง', 5: 'ยืดหยุ่น' }; return labels[p] || 'ปกติ'; }
-  function showNotification(msg: string, type: 'success' | 'error' | 'warning') { notification = { show: true, message: msg, type }; setTimeout(() => notification.show = false, 3500); }
-  function focusOnPoint(lat: number, lng: number) { if (map) { map.flyTo([lat, lng], 16, { duration: 0.8 }); } }
+  onDestroy(() => { stopNavigation(); });
 </script>
 
 <svelte:head>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <title>คนขับรถ | Route Optimization</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </svelte:head>
@@ -1602,17 +2570,6 @@ function saveVehicleSettings() {
                 <div class="coord-input"><label>Latitude</label><input type="text" value={newPoint.lat} readonly /></div>
                 <div class="coord-input"><label>Longitude</label><input type="text" value={newPoint.lng} readonly /></div>
               </div>
-              <div class="form-group">
-                <label>ระดับความสำคัญ</label>
-                <div class="priority-selector">
-                  {#each [1,2,3,4,5] as p}
-                    {@const colors = getPriorityGradient(p)}
-                    <button type="button" class="priority-btn" class:active={newPoint.priority === p} style="--btn-bg: {colors.bg}; --btn-glow: {colors.glow}" on:click={() => newPoint.priority = p}>
-                      <span class="priority-num">{p}</span><span class="priority-label">{getPriorityLabel(p)}</span>
-                    </button>
-                  {/each}
-                </div>
-              </div>
               <div class="form-actions">
                 <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>บันทึก</button>
                 <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
@@ -1713,38 +2670,106 @@ function saveVehicleSettings() {
           </div>
         {:else if activeTab === 'route' && optimizedRoute}
           <div class="route-summary">
-            <div class="summary-header"><h3>สรุปเส้นทาง</h3><span class="route-badge">เส้นทางที่ดีที่สุด</span></div>
-            <div class="summary-stats">
-              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg></div><div class="stat-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</div><div class="stat-label">กิโลเมตร</div></div>
-              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div class="stat-value">{Math.round(optimizedRoute.total_time / 60)}</div><div class="stat-label">นาที</div></div>
-              <div class="stat-card"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg></div><div class="stat-value">{optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length}</div><div class="stat-label">จุดส่ง</div></div>
-              <div class="stat-card fuel"><div class="stat-icon">⛽</div><div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div><div class="stat-label">ค่าน้ำมัน</div></div>
-            </div>
-            {#if vehicleType === 'ev'}
-            <div class="ev-route-info" class:warning={!isEVRangeSufficient()}>
-              <div class="ev-info-row">
-                <span>🔋 แบตปัจจุบัน:</span>
-                <strong style="color: {getEVBatteryColor()}">{evCurrentCharge}%</strong>
+              <div class="summary-header">
+                <h3>สรุปเส้นทาง</h3>
+                <span class="route-badge" class:ev-badge={vehicleType === 'ev'}>
+                  {vehicleType === 'ev' ? '⚡ เส้นทาง EV' : '⛽ เส้นทางที่ดีที่สุด'}
+                </span>
               </div>
-              <div class="ev-info-row">
-                <span>📍 ระยะทางเหลือ:</span>
-                <strong>{evRemainingRange.toFixed(0)} กม.</strong>
+              
+              <div class="summary-stats">
+                <!-- ระยะทาง -->
+                <div class="stat-card">
+                  <div class="stat-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+                    </svg>
+                  </div>
+                  <div class="stat-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</div>
+                  <div class="stat-label">กิโลเมตร</div>
+                </div>
+                
+                <!-- เวลา -->
+                <div class="stat-card">
+                  <div class="stat-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                    </svg>
+                  </div>
+                  <div class="stat-value">{Math.round(optimizedRoute.total_time / 60)}</div>
+                  <div class="stat-label">นาที</div>
+                </div>
+                
+                <!-- จุดส่ง -->
+                <div class="stat-card">
+                  <div class="stat-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                      <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                  </div>
+                  <div class="stat-value">{optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length}</div>
+                  <div class="stat-label">จุดส่ง</div>
+                </div>
+                
+                <!-- ค่าใช้จ่าย - แสดงตามประเภทรถ -->
+                {#if vehicleType === 'fuel'}
+                  <div class="stat-card fuel">
+                    <div class="stat-icon">⛽</div>
+                    <div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * FUEL_PRICE_PER_LITER)}</div>
+                    <div class="stat-label">ค่าน้ำมัน</div>
+                  </div>
+                {:else}
+                  <div class="stat-card ev">
+                    <div class="stat-icon">⚡</div>
+                    <div class="stat-value">฿{Math.round(evCostEstimate)}</div>
+                    <div class="stat-label">ค่าไฟฟ้า</div>
+                  </div>
+                {/if}
               </div>
-              <div class="ev-info-row">
-                <span>⚡ ใช้พลังงาน:</span>
-                <strong>{evEnergyConsumption.toFixed(1)} kWh</strong>
-              </div>
-              <div class="ev-info-row">
-                <span>🔋 แบตหลังจบ:</span>
-                <strong style="color: {evBatteryAfterTrip > 20 ? '#00ff88' : '#ff6b6b'}">{evBatteryAfterTrip.toFixed(0)}%</strong>
-              </div>
-              {#if !isEVRangeSufficient()}
-                <div class="ev-warning-banner">
-                  ⚠️ ระยะทางมากกว่าแบตเตอรี่ที่เหลือ! อาจต้องชาร์จระหว่างทาง
+
+              <!-- ข้อมูลเพิ่มเติมตามประเภทรถ -->
+              {#if vehicleType === 'fuel'}
+                <div class="fuel-route-info">
+                  <div class="fuel-info-row">
+                    <span>⛽ ใช้น้ำมัน:</span>
+                    <strong>{((optimizedRoute.total_distance / 1000) / KM_PER_LITER).toFixed(1)} ลิตร</strong>
+                  </div>
+                  <div class="fuel-info-row">
+                    <span>💰 ราคาน้ำมัน:</span>
+                    <strong>{FUEL_PRICE_PER_LITER} ฿/ลิตร</strong>
+                  </div>
+                  <div class="fuel-info-row">
+                    <span>📊 อัตราสิ้นเปลือง:</span>
+                    <strong>{KM_PER_LITER} กม./ลิตร</strong>
+                  </div>
+                </div>
+              {:else}
+                <div class="ev-route-info" class:warning={!isEVRangeSufficient()}>
+                  <div class="ev-info-row">
+                    <span>🔋 แบตปัจจุบัน:</span>
+                    <strong style="color: {getEVBatteryColor()}">{evCurrentCharge}%</strong>
+                  </div>
+                  <div class="ev-info-row">
+                    <span>📍 ระยะวิ่งได้:</span>
+                    <strong>{evRemainingRange.toFixed(0)} กม.</strong>
+                  </div>
+                  <div class="ev-info-row">
+                    <span>⚡ ใช้พลังงาน:</span>
+                    <strong>{evEnergyConsumption.toFixed(1)} kWh</strong>
+                  </div>
+                  <div class="ev-info-row">
+                    <span>🔋 แบตหลังจบ:</span>
+                    <strong style="color: {evBatteryAfterTrip > 20 ? '#00ff88' : '#ff6b6b'}">{evBatteryAfterTrip.toFixed(0)}%</strong>
+                  </div>
+                  {#if !isEVRangeSufficient()}
+                    <div class="ev-warning-banner">
+                      ⚠️ ระยะทางมากกว่าแบตเตอรี่ที่เหลือ! อาจต้องชาร์จระหว่างทาง
+                    </div>
+                  {/if}
                 </div>
               {/if}
-            </div>
-          {/if}
+              
             <div class="route-timeline">
               <h4>ลำดับการเดินทาง</h4>
               {#each optimizedRoute.optimized_order as point, i}
@@ -1773,21 +2798,6 @@ function saveVehicleSettings() {
         <div class="map-stat"><span class="map-stat-value">{getSuccessCount()}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
         <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
       </div>
-      {#if !optimizedRoute}
-        <div class="map-filters glass-card">
-          <select bind:value={sortBy} on:change={sortPoints}>
-            <option value="priority">เรียงตามความสำคัญ</option>
-            <option value="distance">เรียงตามระยะทาง</option>
-            <option value="name">เรียงตามชื่อ</option>
-          </select>
-          <div class="filter-chips">
-            <button class="filter-chip" class:active={filterPriority === null} on:click={() => filterByPriority(null)}>ทั้งหมด</button>
-            <button class="filter-chip priority-1" class:active={filterPriority === 1} on:click={() => filterByPriority(1)}>ด่วนมาก</button>
-            <button class="filter-chip priority-2" class:active={filterPriority === 2} on:click={() => filterByPriority(2)}>ด่วน</button>
-            <button class="filter-chip priority-3" class:active={filterPriority === 3} on:click={() => filterByPriority(3)}>ปกติ</button>
-          </div>
-        </div>
-      {/if}
     {/if}
     {#if !isNavigating && !optimizedRoute}
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดส่ง</span></div>
@@ -1861,7 +2871,7 @@ function saveVehicleSettings() {
     .btn-ev-clear:hover {
       background: rgba(255, 107, 107, 0.25);
     }
-  .add-form { margin: 0 16px 16px; padding: 16px; animation: slideIn 0.3s ease; }
+  .add-form { margin: 0 16px 300px; padding: 16px; animation: slideIn 0.3s ease; }
   .add-form-overlay { display: contents; }
   @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   .form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -3243,5 +4253,53 @@ function saveVehicleSettings() {
   .amount-value {
     font-size: 18px;
   }
+}
+.fuel-route-info {
+  padding: 16px;
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  border-radius: 12px;
+  margin-bottom: 20px;
+}
+
+.fuel-info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.fuel-info-row:last-child {
+  border-bottom: none;
+}
+
+.fuel-info-row span {
+  color: #a1a1aa;
+}
+
+.fuel-info-row strong {
+  color: #00ff88;
+}
+
+/* EV Badge */
+.route-badge.ev-badge {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: #3b82f6;
+}
+
+/* Stat Card EV */
+.stat-card.ev {
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.stat-card.ev .stat-icon {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+}
+
+.stat-card.ev .stat-value {
+  color: #3b82f6;
 }
 </style>

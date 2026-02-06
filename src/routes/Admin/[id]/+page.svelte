@@ -220,7 +220,7 @@
 </script>
 
 <svelte:head>
-  <title>Admin Dashboard | Route Optimization</title>
+  <title>แอดมิน | Route Optimization</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </svelte:head>
@@ -241,6 +241,7 @@
   <!-- Assign Modal -->
   {#if showAssignModal}
     <div class="modal-overlay" on:click={() => showAssignModal = false} on:keypress={() => {}} role="button" tabindex="-1">
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="modal glass-card" on:click|stopPropagation on:keypress={() => {}} role="dialog">
         <div class="modal-header">
           <div class="modal-icon">📦</div>
@@ -274,21 +275,7 @@
 
   <!-- Sidebar -->
   <aside class="sidebar glass-sidebar">
-    <div class="sidebar-header">
-      <div class="logo">
-        <div class="logo-icon">
-          <span>🚀</span>
-        </div>
-        {#if !sidebarCollapsed}
-          <div class="logo-text">
-            <h1>RouteFlow</h1>
-            <span>Admin Panel</span>
-          </div>
-        {/if}
-      </div>
-      
-    </div>
-
+    <!-- svelte-ignore element_implicitly_closed -->
     <div class="user-card glass-card">
       <div class="user-avatar">
         <span>{currentUser?.avatar || '👤'}</span>
@@ -2244,9 +2231,25 @@
 
   /* Drivers Grid Modern */
   .drivers-grid-modern {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(700px, 1fr));
-    gap: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 24px;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  padding-bottom: 24px;
+  }
+
+  .drivers-grid-modern::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .drivers-grid-modern::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+  }
+
+  .drivers-grid-modern::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
   }
 
   .driver-card-modern {
