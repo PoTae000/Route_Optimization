@@ -12,7 +12,9 @@
       "Bash(git checkout:*)",
       "Bash(grep:*)",
       "Bash(dir /b \"C:\\\\Users\\\\MaFuckingGod\\\\Desktop\")",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(curl:*)",
+      "Bash(npx bun run:*)"
     ]
   }
 }
