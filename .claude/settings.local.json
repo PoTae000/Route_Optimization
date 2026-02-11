@@ -14,7 +14,9 @@
       "Bash(dir /b \"C:\\\\Users\\\\MaFuckingGod\\\\Desktop\")",
       "Bash(dir:*)",
       "Bash(curl:*)",
-      "Bash(npx bun run:*)"
+      "Bash(npx bun run:*)",
+      "Bash(find:*)",
+      "Bash(del \"C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\test_encode.mjs\")"
     ]
   }
 }

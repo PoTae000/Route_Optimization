@@ -1,10 +1,49 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, beforeNavigate } from '$app/navigation';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
 
   let currentUser: any = null;
+
+  const ENC_TABLE = ['K@','$V','Rj','X!','B~','Qm','@S','H$','Dz','L!','N~','We','F@','$T','J!','~M'];
+  const DEC_TABLE: Record<string, string> = {};
+  ENC_TABLE.forEach((p, i) => { DEC_TABLE[p.toLowerCase()] = i.toString(16); });
+  const FK = [0xD3ADB33F,0xCAF3BAB3,0xF00DDECA,0xACEDFACE,0x8BADF00D,0xDEFEC8ED,0xC0FFEE42,0xBAAAAAAD];
+  function _fr(h: number, k: number): number {
+    let v = Math.imul(h ^ k, 0x45d9f3b) >>> 0;
+    v = (v ^ (v >>> 16)) >>> 0;
+    v = Math.imul(v, 0x119de1f3) >>> 0;
+    return (v ^ (v >>> 16)) >>> 0;
+  }
+  function encodeUserId(id: number): string {
+    let L = (id ^ 0xA5C3E1F7) >>> 0;
+    let R = (Math.imul(id, 0x01000193) ^ 0x3C5A7B9D) >>> 0;
+    for (const k of FK) { const f = _fr(R, k); [L, R] = [R, (L ^ f) >>> 0]; }
+    const hex = L.toString(16).padStart(8, '0') + R.toString(16).padStart(8, '0');
+    let s = '';
+    for (const c of hex) s += ENC_TABLE[parseInt(c, 16)];
+    return s;
+  }
+  function decodeUserId(hash: string): number {
+    try {
+      if (!hash || hash.length !== 32) return -1;
+      let hex = '';
+      for (let i = 0; i < 32; i += 2) {
+        const d = DEC_TABLE[hash.substring(i, i + 2).toLowerCase()];
+        if (d === undefined) return -1;
+        hex += d;
+      }
+      let L = parseInt(hex.substring(0, 8), 16) >>> 0;
+      let R = parseInt(hex.substring(8, 16), 16) >>> 0;
+      if (isNaN(L) || isNaN(R)) return -1;
+      for (let i = FK.length - 1; i >= 0; i--) { const f = _fr(L, FK[i]); [L, R] = [(R ^ f) >>> 0, L]; }
+      const id = (L ^ 0xA5C3E1F7) >>> 0;
+      const chk = (Math.imul(id, 0x01000193) ^ 0x3C5A7B9D) >>> 0;
+      if (R !== chk) return -1;
+      return id > 0 ? id : -1;
+    } catch { return -1; }
+  }
 
   function logout() {
     // Stop navigation if running
@@ -32,8 +71,33 @@
     }
     // Destroy map
     if (map) { try { map.off(); map.remove(); } catch(e) {} map = null; }
-    // Clear all user-specific localStorage keys
+    // Clear all user-dependent in-memory state (prevent data leaking to next user)
+    deliveryPoints = [];
+    optimizedRoute = null;
+    routeAlternatives = [];
+    markers = [];
+    chargingStations = [];
+    chargingStationMarkers = [];
+    deliveryHistory = [];
+    alongRoutePOIs = [];
+    poiMarkers = [];
+    oilPriceData = null;
+    currentLocation = null;
+    currentLocationMarker = null;
+    accuracyCircle = null;
+    headingMarkerElement = null;
+    cachedRouteCoords = [];
+    lastRouteIndex = 0;
+    currentSpeed = 0;
+    maxSpeed = 0;
+    lastPosition = null;
+    avgSpeedSamples = [];
+    turnInstructions = [];
+    alerts = [];
+    selectedPoints = [];
+    // Clear all user-specific localStorage keys (BEFORE nulling currentUser)
     const userId = currentUser?.id || 'guest';
+    currentUser = null;
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -116,6 +180,21 @@
   let cachedRouteCoords: [number, number][] = [];
   let lastRouteIndex = 0; // progressive search anchor
   let lastArrivalDist = Infinity; // hysteresis for arrival detection
+  let _navMarkerState = ''; // perf: skip marker rebuild when state unchanged
+  let _lastAppliedRotation = 0; // perf: skip map rotation when < 2deg diff
+  let _navIntervalTick = 0; // perf: stagger heavy funcs in nav interval
+  let _lastCurveRouteIdx = 0; // perf: skip curve detect until moved 50 route pts
+
+  // Smooth animation (Google Maps-like 60fps interpolation)
+  let animFrameId: number | null = null;
+  let animPrevLat = 0, animPrevLng = 0;
+  let animTargetLat = 0, animTargetLng = 0;
+  let animCurrentLat = 0, animCurrentLng = 0;
+  let animPrevHeading = 0, animTargetHeading = 0, animCurrentHeading = 0;
+  let animStartTime = 0;
+  let animDuration = 1000;
+  let animReady = false;
+  let lastGpsTimestamp = 0;
 
   // ETA & Time
   let estimatedArrivalTime: Date | null = null;
@@ -176,12 +255,14 @@
       if (data.status === 'success' && data.response) {
         oilPriceData = data.response;
         oilPriceLastUpdated = new Date();
+        oilPriceFailCount = 0; // Reset on success
         updateCurrentFuelPrice();
         showNotification(`อัปเดตราคาน้ำมันแล้ว (${data.response.date})`, 'success');
       } else {
         throw new Error('Invalid API response');
       }
     } catch (err) {
+      oilPriceFailCount++;
       console.error('Error fetching oil prices:', err);
       showNotification('ไม่สามารถดึงราคาน้ำมันได้ - ใช้ราคาเดิม', 'error');
       currentFuelPrice = 36;
@@ -275,6 +356,7 @@
 
   // Settings panel
   let showSettings = false;
+  let showLogoutConfirm = false;
 
   // Night mode (manual toggle, default dark)
   let nightMode = true;
@@ -350,8 +432,34 @@
     role: currentUser.role || 'user'
   } : { name: 'กำลังโหลด...', id: '-', phone: '-', avatar: '👤', role: 'user' };
 
+  // ==================== PATH PROTECTION ====================
+  // Reactive: URL param เปลี่ยน → เขียน URL กลับเงียบ ๆ (ไม่ remount, แผนที่ไม่พัง)
+  $: if (browser && currentUser?.id && $page.params.id) {
+    if (decodeUserId($page.params.id) !== currentUser.id) {
+      window.history.replaceState(window.history.state, '', `/User/${encodeUserId(currentUser.id)}`);
+    }
+  }
 
+  // beforeNavigate: บล็อก client-side navigation ไป User อื่น
+  beforeNavigate(({ to, cancel }) => {
+    if (!currentUser?.id || !to?.url) return;
+    const pathname = to.url.pathname;
+    if (pathname === '/') return;
+    if (pathname.startsWith('/User/')) {
+      const targetHash = pathname.split('/')[2];
+      if (targetHash && decodeUserId(targetHash) !== currentUser.id) {
+        cancel();
+      }
+    }
+  });
+
+  // perf: alias only (no copy)
   $: filteredPoints = deliveryPoints;
+
+  // perf: pre-compute point distances (avoid Haversine in #each template per GPS update)
+  $: pointDistances = currentLocation
+    ? deliveryPoints.map(p => getDistance(currentLocation.lat, currentLocation.lng, p.lat, p.lng))
+    : [];
 
   $: {
     const distanceKm = remainingDistance / 1000;
@@ -367,8 +475,8 @@
     }
   }
 
-  // 🔄 ลบ customer orders ออก - User page ไม่มี customer system
-  $: allDeliveryPoints = deliveryPoints.map(p => ({ ...p, isCustomerOrder: false }));
+  // perf: direct alias instead of .map(spread) - User page has no customer system
+  $: allDeliveryPoints = deliveryPoints;
 
   let alerts: { id: number; type: string; message: string; time: Date }[] = [];
   let showAlerts = false;
@@ -404,9 +512,29 @@
   let consecutiveOffRouteCount = 0;
   let offRouteRequiredCount = 3;
   let rerouteCount = 0;
+  let isAutoRerouting = false;
   let lastVoiceTime = 0;
   let lastSpokenStepIndex = -1;
   let lastSpokenThreshold = '';
+  let oilPriceFailCount = 0;
+
+  // ==================== PROMISE TIMEOUT UTILITY ====================
+  function withTimeout<T>(promise: Promise<T>, ms: number, label = 'operation'): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      promise.then(
+        (val) => { clearTimeout(timer); resolve(val); },
+        (err) => { clearTimeout(timer); reject(err); }
+      );
+    });
+  }
+
+  // ==================== HTML ESCAPE (XSS Prevention) ====================
+  function escapeHtml(str: string): string {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+
 
   // Turn-by-Turn Navigation
   interface TurnInstruction {
@@ -654,7 +782,7 @@
         }),
         draggable: isDragMode
       }).addTo(map);
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${colors.bg}"><span class="popup-number">${i + 1}</span><span class="popup-priority">P${point.priority}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: ${colors.bg}"></div><div class="popup-header"><div class="popup-badge" style="background: ${colors.bg}">${i + 1}</div><div class="popup-header-text"><h4>${escapeHtml(point.name)}</h4><span class="popup-tag" style="color: ${colors.glow}">P${point.priority}</span></div></div><div class="popup-content"><p>${escapeHtml(point.address)}</p></div></div>`, { className: 'dark-popup', maxWidth: 320 });
       marker.on('dragend', async () => {
         const pos = marker.getLatLng();
         const oldLat = point.lat, oldLng = point.lng;
@@ -795,7 +923,7 @@
         body: JSON.stringify(payload)
       });
       const data = await res.json();
-      if (data.error || !res.ok) throw new Error(data.error || 'เพิ่มไม่สำเร็จ');
+      if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
       await loadDeliveryPoints();
       if (data.id) {
         activePointId = data.id;
@@ -843,6 +971,7 @@
       body: JSON.stringify(payload),
       signal
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     if (data.code !== 'Ok' || !data.routes?.[0]) throw new Error('ไม่สามารถคำนวณเส้นทางได้');
@@ -2100,12 +2229,14 @@
 
   async function autoReroute(): Promise<boolean> {
     if (!currentLocation || !optimizedRoute) return false;
+    if (isAutoRerouting) return false; // Prevent concurrent reroutes
+    isAutoRerouting = true;
     try {
       const remainingPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1 && !arrivedPoints.includes(optimizedRoute.optimized_order.indexOf(p)));
       if (remainingPoints.length === 0) {
         showNotification('ถึงจุดหมายแล้ว!', 'success');
         stopNavigation();
-        return;
+        return false;
       }
       const sortedPoints = sortByNearestNeighbor(currentLocation, remainingPoints);
       // Include custom waypoints if any
@@ -2115,6 +2246,10 @@
         ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
       ].join(';');
       const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: getExcludeOptions() });
+      if (!data.routes?.[0]?.geometry?.coordinates) {
+        showNotification('ข้อมูลเส้นทางไม่ถูกต้อง', 'error');
+        return false;
+      }
       optimizedRoute = {
         route: { geometry: data.routes[0].geometry },
         total_distance: data.routes[0].distance,
@@ -2147,6 +2282,8 @@
       console.error('Auto reroute error:', err);
       showNotification('คำนวณเส้นทางใหม่ไม่สำเร็จ', 'error');
       return false;
+    } finally {
+      isAutoRerouting = false;
     }
   }
 
@@ -2303,7 +2440,10 @@
     try {
       const saved = localStorage.getItem(getUserKey('recentSearches'));
       if (saved) recentSearches = JSON.parse(saved);
-    } catch (e) { recentSearches = []; }
+    } catch (e) {
+      console.warn('Failed to parse recentSearches from localStorage:', e);
+      recentSearches = [];
+    }
   }
 
   function saveRecentSearches() {
@@ -2539,6 +2679,7 @@
   }
 
   async function optimizeRoute() {
+    if (isOptimizing) return; // Prevent concurrent calls
     if (allDeliveryPoints.length < 1) {
       showNotification('ต้องมีอย่างน้อย 1 จุดแวะ', 'error');
       return;
@@ -2746,7 +2887,7 @@
 
       // Step 1: Get initial tour from nearest neighbor
       const nnOrder = sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
-      const initialTour = [0, ...nnOrder.map((p: any) => allDeliveryPoints.findIndex((dp: any) => dp.id === p.id) + 1)];
+      const initialTour = [0, ...nnOrder.map((p: any) => allDeliveryPoints.findIndex((dp: any) => dp.id === p.id) + 1).filter(idx => idx > 0)];
 
       optimizationProgress = 20;
 
@@ -2814,7 +2955,7 @@
 
   // ==================== GPS FUNCTIONS - COPIED EXACTLY FROM ORIGINAL ====================
   function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
-    return new Promise((resolve, reject) => {
+    const inner = new Promise<{ lat: number; lng: number }>((resolve, reject) => {
       if (!navigator.geolocation) {
         reject(new Error('เบราว์เซอร์ไม่รองรับ GPS'));
         return;
@@ -2862,6 +3003,7 @@
         }
       );
     });
+    return withTimeout(inner, 20000, 'GPS location');
   }
 
   function displayOptimizedRoute() {
@@ -2919,7 +3061,7 @@
         })
       }).addTo(map);
       const popupGradient = isCurrentLocation ? 'linear-gradient(135deg, #00ff88 0%, #00c06a 100%)' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-header" style="background: ${popupGradient}"><span class="popup-number">${isCurrentLocation ? '📍' : i}</span><span class="popup-priority">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดแวะ'}</span></div><div class="popup-content"><h4>${point.name}</h4><p>${point.address}</p></div></div>`, { className: 'dark-popup' });
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: ${popupGradient}"></div><div class="popup-header"><div class="popup-badge" style="background: ${popupGradient}">${isCurrentLocation ? '📍' : i}</div><div class="popup-header-text"><h4>${escapeHtml(point.name)}</h4><span class="popup-tag" style="color: ${isCurrentLocation ? '#00ff88' : '#818cf8'}">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดแวะ'}</span></div></div><div class="popup-content"><p>${escapeHtml(point.address)}</p></div></div>`, { className: 'dark-popup' });
       markers.push(marker);
     });
   }
@@ -2989,6 +3131,20 @@
       }
     );
 
+    // Start smooth 60fps animation loop (Google Maps-like)
+    animReady = false;
+    lastGpsTimestamp = 0;
+    animCurrentLat = currentLocation?.lat || 0;
+    animCurrentLng = currentLocation?.lng || 0;
+    animCurrentHeading = 0;
+    if (map) map.getContainer().style.transition = 'none';
+    startSmoothLoop();
+
+    // perf: reset state tracking for fresh nav session
+    _navMarkerState = '';
+    _navIntervalTick = 0;
+    _lastCurveRouteIdx = 0;
+    _lastAppliedRotation = 0;
     currentHeading = null;
     consecutiveOffRouteCount = 0;
     rerouteCount = 0;
@@ -3001,16 +3157,22 @@
     updateNextTurnInfo();
 
     // Detect manual map drag to disable auto-follow (Google Maps behavior)
+    map.off('dragstart'); // prevent duplicate handlers on re-entry
     map.on('dragstart', () => { isMapFollowing = false; });
 
     if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    // perf: stagger functions - not everything needs 2s frequency
     navigationInterval = setInterval(() => {
+      _navIntervalTick++;
       updateNavigationInfo();
       updateETA();
-      updateFuelEstimate();
-      updateStatistics();
-      updateCompass();
-      detectCurvesOnRoute();
+      if (_navIntervalTick % 3 === 0) updateFuelEstimate();  // every 6s
+      if (_navIntervalTick % 5 === 0) updateStatistics();     // every 10s
+      // detectCurvesOnRoute: only when moved 50+ route points
+      if (Math.abs(lastRouteIndex - _lastCurveRouteIdx) >= 50) {
+        _lastCurveRouteIdx = lastRouteIndex;
+        detectCurvesOnRoute();
+      }
       updateCurveWarning();
     }, 2000);
 
@@ -3061,11 +3223,14 @@
       remainingRouteLayer = null;
     }
     // Clean up map drag listener, nav alternatives, and custom waypoints
+    stopSmoothLoop();
     if (map) {
       map.off('dragstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
+      map.getContainer().style.transition = 'transform 0.5s ease-out';
       map.getContainer().style.transform = 'rotate(0deg)';
+      _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
     if (nextTurnMarker && map) { try { map.removeLayer(nextTurnMarker); } catch (e) {} nextTurnMarker = null; }
@@ -3082,6 +3247,7 @@
     nextWaypointId = 1;
     isAddingWaypoint = false;
     isRecalculatingRoute = false;
+    isAutoRerouting = false;
     cachedRouteCoords = [];
     lastRouteIndex = 0;
     avgSpeedSamples = [];
@@ -3102,14 +3268,119 @@
     showNotification('หยุดนำทางแล้ว', 'success');
   }
 
+  // ===== Smooth 60fps interpolation + route prediction (better than Google Maps) =====
+  function startSmoothLoop() {
+    if (animFrameId !== null) return;
+    function tick() {
+      animFrameId = requestAnimationFrame(tick);
+      if (!isNavigating || !animReady) return;
+      const now = performance.now();
+      const elapsed = now - animStartTime;
+      const t = Math.min(elapsed / animDuration, 1);
+      const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
+
+      if (t < 1) {
+        // Phase 1: Smooth interpolation to GPS-snapped target
+        animCurrentLat = animPrevLat + (animTargetLat - animPrevLat) * ease;
+        animCurrentLng = animPrevLng + (animTargetLng - animPrevLng) * ease;
+        animCurrentHeading = lerpAngle(animPrevHeading, animTargetHeading, ease);
+      } else if (currentSpeed > 5 && cachedRouteCoords.length > 1 && lastRouteIndex < cachedRouteCoords.length - 2) {
+        // Phase 2: Predict forward along route using speed (continuous movement)
+        const extraSec = (elapsed - animDuration) / 1000;
+        const maxPredict = Math.min((currentSpeed / 3.6) * extraSec, 100); // max 100m ahead
+        let walked = 0;
+        let idx = lastRouteIndex;
+        let predicted = false;
+        while (idx < cachedRouteCoords.length - 2 && walked < maxPredict) {
+          const dLat = (cachedRouteCoords[idx + 1][0] - cachedRouteCoords[idx][0]) * 111320;
+          const dLng = (cachedRouteCoords[idx + 1][1] - cachedRouteCoords[idx][1]) * 108000;
+          const segLen = Math.sqrt(dLat * dLat + dLng * dLng);
+          if (segLen < 0.1) { idx++; continue; }
+          if (walked + segLen >= maxPredict) {
+            const frac = (maxPredict - walked) / segLen;
+            animCurrentLat = cachedRouteCoords[idx][0] + (cachedRouteCoords[idx + 1][0] - cachedRouteCoords[idx][0]) * frac;
+            animCurrentLng = cachedRouteCoords[idx][1] + (cachedRouteCoords[idx + 1][1] - cachedRouteCoords[idx][1]) * frac;
+            // Heading from route direction
+            const routeHeading = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360;
+            animCurrentHeading = lerpAngle(animCurrentHeading, routeHeading, 0.15);
+            predicted = true;
+            break;
+          }
+          walked += segLen;
+          idx++;
+        }
+        if (!predicted) {
+          animCurrentLat = animTargetLat;
+          animCurrentLng = animTargetLng;
+        }
+      }
+
+      // Move blue dot marker smoothly
+      if (currentLocationMarker) {
+        currentLocationMarker.setLatLng([animCurrentLat, animCurrentLng]);
+      }
+      // Move accuracy circle
+      if (accuracyCircle) {
+        accuracyCircle.setLatLng([animCurrentLat, animCurrentLng]);
+      }
+      // Rotate heading arrow smoothly
+      if (headingMarkerElement) {
+        const arrow = headingMarkerElement.querySelector('.heading-arrow') as HTMLElement;
+        if (arrow) {
+          arrow.style.transform = `rotate(${animCurrentHeading}deg)`;
+          arrow.style.opacity = currentSpeed > 3 ? '1' : '0';
+        }
+      }
+      // Smooth map follow (we handle interpolation - no Leaflet animation)
+      if (isMapFollowing && map) {
+        map.panTo([animCurrentLat, animCurrentLng], { animate: false });
+      }
+      // Rotate map to face heading direction (perf: 2-degree threshold)
+      if (map) {
+        const mapEl = map.getContainer();
+        if (currentSpeed > 5) {
+          const rotDeg = -animCurrentHeading;
+          if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
+            mapEl.style.transform = `rotate(${rotDeg}deg)`;
+            _lastAppliedRotation = rotDeg;
+          }
+        } else if (_lastAppliedRotation !== 0) {
+          mapEl.style.transform = 'rotate(0deg)';
+          _lastAppliedRotation = 0;
+        }
+      }
+    }
+    tick();
+  }
+
+  function stopSmoothLoop() {
+    if (animFrameId !== null) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
+    }
+    animReady = false;
+  }
+
+  function lerpAngle(from: number, to: number, t: number): number {
+    let diff = ((to - from + 540) % 360) - 180;
+    return (from + diff * t + 360) % 360;
+  }
+
   // ⚠️ CRITICAL: updatePosition - ENHANCED WITH SMOOTH TRACKING & HEADING
   function updatePosition(position: GeolocationPosition) {
     const { latitude, longitude, accuracy: acc, heading, speed: gpsSpeed } = position.coords;
     currentLocation = { lat: latitude, lng: longitude, heading, speed: gpsSpeed };
     accuracy = acc;
-    // Update heading from GPS (only if moving and heading is valid)
+    // Update heading from GPS or calculate from movement
     if (heading !== null && heading !== undefined && !isNaN(heading) && gpsSpeed && gpsSpeed > 1) {
       currentHeading = heading;
+    } else if (lastPosition && gpsSpeed && gpsSpeed > 1) {
+      // Calculate heading from consecutive positions (for laptops without compass)
+      const dLat = latitude - lastPosition.lat;
+      const dLng = longitude - lastPosition.lng;
+      if (Math.abs(dLat) > 0.00003 || Math.abs(dLng) > 0.00003) {
+        currentHeading = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360;
+      }
     }
     // อัพเดท GPS status ตามความแม่นยำ
     if (acc <= 10) gpsStatus = 'excellent';
@@ -3132,31 +3403,76 @@
       avgSpeedSamples.push(currentSpeed);
       if (avgSpeedSamples.length > 30) avgSpeedSamples.shift();
     }
+    // Update nearest route index FIRST (fresh for all subsequent functions)
+    if (isNavigating && cachedRouteCoords.length > 0) {
+      findNearestPointIndex(cachedRouteCoords, { lat: latitude, lng: longitude });
+    }
     updateCurrentLocationMarker();
     updateRouteDisplayForNavigation();
     updateNavigationMarkers();
     checkArrival();
-    // Advanced features
     handleOffRouteDetection();
     updateTurnByTurnProgress();
     checkSpeedAlert();
-    // Smooth Google Maps-like map following + heading rotation
-    if (isNavigating && isMapFollowing && map) {
-      const targetZoom = getAutoZoom(currentSpeed);
-      map.panTo([latitude, longitude], { animate: true, duration: 0.5 });
-      // Smooth zoom adjustment based on speed
-      const currentZoom = map.getZoom();
-      if (Math.abs(currentZoom - targetZoom) > 0.5) {
-        map.setZoom(targetZoom, { animate: true });
+    // Set smooth animation targets (60fps loop handles all visuals)
+    if (isNavigating && map) {
+      // Adapt animation speed to GPS update rate
+      const now = performance.now();
+      if (lastGpsTimestamp > 0) {
+        animDuration = Math.min(Math.max(now - lastGpsTimestamp, 500), 2000);
       }
-      // Rotate map container based on heading (Google Maps-like)
-      const mapEl = map.getContainer();
-      if (currentHeading !== null && currentSpeed > 5) {
-        mapEl.style.transition = 'transform 0.8s ease-out';
-        mapEl.style.transform = `rotate(${-currentHeading}deg)`;
-      } else {
-        mapEl.style.transition = 'transform 0.8s ease-out';
-        mapEl.style.transform = 'rotate(0deg)';
+      lastGpsTimestamp = now;
+
+      // Smart route snapping: accuracy-weighted (trust route more when GPS is poor)
+      let snapLat = latitude, snapLng = longitude;
+      if (cachedRouteCoords.length > 1) {
+        const nearIdx = lastRouteIndex;
+        const distToRoute = getDistance(latitude, longitude, cachedRouteCoords[nearIdx][0], cachedRouteCoords[nearIdx][1]);
+        // Snap threshold scales with GPS accuracy (poor GPS = more aggressive snap)
+        const snapThreshold = Math.max(30, Math.min(acc * 1.5, 200));
+        if (distToRoute < snapThreshold && nearIdx < cachedRouteCoords.length - 1) {
+          const [lat1, lng1] = cachedRouteCoords[nearIdx];
+          const [lat2, lng2] = cachedRouteCoords[nearIdx + 1];
+          const dx = lat2 - lat1, dy = lng2 - lng1;
+          const len2 = dx * dx + dy * dy;
+          if (len2 > 0) {
+            const t = Math.max(0, Math.min(1, ((latitude - lat1) * dx + (longitude - lng1) * dy) / len2));
+            const projLat = lat1 + t * dx;
+            const projLng = lng1 + t * dy;
+            // Blend: poor GPS accuracy → snap harder to route
+            const snapWeight = Math.min(acc / 30, 1); // 0 = perfect GPS, 1 = poor GPS
+            snapLat = latitude * (1 - snapWeight) + projLat * snapWeight;
+            snapLng = longitude * (1 - snapWeight) + projLng * snapWeight;
+          }
+        }
+      }
+
+      // Outlier rejection: reject GPS jumps that are impossibly far
+      if (animReady) {
+        const jumpDist = getDistance(animCurrentLat, animCurrentLng, snapLat, snapLng);
+        const timeSec = animDuration / 1000;
+        const maxJump = Math.max((currentSpeed / 3.6) * timeSec * 4, 200); // 4x speed or 200m min
+        if (jumpDist > maxJump && jumpDist > 500) {
+          // GPS jumped impossibly far - extend animation duration to smooth it
+          animDuration = Math.min(animDuration * 2, 3000);
+        }
+      }
+
+      // Set interpolation targets
+      animPrevLat = animReady ? animCurrentLat : snapLat;
+      animPrevLng = animReady ? animCurrentLng : snapLng;
+      animPrevHeading = animReady ? animCurrentHeading : (currentHeading || 0);
+      animTargetLat = snapLat;
+      animTargetLng = snapLng;
+      animTargetHeading = currentHeading !== null ? currentHeading : animPrevHeading;
+      animStartTime = performance.now();
+      animReady = true;
+
+      // Auto-zoom (independent of smooth pan)
+      const targetZoom = getAutoZoom(currentSpeed);
+      const cZoom = map.getZoom();
+      if (Math.abs(cZoom - targetZoom) > 0.5) {
+        map.setZoom(targetZoom, { animate: true });
       }
     }
   }
@@ -3173,19 +3489,30 @@
   // Toggle map follow mode
   function toggleMapFollow() {
     isMapFollowing = !isMapFollowing;
-    if (isMapFollowing && currentLocation) {
-      map.panTo([currentLocation.lat, currentLocation.lng], { animate: true, duration: 0.5 });
+    if (isMapFollowing && map) {
+      if (isNavigating && animReady) {
+        map.panTo([animCurrentLat, animCurrentLng], { animate: true, duration: 0.3 });
+      } else if (currentLocation) {
+        map.panTo([currentLocation.lat, currentLocation.lng], { animate: true, duration: 0.5 });
+      }
     }
   }
 
   function handleGeoError(error: GeolocationPositionError) {
     console.error('GPS Error:', error);
     let msg = 'ไม่สามารถระบุตำแหน่งได้';
-    if (error.code === 1) msg = 'กรุณาอนุญาตการเข้าถึง GPS';
+    if (error.code === 1) {
+      msg = 'กรุณาอนุญาตการเข้าถึง GPS';
+      // Permission denied - stop the navigation watch to prevent repeated errors
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+    }
     if (error.code === 2) msg = 'ไม่สามารถระบุตำแหน่งได้';
     if (error.code === 3) msg = 'หมดเวลาการระบุตำแหน่ง';
     showNotification(msg, 'error');
-    
+
     gpsStatus = 'poor';
   }
 
@@ -3214,7 +3541,6 @@
 
     if (currentLocationMarker) {
       currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
-      // Update heading arrow rotation
       if (headingMarkerElement) {
         const arrow = headingMarkerElement.querySelector('.heading-arrow') as HTMLElement;
         if (arrow) {
@@ -3288,6 +3614,10 @@
 
   function updateNavigationMarkers() {
     if (!L || !map || !optimizedRoute) return;
+    // perf: skip full rebuild if state unchanged (currentTarget + arrived list)
+    const stateKey = `${currentTargetIndex}_${arrivedPoints.join(',')}`;
+    if (stateKey === _navMarkerState && markers.length > 0) return;
+    _navMarkerState = stateKey;
     if (markers && markers.length > 0) {
       markers.forEach((m) => {
         try { if (m && map) map.removeLayer(m); } catch(e) {}
@@ -3745,14 +4075,15 @@
 
       marker.bindPopup(`
         <div class="incident-popup">
-          <div class="incident-popup-header" style="background: ${color}">
-            <span class="incident-popup-icon">${icon}</span>
-            <span class="incident-popup-title">${incident.title}</span>
+          <div class="popup-accent" style="background: ${color}"></div>
+          <div class="incident-popup-header">
+            <div class="popup-badge" style="background: ${color}">${icon}</div>
+            <span class="incident-popup-title">${escapeHtml(incident.title)}</span>
           </div>
           <div class="incident-popup-content">
-            <p>${incident.description}</p>
+            <p>${escapeHtml(incident.description)}</p>
             <div class="incident-popup-meta">
-              <span>📍 ${incident.road}</span>
+              <span>📍 ${escapeHtml(incident.road)}</span>
               ${incident.delay ? `<span>⏱️ ล่าช้า ~${incident.delay} นาที</span>` : ''}
             </div>
             <div class="incident-popup-time">
@@ -3807,28 +4138,44 @@
   let lastDrawnRouteIndex = -1;
   function updateRouteDisplayForNavigation() {
     if (!L || !map || !cachedRouteCoords.length) return;
-    const startIndex = lastRouteIndex; // use progressive index (already updated)
+    const startIndex = lastRouteIndex;
     // Only redraw if moved at least 3 route points (prevents flicker)
     if (Math.abs(startIndex - lastDrawnRouteIndex) < 3 && lastDrawnRouteIndex >= 0) return;
     lastDrawnRouteIndex = startIndex;
-    // Clear old layers
-    clearAllRouteLayers();
-    if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
     const nw = getRouteWeight(map.getZoom());
+    // perf: reuse existing polylines via setLatLngs instead of destroy+recreate
     if (startIndex > 0) {
       const traveledCoords = cachedRouteCoords.slice(0, startIndex + 1);
-      traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: nw.mainSel, opacity: 0.6 }).addTo(map);
+      if (traveledLayer) {
+        traveledLayer.setLatLngs(traveledCoords);
+        traveledLayer.setStyle({ weight: nw.mainSel });
+      } else {
+        traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: nw.mainSel, opacity: 0.6 }).addTo(map);
+      }
+    } else if (traveledLayer) {
+      traveledLayer.remove(); traveledLayer = null;
     }
     const remainingCoords = cachedRouteCoords.slice(startIndex);
     if (remainingCoords.length > 1) {
-      remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: nw.mainSel, opacity: 1 }).addTo(map);
+      if (remainingRouteLayer) {
+        remainingRouteLayer.setLatLngs(remainingCoords);
+        remainingRouteLayer.setStyle({ weight: nw.mainSel });
+      } else {
+        // Clear old routeLayer if transitioning
+        if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+        remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: nw.mainSel, opacity: 1 }).addTo(map);
+      }
     }
   }
 
   function clearAllRouteLayers() {
-    if (remainingRouteLayer) map.removeLayer(remainingRouteLayer);
-    if (routeLayer) map.removeLayer(routeLayer);
-    remainingRouteLayer = routeLayer = null;
+    if (!map) return;
+    try {
+      if (remainingRouteLayer) map.removeLayer(remainingRouteLayer);
+      if (routeLayer) map.removeLayer(routeLayer);
+      if (traveledLayer) map.removeLayer(traveledLayer);
+    } catch (e) {}
+    remainingRouteLayer = routeLayer = traveledLayer = null;
   }
 
   // ⚠️ CRITICAL: recalculateRouteFromCurrentPosition
@@ -3985,7 +4332,7 @@
     const signal = evAbortController.signal;
     isLoadingStations = true;
     try {
-      const res = await fetchWithTimeout(`${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20`, {
+      const res = await fetchWithTimeout(`${API_URL}/ev-stations/nearby?lat=${searchLat}&lng=${searchLng}&radius=100&limit=20&user_id=${currentUser?.id || ''}`, {
         signal, timeout: 12000
       });
       if (signal.aborted) return;
@@ -4033,16 +4380,17 @@
       }).addTo(map);
       marker.bindPopup(`
         <div class="ev-popup">
+          <div class="popup-accent" style="background: linear-gradient(135deg, #10b981, #059669)"></div>
           <div class="ev-popup-header">
-            <span class="ev-icon-large">⚡</span>
-            <div class="ev-status ${station.isOperational ? 'online' : 'offline'}">
-              ${station.isOperational ? '🟢 เปิดให้บริการ' : '🔴 ปิดให้บริการ'}
+            <div class="popup-badge" style="background: linear-gradient(135deg, #10b981, #059669)">⚡</div>
+            <div class="popup-header-text">
+              <h4>${escapeHtml(station.name)}</h4>
+              <span class="ev-status ${station.isOperational ? 'online' : 'offline'}">${station.isOperational ? '🟢 เปิดให้บริการ' : '🔴 ปิดให้บริการ'}</span>
             </div>
           </div>
           <div class="ev-popup-content">
-            <h4>${station.name}</h4>
-            <p class="ev-address">📍 ${station.address}</p>
-            ${station.operator ? `<p class="ev-operator">🏢 ${station.operator}</p>` : ''}
+            <p class="ev-address">📍 ${escapeHtml(station.address)}</p>
+            ${station.operator ? `<p class="ev-operator">🏢 ${escapeHtml(station.operator)}</p>` : ''}
             ${station.powerKW ? `<p class="ev-power">⚡ กำลังไฟ: ${station.powerKW} kW</p>` : ''}
             ${station.numberOfPoints ? `<p class="ev-points">🔌 หัวชาร์จ: ${station.numberOfPoints} จุด</p>` : ''}
             ${station.connectionTypes?.length ? `<p class="ev-connectors">🔗 ${station.connectionTypes.join(', ')}</p>` : ''}
@@ -4080,9 +4428,12 @@
           currentCharge: evCurrentCharge,
           batteryCapacity: evBatteryCapacity,
           rangePerCharge: evRangePerCharge,
-          minChargeAtArrival: 15
+          minChargeAtArrival: 15,
+          user_id: currentUser?.id,
+          table: 'users'
         })
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
@@ -4254,10 +4605,13 @@
   function initExtraFeatures() {
     updateBatteryStatus();
     if (extraFeaturesInterval) clearInterval(extraFeaturesInterval);
+    // perf: only run re-renders when navigating (not idle)
     extraFeaturesInterval = setInterval(() => {
-      updateStatistics();
-      updateETA();
-      updateFuelEstimate();
+      if (isNavigating) {
+        updateStatistics();
+        updateETA();
+        updateFuelEstimate();
+      }
     }, 60000);
     if (batteryInterval) clearInterval(batteryInterval);
     batteryInterval = setInterval(updateBatteryStatus, 300000);
@@ -4328,10 +4682,14 @@
   async function deleteSelectedPoints() {
     if (selectedPoints.length === 0) return;
     if (!confirm(`ลบ ${selectedPoints.length} จุดที่เลือก?`)) return;
-    
+
+    const params = new URLSearchParams();
+    if (currentUser?.id) params.append('user_id', String(currentUser.id));
+    params.append('table', 'users');
+    const qs = params.toString();
     for (const id of selectedPoints) {
       try {
-        await fetch(`${API_URL}/points/${id}`, { method: 'DELETE' });
+        await fetch(`${API_URL}/points/${id}?${qs}`, { method: 'DELETE' });
       } catch (err) {
         console.error('Delete error:', err);
       }
@@ -4643,10 +5001,20 @@ out center body;`;
     }
   }
 
+  function getPoiMinZoom(totalCount: number): number {
+    if (totalCount <= 5) return 12;
+    if (totalCount <= 15) return 14;
+    if (totalCount <= 30) return 15;
+    return 16;
+  }
+
   function displayPOIMarkers() {
     if (!L || !map) return;
     clearPOIMarkers();
     const filtered = alongRoutePOIs.filter(p => activePOITypes.has(p.type));
+    const zoom = map.getZoom();
+    const minZoom = getPoiMinZoom(filtered.length);
+    if (zoom < minZoom) return;
     for (const poi of filtered) {
       if (isNavigating && poi.routeIndex <= lastRouteIndex) continue;
       const marker = L.marker([poi.lat, poi.lng], {
@@ -4661,13 +5029,13 @@ out center body;`;
       const etaMin = Math.round(poi.distAlongRoute / (currentSpeed > 3 ? currentSpeed * 1000 / 3600 : 30000 / 3600) / 60);
       marker.bindPopup(`
         <div class="poi-popup">
-          <div class="poi-popup-header">${getPOIIcon(poi.type)} ${poi.name || getPOILabel(poi.type)}</div>
+          <div class="poi-popup-header"><div class="popup-badge poi-badge">${getPOIIcon(poi.type)}</div><span class="poi-popup-name">${escapeHtml(poi.name || getPOILabel(poi.type))}</span></div>
           <div class="poi-popup-meta">
             <p>📏 ${formatDistance(poi.distAlongRoute)} บนเส้นทาง</p>
             <p>↔️ ห่างจากเส้นทาง ${poi.distFromRoute} ม.</p>
             <p>⏱️ ~${etaMin} นาที</p>
-            ${poi.tags?.brand ? `<p>🏷️ ${poi.tags.brand}</p>` : ''}
-            ${poi.tags?.opening_hours ? `<p>🕐 ${poi.tags.opening_hours}</p>` : ''}
+            ${poi.tags?.brand ? `<p>🏷️ ${escapeHtml(poi.tags.brand)}</p>` : ''}
+            ${poi.tags?.opening_hours ? `<p>🕐 ${escapeHtml(poi.tags.opening_hours)}</p>` : ''}
           </div>
         </div>
       `, { className: 'dark-popup', maxWidth: 260 });
@@ -4899,7 +5267,6 @@ out center body;`;
       const pointIdToRemove = skippedPoint.id;
       optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
       deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
-      allDeliveryPoints = allDeliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
 
       const remainingDeliveryPoints = optimizedRoute.optimized_order.filter((p: any) => p.id !== -1);
       if (remainingDeliveryPoints.length === 0) {
@@ -4918,7 +5285,6 @@ out center body;`;
         arrivedPoints = [0];
     
         clearAllRouteLayers();
-        if (traveledLayer) { traveledLayer.remove(); traveledLayer = null; }
         cachedRouteCoords = [];
         lastRouteIndex = 0;
         lastDrawnRouteIndex = -1;
@@ -5199,31 +5565,29 @@ out center body;`;
   }
 
   async function confirmQuickAdd() {
-    if (!quickAddResult) return;
+    if (!quickAddResult || !currentUser?.id) return;
 
     try {
-      const params = new URLSearchParams();
-      params.append('user_id', $page.params.id);
-      params.append('name', quickAddResult.name);
-      params.append('address', quickAddResult.address);
-      params.append('lat', String(quickAddResult.lat));
-      params.append('lng', String(quickAddResult.lng));
-      params.append('priority', '3');
-
+      const payload = {
+        user_id: currentUser.id,
+        name: quickAddResult.name,
+        address: quickAddResult.address,
+        lat: quickAddResult.lat,
+        lng: quickAddResult.lng,
+        priority: 3
+      };
       const res = await fetch(`${API_URL}/points`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString()
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
 
       if (!res.ok) throw new Error('Failed to add point');
 
       const data = await res.json();
-      if (data.success && data.point) {
-        deliveryPoints = [...deliveryPoints, data.point];
+      if (data && !data.error) {
+        await loadDeliveryPoints();
         showNotification(`เพิ่ม "${quickAddResult.name}" สำเร็จ`, 'success');
-
-        // แสดงบนแผนที่
         if (map && L) {
           map.setView([quickAddResult.lat, quickAddResult.lng], 15, { animate: true });
         }
@@ -5246,9 +5610,7 @@ out center body;`;
 
   function smoothMapResize() {
     if (!map) return;
-    setTimeout(() => { if (map) map.invalidateSize(); }, 50);
     setTimeout(() => { if (map) map.invalidateSize(); }, 150);
-    setTimeout(() => { if (map) map.invalidateSize(); }, 250);
   }
 
   function handleKeyboardShortcuts(e: KeyboardEvent) {
@@ -5401,7 +5763,8 @@ out center body;`;
         break;
       case 'escape': // ปิด modal / หยุดนำทาง / ยกเลิกการเลือก
         e.preventDefault();
-        if (showKeyboardHelp) showKeyboardHelp = false;
+        if (showLogoutConfirm) showLogoutConfirm = false;
+        else if (showKeyboardHelp) showKeyboardHelp = false;
         else if (showSettings) showSettings = false;
         else if (showAlerts) showAlerts = false;
         else if (showAddForm) showAddForm = false;
@@ -5509,14 +5872,22 @@ out center body;`;
   onMount(async () => {
     const userStr = localStorage.getItem('user');
     if (!userStr) { goto('/'); return; }
-    currentUser = JSON.parse(userStr);
+    try {
+      currentUser = JSON.parse(userStr);
+    } catch (e) {
+      console.error('Corrupted user data in localStorage:', e);
+      localStorage.removeItem('user');
+      goto('/');
+      return;
+    }
+    if (!currentUser || !currentUser.id) { localStorage.removeItem('user'); goto('/'); return; }
 
     // 🔄 ตรวจสอบ role - redirect ไปหน้าที่ถูกต้อง
     if (currentUser.role) {
       const role = currentUser.role.toLowerCase();
       if (role === 'admin') { goto(`/Admin/${currentUser.id}`); return; }
       if (role === 'driver') { goto(`/Home/${currentUser.id}`); return; }
-      if (role === 'customer') { goto(`/Customer/${currentUser.id}`); return; }
+      if (role === 'customer') { goto(`/factory/${currentUser.id}`); return; }
     }
 
     const savedVehicleType = localStorage.getItem(getUserKey('vehicleType'));
@@ -5559,9 +5930,11 @@ out center body;`;
     else nightMode = true;
     loadSavedRoutes();
 
+    // URL ไม่ตรง → แก้ URL เงียบ ๆ (ไม่ goto, ไม่ remount)
     const urlId = $page.params.id;
-    // 🔄 เปลี่ยนจาก /Home/ เป็น /User/
-    if (Number(urlId) !== currentUser.id) { goto(`/User/${currentUser.id}`); return; }
+    if (decodeUserId(urlId) !== currentUser.id) {
+      window.history.replaceState(window.history.state, '', `/User/${encodeUserId(currentUser.id)}`);
+    }
 
     try {
       // Start GPS + Leaflet import in parallel for faster load
@@ -5634,17 +6007,22 @@ out center body;`;
               showNotification('กรุณาอนุญาตการเข้าถึง GPS', 'error');
             }
           },
-          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
         );
       }
 
-      setTimeout(() => map.invalidateSize(), 100);
-      setTimeout(() => map.invalidateSize(), 500);
+      // Robust map resize (perf: single delayed call instead of 5)
+      setTimeout(() => map?.invalidateSize(), 400);
 
       resizeHandler = () => { setTimeout(() => map?.invalidateSize(), 100); };
       window.addEventListener('resize', resizeHandler);
 
-      map.on('zoomend', updateRouteWeights);
+      const onZoomEnd = () => {
+        updateRouteWeights();
+        if (alongRoutePOIs.length > 0) displayPOIMarkers();
+      };
+      map.on('zoomend', onZoomEnd);
+      (window as any).__onZoomEnd = onZoomEnd;
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
@@ -5657,13 +6035,19 @@ out center body;`;
         showAddForm = true;
       });
 
-      // Load data in parallel instead of sequential
-      await Promise.all([
-        loadDeliveryPoints(),
-        loadTodayStats(),
-        loadDeliveryHistory(),
-        fetchOilPrices()
+      // Load data in parallel with timeout (won't hang if API is down)
+      const results = await Promise.allSettled([
+        withTimeout(loadDeliveryPoints(), 15000, 'loadDeliveryPoints'),
+        withTimeout(loadTodayStats(), 15000, 'loadTodayStats'),
+        withTimeout(loadDeliveryHistory(), 15000, 'loadDeliveryHistory'),
+        withTimeout(fetchOilPrices(), 15000, 'fetchOilPrices')
       ]);
+      const failedCount = results.filter(r => r.status === 'rejected').length;
+      if (failedCount > 0) {
+        console.warn(`${failedCount} data load(s) failed/timed out:`, results.filter(r => r.status === 'rejected'));
+        if (failedCount < 4) showNotification(`โหลดข้อมูลบางส่วนไม่สำเร็จ (${failedCount} รายการ)`, 'warning');
+        else showNotification('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้', 'error');
+      }
       initExtraFeatures();
       initVoiceNavigation();
 
@@ -5675,7 +6059,28 @@ out center body;`;
       // Keyboard shortcuts
       window.addEventListener('keydown', handleKeyboardShortcuts);
 
-      oilPriceInterval = setInterval(() => { fetchOilPrices(); }, 1800000);
+      // popstate + visibilitychange — จับ browser back/forward
+      const pathGuard = () => {
+        if (!currentUser?.id) return;
+        const expected = `/User/${encodeUserId(currentUser.id)}`;
+        if (window.location.pathname !== expected) {
+          window.history.replaceState(window.history.state, '', expected);
+        }
+      };
+      const visHandler = () => { if (!document.hidden) pathGuard(); };
+      window.addEventListener('popstate', pathGuard);
+      document.addEventListener('visibilitychange', visHandler);
+      (window as any).__pathGuard = pathGuard;
+      (window as any).__visHandler = visHandler;
+
+      oilPriceInterval = setInterval(() => {
+        if (oilPriceFailCount >= 3) {
+          if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
+          console.warn('Oil price fetch stopped after 3 consecutive failures');
+          return;
+        }
+        fetchOilPrices();
+      }, 1800000);
     } catch (error) {
       console.error('Map init error:', error);
       showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
@@ -5683,6 +6088,14 @@ out center body;`;
   });
 
   onDestroy(() => {
+    if (browser && (window as any).__pathGuard) {
+      window.removeEventListener('popstate', (window as any).__pathGuard);
+      (window as any).__pathGuard = null;
+    }
+    if (browser && (window as any).__visHandler) {
+      document.removeEventListener('visibilitychange', (window as any).__visHandler);
+      (window as any).__visHandler = null;
+    }
     stopNavigation();
     clearTrafficLayers();
     clearIncidentMarkers();
@@ -5715,7 +6128,10 @@ out center body;`;
     if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
     if (routeAbortController) { routeAbortController.abort(); routeAbortController = null; }
     if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
-    if (map) { map.off('zoomend', updateRouteWeights); map.remove(); map = null; }
+    if (map) {
+      if ((window as any).__onZoomEnd) { map.off('zoomend', (window as any).__onZoomEnd); (window as any).__onZoomEnd = null; }
+      map.remove(); map = null;
+    }
   });
 </script>
 
@@ -5837,10 +6253,10 @@ out center body;`;
               <div class="settings-section">
                 <h4>🌓 โหมดแสง</h4>
                 <div class="night-mode-selector">
-                  <button class="night-mode-btn" class:active={nightMode} on:click={() => { nightMode = true; localStorage.setItem(getUserKey('nightMode'), 'dark'); }}>
+                  <button class="night-mode-btn" class:active={nightMode} on:click={() => { nightMode = true; try { localStorage.setItem(getUserKey('nightMode'), 'dark'); } catch(e) {} }}>
                     <span>🌙</span><span>มืด</span>
                   </button>
-                  <button class="night-mode-btn" class:active={!nightMode} on:click={() => { nightMode = false; localStorage.setItem(getUserKey('nightMode'), 'light'); }}>
+                  <button class="night-mode-btn" class:active={!nightMode} on:click={() => { nightMode = false; try { localStorage.setItem(getUserKey('nightMode'), 'light'); } catch(e) {} }}>
                     <span>☀️</span><span>สว่าง</span>
                   </button>
                 </div>
@@ -5950,7 +6366,7 @@ out center body;`;
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               ส่งออกข้อมูล
             </button>
-            <button class="btn btn-danger" on:click={logout}>
+            <button class="btn btn-danger" on:click={() => { showSettings = false; showLogoutConfirm = true; }}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
               ออกจากระบบ
             </button>
@@ -5963,30 +6379,56 @@ out center body;`;
   <!-- Alerts Panel -->
   {#if showAlerts}
     <div class="alerts-backdrop" on:click={() => showAlerts = false} role="presentation"></div>
-    <div class="alerts-panel glass-card">
+    <div class="alerts-panel">
       <div class="alerts-header">
-        <h3>🔔 การแจ้งเตือน</h3>
+        <div class="alerts-title-row">
+          <div class="alerts-bell">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>
+          </div>
+          <h3>การแจ้งเตือน</h3>
+          {#if alerts.length > 0}
+            <span class="alerts-count">{alerts.length}</span>
+          {/if}
+        </div>
         <div class="alerts-actions">
-          <button class="text-btn" on:click={clearAlerts}>ล้างทั้งหมด</button>
-          <button class="close-btn" on:click={() => showAlerts = false}>
+          <button class="alerts-clear-btn" on:click={clearAlerts}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            ล้าง
+          </button>
+          <button class="alerts-close-btn" on:click={() => showAlerts = false}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
       </div>
       <div class="alerts-list">
         {#if alerts.length === 0}
-          <div class="empty-alerts">ไม่มีการแจ้งเตือน</div>
+          <div class="empty-alerts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0" stroke-linecap="round"/><path d="M2 2l20 20" stroke-linecap="round"/></svg>
+            <span>ไม่มีการแจ้งเตือน</span>
+          </div>
         {:else}
-          {#each alerts as alert}
-            <div class="alert-item" class:alert-emergency={alert.type === 'emergency'}>
-              <div class="alert-icon">
-                {#if alert.type === 'delivery'}📦{:else if alert.type === 'navigation'}🧭{:else if alert.type === 'break'}☕{:else if alert.type === 'emergency'}🚨{:else}📢{/if}
+          {#each alerts as alert, i}
+            <div class="alert-item" class:alert-emergency={alert.type === 'emergency'} style="--delay:{i * 0.05}s">
+              <div class="alert-icon-wrap" class:icon-delivery={alert.type === 'delivery'} class:icon-navigation={alert.type === 'navigation'} class:icon-break={alert.type === 'break'} class:icon-emergency={alert.type === 'emergency'}>
+                {#if alert.type === 'delivery'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+                {:else if alert.type === 'navigation'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+                {:else if alert.type === 'break'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 8h1a4 4 0 110 8h-1M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4V8zM6 2v4M10 2v4M14 2v4"/></svg>
+                {:else if alert.type === 'emergency'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01"/></svg>
+                {:else}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                {/if}
               </div>
               <div class="alert-content">
                 <div class="alert-message">{alert.message}</div>
                 <div class="alert-time">{alert.time.toLocaleTimeString('th-TH')}</div>
               </div>
-              <button class="dismiss-btn" on:click={() => dismissAlert(alert.id)}>×</button>
+              <button class="alert-dismiss" on:click={() => dismissAlert(alert.id)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
             </div>
           {/each}
         {/if}
@@ -5994,20 +6436,51 @@ out center body;`;
     </div>
   {/if}
 
+  <!-- Logout Confirmation -->
+  {#if showLogoutConfirm}
+    <div class="logout-backdrop" on:click={() => showLogoutConfirm = false} role="presentation"></div>
+    <div class="logout-modal">
+      <div class="logout-glow"></div>
+      <div class="logout-icon-wrap">
+        <div class="logout-icon-ring r1"></div>
+        <div class="logout-icon-ring r2"></div>
+        <div class="logout-icon-core">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </div>
+      </div>
+      <h3 class="logout-title">ออกจากระบบ</h3>
+      <p class="logout-desc">คุณต้องการออกจากระบบใช่หรือไม่?<br><span class="logout-sub">ข้อมูลเส้นทางที่บันทึกไว้จะถูกล้าง</span></p>
+      <div class="logout-actions">
+        <button class="logout-btn-cancel" on:click={() => showLogoutConfirm = false}>ยกเลิก</button>
+        <button class="logout-btn-confirm" on:click={logout}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          ออกจากระบบ
+        </button>
+      </div>
+    </div>
+  {/if}
+
   <!-- Notification Toast -->
   {#if notification.show}
     <div class="toast" class:toast-success={notification.type === 'success'} class:toast-error={notification.type === 'error'} class:toast-warning={notification.type === 'warning'}>
-      <div class="toast-icon">
+      <div class="toast-glow"></div>
+      <div class="toast-icon-wrap">
         {#if notification.type === 'success'}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        {:else if notification.type === 'warning'}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
         {:else}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
         {/if}
       </div>
-      <span>{notification.message}</span>
+      <span class="toast-msg">{notification.message}</span>
       {#if lastDragUndo && notification.type === 'success'}
         <button class="undo-btn" on:click={undoDragPoint}>เลิกทำ</button>
       {/if}
+      <button class="toast-close" on:click={() => notification.show = false}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+      <div class="toast-progress"></div>
     </div>
   {/if}
 
@@ -6524,7 +6997,7 @@ out center body;`;
                     <p class="point-address">{point.address}</p>
                     <div class="point-meta">
                       <span class="priority-tag" style="background: {colors.bg}">P{point.priority} · {getPriorityLabel(point.priority)}</span>
-                      {#if currentLocation}<span class="distance-tag">📍 {formatDistance(getDistance(currentLocation.lat, currentLocation.lng, point.lat, point.lng))}</span>{/if}
+                      {#if currentLocation && pointDistances[i] !== undefined}<span class="distance-tag">📍 {formatDistance(pointDistances[i])}</span>{/if}
                     </div>
                   </div>
                   <button class="delete-btn" on:click|stopPropagation={() => deletePoint(point.id, point.name)} title="ลบจุดนี้"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
@@ -6705,33 +7178,13 @@ out center body;`;
                 {/if}
               </div>
             </div>
-
-            <!-- Turn-by-Turn Preview -->
-            {#if turnInstructions.length > 0}
-              <div class="turn-preview-section">
-                <h4>🧭 คำแนะนำเส้นทาง ({turnInstructions.length} ขั้นตอน)</h4>
-                <div class="turn-preview-list">
-                  {#each turnInstructions.slice(0, 8) as step, i}
-                    <div class="turn-preview-item">
-                      <span class="turn-preview-icon">{getTurnIcon(step.type, step.modifier)}</span>
-                      <div class="turn-preview-info">
-                        <span class="turn-preview-text">{getTurnText(step.type, step.modifier, step.name)}</span>
-                        <span class="turn-preview-dist">{formatDistance(step.distance)}</span>
-                      </div>
-                    </div>
-                  {/each}
-                  {#if turnInstructions.length > 8}
-                    <div class="turn-preview-more">...อีก {turnInstructions.length - 8} ขั้นตอน</div>
-                  {/if}
-                </div>
-              </div>
-            {/if}
-
+            <!-- Route Timeline -->
+             <br>
             <div class="route-timeline">
               <h4>ลำดับการเดินทาง</h4>
               {#each optimizedRoute.optimized_order as point, i}
                 {@const isStart = point.id === -1}
-                {@const isCustomer = point.isCustomerOrder}
+                {@const isCustomer = point.isCustomerOrder || false}
                 <div class="timeline-item" class:start={isStart} class:customer={isCustomer} on:click={() => focusOnPoint(point.lat, point.lng)} on:keypress={(e) => e.key === 'Enter' && focusOnPoint(point.lat, point.lng)} role="button" tabindex="0">
                   <div class="timeline-marker"><span>{isStart ? '📍' : isCustomer ? '🛒' : i}</span></div>
                   <div class="timeline-content"><div class="timeline-label">{isStart ? 'ตำแหน่งของคุณ' : isCustomer ? '' : `จุดที่ ${i}`}</div><div class="timeline-name">{point.name}</div></div>
@@ -8062,9 +8515,7 @@ out center body;`;
   @keyframes spin { to { transform: rotate(360deg); } }
 
     .glass-card {
-      background: rgba(255, 255, 255, 0.03);
-      backdrop-filter: blur(16px) saturate(1.2);
-      -webkit-backdrop-filter: blur(16px) saturate(1.2);
+      background: rgba(18, 18, 28, 0.92);
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 16px;
       box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -8738,22 +9189,176 @@ out center body;`;
   .info-value { font-weight: 600; color: #e4e4e7; }
   .settings-actions { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
 
+  /* ====== Logout Confirm ====== */
+  .logout-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 2999; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); animation: logoutFadeIn 0.3s ease; }
+  @keyframes logoutFadeIn { from { opacity: 0 } to { opacity: 1 } }
+  .logout-modal {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 360px; max-width: calc(100% - 32px); z-index: 3000;
+    background: rgba(12,12,20,0.96); backdrop-filter: blur(40px) saturate(1.5);
+    -webkit-backdrop-filter: blur(40px) saturate(1.5);
+    border: 1px solid rgba(255,60,60,0.12);
+    border-radius: 24px; padding: 36px 28px 28px; text-align: center;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03), 0 0 60px rgba(255,60,60,0.06);
+    animation: logoutModalIn 0.4s cubic-bezier(0.34,1.56,0.64,1);
+    overflow: hidden;
+  }
+  @keyframes logoutModalIn { from { opacity: 0; transform: translate(-50%,-50%) scale(0.85) translateY(20px); } to { opacity: 1; transform: translate(-50%,-50%) scale(1) translateY(0); } }
+  .logout-glow {
+    position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+    background: conic-gradient(from 0deg at 50% 50%, transparent 0deg, rgba(255,60,60,0.04) 60deg, transparent 120deg, rgba(255,100,60,0.03) 200deg, transparent 280deg);
+    animation: logoutGlowSpin 6s linear infinite; pointer-events: none;
+  }
+  @keyframes logoutGlowSpin { to { transform: rotate(360deg) } }
+  .logout-icon-wrap {
+    position: relative; width: 72px; height: 72px; margin: 0 auto 20px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .logout-icon-ring {
+    position: absolute; inset: 0; border-radius: 50%;
+    border: 2px solid rgba(255,60,60,0.2);
+  }
+  .logout-icon-ring.r1 { animation: logoutRingPulse 2s ease-out infinite; }
+  .logout-icon-ring.r2 { animation: logoutRingPulse 2s 0.6s ease-out infinite; }
+  @keyframes logoutRingPulse { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(1.8); opacity: 0; } }
+  .logout-icon-core {
+    width: 56px; height: 56px; border-radius: 16px;
+    background: linear-gradient(135deg, rgba(255,60,60,0.15), rgba(255,60,60,0.05));
+    border: 1px solid rgba(255,60,60,0.15);
+    display: flex; align-items: center; justify-content: center;
+    position: relative; z-index: 1;
+  }
+  .logout-icon-core svg { width: 26px; height: 26px; color: #ff4040; }
+  .logout-title { font-size: 20px; font-weight: 700; color: #f0f0f0; margin: 0 0 8px; position: relative; z-index: 1; }
+  .logout-desc { font-size: 14px; color: #888; line-height: 1.6; margin: 0 0 28px; position: relative; z-index: 1; }
+  .logout-sub { font-size: 12px; color: #555; }
+  .logout-actions { display: flex; gap: 12px; position: relative; z-index: 1; }
+  .logout-btn-cancel {
+    flex: 1; padding: 12px 16px; border-radius: 14px; font-size: 14px; font-weight: 600;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    color: #aaa; cursor: pointer; transition: all 0.25s; font-family: 'Kanit', sans-serif;
+  }
+  .logout-btn-cancel:hover { background: rgba(255,255,255,0.08); color: #ddd; border-color: rgba(255,255,255,0.12); }
+  .logout-btn-confirm {
+    flex: 1; padding: 12px 16px; border-radius: 14px; font-size: 14px; font-weight: 600;
+    background: linear-gradient(135deg, rgba(255,50,50,0.9), rgba(220,40,40,0.9));
+    border: 1px solid rgba(255,80,80,0.3); color: #fff; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: all 0.25s; font-family: 'Kanit', sans-serif;
+    box-shadow: 0 4px 20px rgba(255,50,50,0.25);
+  }
+  .logout-btn-confirm svg { width: 16px; height: 16px; }
+  .logout-btn-confirm:hover { background: linear-gradient(135deg, rgba(255,60,60,1), rgba(230,50,50,1)); box-shadow: 0 6px 30px rgba(255,50,50,0.35); transform: translateY(-1px); }
+  .logout-btn-confirm:active { transform: translateY(0); }
+
   /* Alerts Backdrop */
-  .alerts-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 1999; backdrop-filter: blur(4px); }
-  /* Alerts Panel - Centered */
-  .alerts-panel { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; max-width: calc(100% - 32px); max-height: 500px; z-index: 2000; overflow: hidden; display: flex; flex-direction: column; }
-  .alerts-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
-  .alerts-header h3 { font-size: 16px; }
-  .alerts-actions { display: flex; gap: 12px; align-items: center; }
-  .alerts-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .empty-alerts { text-align: center; padding: 24px; color: #71717a; }
-  .alert-item { display: flex; gap: 12px; padding: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 10px; margin-bottom: 8px; align-items: flex-start; }
-  .alert-item.alert-emergency { background: rgba(255, 107, 107, 0.2); border: 1px solid rgba(255, 107, 107, 0.3); }
-  .alert-icon { font-size: 20px; }
-  .alert-content { flex: 1; }
-  .alert-message { font-size: 13px; }
-  .alert-time { font-size: 11px; color: #71717a; margin-top: 4px; }
-  .dismiss-btn { background: none; border: none; color: #71717a; font-size: 18px; cursor: pointer; padding: 0 4px; }
+  .alerts-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 1999; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); animation: alertBackdropIn 0.3s ease; }
+  @keyframes alertBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+  /* Alerts Panel - Centered (Glassmorphism) */
+  .alerts-panel {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 440px; max-width: calc(100% - 32px); max-height: 520px; z-index: 2000;
+    overflow: hidden; display: flex; flex-direction: column;
+    background: rgba(12, 12, 20, 0.95); backdrop-filter: blur(30px) saturate(1.4);
+    -webkit-backdrop-filter: blur(30px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03), 0 0 80px rgba(0, 255, 136, 0.05);
+    animation: alertPanelIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @keyframes alertPanelIn { from { opacity: 0; transform: translate(-50%, -50%) scale(0.9) translateY(20px); } to { opacity: 1; transform: translate(-50%, -50%) scale(1) translateY(0); } }
+
+  .alerts-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 100%);
+  }
+  .alerts-title-row { display: flex; align-items: center; gap: 10px; }
+  .alerts-bell {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: rgba(0, 255, 136, 0.12); display: flex; align-items: center; justify-content: center;
+    animation: bellSwing 2s ease-in-out infinite;
+  }
+  .alerts-bell svg { width: 18px; height: 18px; color: #00ff88; }
+  @keyframes bellSwing { 0%,100% { transform: rotate(0); } 15% { transform: rotate(10deg); } 30% { transform: rotate(-8deg); } 45% { transform: rotate(5deg); } 60% { transform: rotate(0); } }
+  .alerts-header h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; }
+  .alerts-count {
+    min-width: 22px; height: 22px; padding: 0 6px;
+    background: linear-gradient(135deg, #00ff88, #00cc6a); color: #0a0a0f;
+    border-radius: 11px; font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    animation: countPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @keyframes countPop { from { transform: scale(0); } to { transform: scale(1); } }
+  .alerts-actions { display: flex; gap: 8px; align-items: center; }
+  .alerts-clear-btn {
+    display: flex; align-items: center; gap: 4px; padding: 6px 12px;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; color: #a1a1aa; font-size: 12px; font-family: 'Kanit';
+    cursor: pointer; transition: all 0.2s;
+  }
+  .alerts-clear-btn:hover { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; border-color: rgba(255, 107, 107, 0.3); }
+  .alerts-clear-btn svg { width: 14px; height: 14px; }
+  .alerts-close-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    color: #71717a; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .alerts-close-btn:hover { background: rgba(255,255,255,0.1); color: #e4e4e7; }
+  .alerts-close-btn svg { width: 16px; height: 16px; }
+
+  .alerts-list { flex: 1; overflow-y: auto; padding: 12px; }
+  .alerts-list::-webkit-scrollbar { width: 4px; }
+  .alerts-list::-webkit-scrollbar-track { background: transparent; }
+  .alerts-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+  .empty-alerts {
+    text-align: center; padding: 48px 24px; color: #3f3f46;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+  .empty-alerts svg { width: 48px; height: 48px; opacity: 0.3; }
+  .empty-alerts span { font-size: 14px; }
+
+  .alert-item {
+    display: flex; gap: 12px; padding: 14px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 14px; margin-bottom: 8px; align-items: flex-start;
+    transition: all 0.2s; cursor: default;
+    animation: alertItemIn 0.35s calc(var(--delay, 0s)) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  }
+  @keyframes alertItemIn { from { opacity: 0; transform: translateX(-12px) scale(0.95); } to { opacity: 1; transform: translateX(0) scale(1); } }
+  .alert-item:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.08); }
+  .alert-item.alert-emergency {
+    background: rgba(255, 107, 107, 0.08); border: 1px solid rgba(255, 107, 107, 0.2);
+    animation: alertItemIn 0.35s calc(var(--delay, 0s)) cubic-bezier(0.34, 1.56, 0.64, 1) both, emergencyPulse 2s ease-in-out infinite;
+  }
+  @keyframes emergencyPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0); } 50% { box-shadow: 0 0 16px rgba(255, 107, 107, 0.15); } }
+
+  .alert-icon-wrap {
+    width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.05);
+  }
+  .alert-icon-wrap svg { width: 18px; height: 18px; }
+  .alert-icon-wrap.icon-delivery { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+  .alert-icon-wrap.icon-navigation { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+  .alert-icon-wrap.icon-break { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+  .alert-icon-wrap.icon-emergency { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }
+
+  .alert-content { flex: 1; min-width: 0; }
+  .alert-message { font-size: 13px; color: #d4d4d8; line-height: 1.4; }
+  .alert-time { font-size: 11px; color: #52525b; margin-top: 4px; }
+  .alert-dismiss {
+    width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px;
+    background: none; border: 1px solid transparent;
+    color: #52525b; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .alert-dismiss:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); color: #a1a1aa; }
+  .alert-dismiss svg { width: 14px; height: 14px; }
 
   /* Navigation Status Bar */
   .nav-status-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: center; gap: 20px; padding: 8px 16px; background: rgba(0, 0, 0, 0.6); pointer-events: none; }
@@ -8819,7 +9424,7 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; }
+  #map { width: 100%; height: 100%; will-change: transform; }
   :global(.leaflet-tile-pane) { filter: grayscale(1) invert(1) brightness(0.55); }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
@@ -8872,19 +9477,79 @@ out center body;`;
   .nav-btn-stop { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
   .nav-btn-stop:hover { background: rgba(255, 107, 107, 0.3); }
 
-  .toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 16px 24px; border-radius: 14px; font-size: 14px; font-weight: 500; z-index: 9999; animation: toastIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1); backdrop-filter: blur(24px) saturate(1.3); -webkit-backdrop-filter: blur(24px) saturate(1.3); white-space: nowrap; }
-  @keyframes toastIn { 0% { opacity: 0; transform: translateX(-50%) translateY(-30px) scale(0.9); } 100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
-  .toast-success { background: rgba(0, 255, 136, 0.12); border: 1px solid rgba(0, 255, 136, 0.25); color: #00ff88; box-shadow: 0 8px 32px rgba(0, 255, 136, 0.15); }
-  .toast-error { background: rgba(255, 107, 107, 0.12); border: 1px solid rgba(255, 107, 107, 0.25); color: #ff6b6b; box-shadow: 0 8px 32px rgba(255, 107, 107, 0.15); }
-  .toast-warning { background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.25); color: #f59e0b; box-shadow: 0 8px 32px rgba(245, 158, 11, 0.15); }
-  .toast-icon { width: 24px; height: 24px; }
-  .toast-icon svg { width: 100%; height: 100%; }
+  .toast {
+    position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px 14px 16px; border-radius: 16px;
+    font-size: 14px; font-weight: 500; z-index: 9999;
+    animation: toastSlideIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    /* perf: removed backdrop-filter */
+    white-space: nowrap; overflow: hidden;
+    max-width: calc(100vw - 32px);
+  }
+  @keyframes toastSlideIn {
+    0% { opacity: 0; transform: translateX(-50%) translateY(-40px) scale(0.85); }
+    60% { transform: translateX(-50%) translateY(4px) scale(1.02); }
+    100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  }
+
+  .toast-glow {
+    position: absolute; inset: -1px; border-radius: 17px; opacity: 0.6;
+    animation: toastGlow 2s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+  @keyframes toastGlow { from { opacity: 0.3; } to { opacity: 0.7; } }
+  .toast-success .toast-glow { box-shadow: 0 0 20px rgba(0, 255, 136, 0.3), inset 0 0 20px rgba(0, 255, 136, 0.05); }
+  .toast-error .toast-glow { box-shadow: 0 0 20px rgba(255, 107, 107, 0.3), inset 0 0 20px rgba(255, 107, 107, 0.05); }
+  .toast-warning .toast-glow { box-shadow: 0 0 20px rgba(245, 158, 11, 0.3), inset 0 0 20px rgba(245, 158, 11, 0.05); }
+
+  .toast-success {
+    background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88;
+    box-shadow: 0 8px 32px rgba(0, 255, 136, 0.12), 0 0 0 1px rgba(0, 255, 136, 0.05);
+  }
+  .toast-error {
+    background: rgba(255, 107, 107, 0.1); border: 1px solid rgba(255, 107, 107, 0.3); color: #ff6b6b;
+    box-shadow: 0 8px 32px rgba(255, 107, 107, 0.12), 0 0 0 1px rgba(255, 107, 107, 0.05);
+  }
+  .toast-warning {
+    background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b;
+    box-shadow: 0 8px 32px rgba(245, 158, 11, 0.12), 0 0 0 1px rgba(245, 158, 11, 0.05);
+  }
+
+  .toast-icon-wrap {
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  }
+  .toast-icon-wrap svg { width: 18px; height: 18px; }
+  .toast-success .toast-icon-wrap { background: rgba(0, 255, 136, 0.2); }
+  .toast-error .toast-icon-wrap { background: rgba(255, 107, 107, 0.2); }
+  .toast-warning .toast-icon-wrap { background: rgba(245, 158, 11, 0.2); }
+
+  .toast-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+  .toast-close {
+    width: 24px; height: 24px; flex-shrink: 0;
+    background: none; border: none; cursor: pointer; color: inherit; opacity: 0.5;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; transition: all 0.2s;
+  }
+  .toast-close:hover { opacity: 1; background: rgba(255,255,255,0.1); }
+  .toast-close svg { width: 14px; height: 14px; }
+
+  .toast-progress {
+    position: absolute; bottom: 0; left: 0; height: 2px; border-radius: 0 0 16px 16px;
+    animation: toastProgress 3.5s linear forwards;
+  }
+  .toast-success .toast-progress { background: linear-gradient(90deg, #00ff88, #00cc6a); }
+  .toast-error .toast-progress { background: linear-gradient(90deg, #ff6b6b, #ff4757); }
+  .toast-warning .toast-progress { background: linear-gradient(90deg, #f59e0b, #f97316); }
+  @keyframes toastProgress { from { width: 100%; } to { width: 0%; } }
   .undo-btn { background: rgba(255, 255, 255, 0.15); color: inherit; border: 1px solid rgba(255, 255, 255, 0.25); padding: 4px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: 'Kanit', sans-serif; transition: background 0.2s; margin-left: 4px; }
   .undo-btn:hover { background: rgba(255, 255, 255, 0.25); }
 
   :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #0a0a0f; }
   :global(.leaflet-control-zoom) { border: none !important; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35) !important; border-radius: 12px !important; overflow: hidden; }
-  :global(.leaflet-control-zoom a) { background: rgba(15, 15, 25, 0.9) !important; color: #a1a1aa !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background 0.25s ease, color 0.25s ease !important; }
+  :global(.leaflet-control-zoom a) { background: rgba(15, 15, 25, 0.95) !important; color: #a1a1aa !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; transition: background 0.25s ease, color 0.25s ease !important; }
   :global(.leaflet-control-zoom a:hover) { background: rgba(0, 255, 136, 0.15) !important; color: #00ff88 !important; }
   :global(.leaflet-control-zoom a:hover) { background: rgba(25, 25, 40, 0.95) !important; color: #e4e4e7 !important; }
   :global(.leaflet-control-zoom-in) { border-radius: 10px 10px 0 0 !important; }
@@ -8984,16 +9649,18 @@ out center body;`;
     100% { width: 48px; height: 48px; opacity: 0; }
   }
 
-  :global(.dark-popup .leaflet-popup-content-wrapper) { background: rgba(15, 15, 25, 0.95); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 0; overflow: hidden; }
+  :global(.dark-popup .leaflet-popup-content-wrapper) { background: rgba(15, 15, 25, 0.97); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 0; overflow: hidden; }
   :global(.dark-popup .leaflet-popup-tip) { background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); }
   :global(.dark-popup .leaflet-popup-content) { margin: 0; }
-  :global(.custom-popup) { min-width: 200px; }
-  :global(.popup-header) { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; color: white; }
-  :global(.popup-number) { font-size: 18px; font-weight: 700; font-family: 'Kanit', sans-serif; }
-  :global(.popup-priority) { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.9; }
-  :global(.popup-content) { padding: 14px 16px; }
-  :global(.popup-content h4) { font-size: 15px; font-weight: 600; color: #e4e4e7; margin-bottom: 6px; font-family: 'Kanit', sans-serif; }
-  :global(.popup-content p) { font-size: 12px; color: #71717a; line-height: 1.5; font-family: 'Kanit', sans-serif; }
+  :global(.custom-popup) { min-width: 220px; }
+  :global(.popup-accent) { height: 3px; width: 100%; flex-shrink: 0; }
+  :global(.popup-header) { display: flex; align-items: center; gap: 12px; padding: 14px 16px 8px; }
+  :global(.popup-badge) { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: white; font-family: 'Kanit', sans-serif; flex-shrink: 0; }
+  :global(.popup-header-text) { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  :global(.popup-header-text h4) { font-size: 14px; font-weight: 600; color: #f4f4f5; margin: 0; font-family: 'Kanit', sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :global(.popup-tag) { font-size: 10px; font-weight: 500; letter-spacing: 0.5px; font-family: 'Kanit', sans-serif; }
+  :global(.popup-content) { padding: 10px 16px 14px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+  :global(.popup-content p) { font-size: 12px; color: #a1a1aa; line-height: 1.5; font-family: 'Kanit', sans-serif; }
   :global(.leaflet-popup-close-button) { color: rgba(255, 255, 255, 0.5) !important; top: 8px !important; right: 8px !important; width: 24px !important; height: 24px !important; font-size: 18px !important; }
   :global(.leaflet-popup-close-button:hover) { color: white !important; }
 
@@ -9149,7 +9816,7 @@ out center body;`;
     .map-stat { padding: 2px 4px; }
     .map-stat-value { font-size: 13px; }
     .map-stat-label { font-size: 8px; }
-    .map-info { position: absolute; bottom: 4px; left: 8px; right: auto; width: auto; max-width: calc(100% - 16px); padding: 4px 8px; font-size: 9px; z-index: 999; }
+    .map-info { display: none; }
 
     /* ===== Navigation Mode Mobile ===== */
     .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
@@ -9577,24 +10244,19 @@ out center body;`;
   :global(.ev-popup-header) {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-    border-radius: 16px 16px 0 0;
-  }
-
-  :global(.ev-icon-large) {
-    font-size: 28px;
+    gap: 12px;
+    padding: 14px 16px 8px;
   }
 
   :global(.ev-status) {
-    font-size: 12px;
-    font-weight: 600;
-    color: white;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
   }
 
   :global(.ev-popup-content) {
-    padding: 14px 16px;
+    padding: 10px 16px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
   }
 
   :global(.ev-popup-content h4) {
@@ -10496,7 +11158,7 @@ out center body;`;
   position: absolute; top: 36px; left: 50%; transform: translateX(-50%);
   width: calc(100% - 40px); max-width: 600px;
   padding: 6px 14px;
-  background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.75);
   border-radius: 0 0 12px 12px;
   display: flex; align-items: center; gap: 12px;
   pointer-events: none; z-index: 1010;
@@ -10661,7 +11323,7 @@ out center body;`;
 .current-road-bar {
   position: absolute; top: 90px; left: 50%; transform: translateX(-50%);
   padding: 4px 16px; z-index: 1040;
-  background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.75);
   border-radius: 20px; pointer-events: none;
 }
 .road-name {
@@ -10942,8 +11604,7 @@ out center body;`;
   border-radius: 8px;
   text-align: center;
   font-family: 'Kanit', sans-serif;
-  background: rgba(15, 15, 25, 0.9);
-  backdrop-filter: blur(10px);
+  background: rgba(15, 15, 25, 0.95);
   border-left: 3px solid var(--alt-color, #3b82f6);
   cursor: pointer;
   pointer-events: auto;
@@ -10975,8 +11636,7 @@ out center body;`;
   border-radius: 8px;
   text-align: center;
   font-family: 'Kanit', sans-serif;
-  background: rgba(15, 15, 25, 0.88);
-  backdrop-filter: blur(8px);
+  background: rgba(15, 15, 25, 0.95);
   border-left: 3px solid;
   cursor: pointer;
   pointer-events: auto;
@@ -11485,8 +12145,6 @@ out center body;`;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 .float-saved-toggle:hover { background: rgba(255, 165, 2, 0.18); border-color: rgba(255, 165, 2, 0.4); box-shadow: 0 4px 16px rgba(255, 165, 2, 0.15); transform: translateY(-1px); }
 .float-saved-toggle:active { transform: scale(0.96); transition-duration: 0.1s; }
@@ -11675,7 +12333,10 @@ out center body;`;
 :global(.poi-pin.park) { background: linear-gradient(135deg, #10b981, #059669); }
 :global(.poi-pin.museum) { background: linear-gradient(135deg, #6366f1, #4f46e5); }
 :global(.poi-popup) { font-family: 'Kanit', sans-serif; }
-:global(.poi-popup-header) { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+:global(.poi-popup-header) { display: flex; align-items: center; gap: 10px; padding: 12px 14px 8px; }
+:global(.poi-badge) { width: 32px; height: 32px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); font-size: 16px; }
+:global(.poi-popup-name) { font-size: 13px; font-weight: 600; color: #f4f4f5; }
+:global(.poi-popup-meta) { padding: 8px 14px 12px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 :global(.poi-popup-meta p) { margin: 2px 0; font-size: 12px; color: #d4d4d8; }
 
 /* ==================== RESPONSIVE - FLOATING PANELS ==================== */
@@ -12050,9 +12711,9 @@ out center body;`;
 }
 
 /* Incident Markers on Map */
-.incident-marker { background: none !important; border: none !important; }
+:global(.incident-marker) { background: none !important; border: none !important; }
 
-.incident-pin {
+:global(.incident-pin) {
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -12069,49 +12730,60 @@ out center body;`;
   50% { transform: scale(1.1); }
 }
 
-.incident-icon { font-size: 16px; }
+:global(.incident-pin .incident-icon) { font-size: 16px; }
 
-.incident-popup {
-  min-width: 200px;
+:global(.incident-popup) {
+  min-width: 220px;
+  max-width: 280px;
+  overflow: hidden;
 }
 
-.incident-popup-header {
+:global(.incident-popup-header) {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 8px 8px 0 0;
+  gap: 12px;
+  padding: 14px 14px 8px;
   color: white;
   font-weight: 600;
 }
 
-.incident-popup-icon { font-size: 16px; }
-.incident-popup-title { font-size: 13px; }
+:global(.incident-popup-title) { font-size: 13px; line-height: 1.3; font-family: 'Kanit', sans-serif; color: #f4f4f5; }
 
-.incident-popup-content {
-  padding: 10px 12px;
+:global(.incident-popup-content) {
+  padding: 10px 14px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.incident-popup-content p {
+:global(.incident-popup-content p) {
   font-size: 12px;
-  color: #a1a1aa;
-  margin-bottom: 8px;
+  color: #d4d4d8;
+  margin: 0 0 10px 0;
+  line-height: 1.5;
+  font-family: 'Kanit', sans-serif;
 }
 
-.incident-popup-meta {
+:global(.incident-popup-meta) {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   font-size: 11px;
-  color: #71717a;
+  color: #a1a1aa;
+  font-family: 'Kanit', sans-serif;
 }
 
-.incident-popup-time {
-  margin-top: 8px;
+:global(.incident-popup-meta span) {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+:global(.incident-popup-time) {
+  margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 10px;
-  color: #52525b;
+  color: #71717a;
+  font-family: 'Kanit', sans-serif;
 }
 
 .spinner-small {
@@ -12124,15 +12796,6 @@ out center body;`;
 }
 
 /* Mobile adjustments */
-@media (max-width: 768px) {
-  .incidents-panel {
-    width: calc(100% - 32px);
-    max-width: 360px;
-    right: 16px;
-    top: 70px;
-  }
-}
-
 @media (max-width: 768px) {
   .incidents-panel {
     bottom: 80px;
@@ -12846,4 +13509,5 @@ out center body;`;
   border-color: rgba(59, 130, 246, 0.5) !important;
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), inset 0 0 20px rgba(59, 130, 246, 0.1) !important;
 }
+
 </style>
