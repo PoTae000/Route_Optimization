@@ -350,6 +350,10 @@
   let evCostEstimate = 0;
   let evRemainingRange = 0;
   let evBatteryAfterTrip = 0;
+  let evCurrentConsumptionRate = 15; // dynamic kWh/100km based on speed
+  let evTripEnergyUsed = 0; // cumulative kWh used during current trip
+  let _lastEnergyLat = 0;
+  let _lastEnergyLng = 0;
 
   // Voice navigation
   let voiceEnabled = true;
@@ -467,7 +471,14 @@
       fuelConsumption = distanceKm / KM_PER_LITER;
       fuelCostEstimate = fuelConsumption * currentFuelPrice;
     } else {
-      evEnergyConsumption = (distanceKm / 100) * KWH_PER_100KM;
+      // Dynamic EV consumption: use route avg speed for remaining estimate
+      const estRate = remainingTime > 0
+        ? getEVConsumptionForRoute(remainingDistance, remainingTime)
+        : getEVConsumptionAtSpeed(currentSpeed > 3 ? currentSpeed : 60);
+      evCurrentConsumptionRate = isNavigating
+        ? getEVConsumptionAtSpeed(currentSpeed > 1 ? currentSpeed : 60)
+        : estRate;
+      evEnergyConsumption = (distanceKm / 100) * estRate;
       evCostEstimate = evEnergyConsumption * ELECTRICITY_PRICE_PER_KWH;
       evRemainingRange = (evCurrentCharge / 100) * evRangePerCharge;
       const energyUsedPercent = (evEnergyConsumption / evBatteryCapacity) * 100;
@@ -2670,12 +2681,13 @@
     return alt.duration - routeAlternatives[baseIndex].duration;
   }
 
-  function getFuelCostForRoute(distanceMeters: number): number {
+  function getFuelCostForRoute(distanceMeters: number, durationSeconds?: number): number {
     const distKm = distanceMeters / 1000;
     if (vehicleType === 'fuel') {
       return (distKm / KM_PER_LITER) * currentFuelPrice;
     }
-    return ((distKm / 100) * KWH_PER_100KM) * ELECTRICITY_PRICE_PER_KWH;
+    const rate = getEVConsumptionForRoute(distanceMeters, durationSeconds);
+    return ((distKm / 100) * rate) * ELECTRICITY_PRICE_PER_KWH;
   }
 
   async function optimizeRoute() {
@@ -3102,6 +3114,9 @@
     avgSpeedSamples = [];
     lastArrivalDist = Infinity;
     lastDrawnRouteIndex = -1;
+    evTripEnergyUsed = 0;
+    _lastEnergyLat = 0;
+    _lastEnergyLng = 0;
 
     // Cache route coordinates once (prevents O(n) allocation every second)
     if (optimizedRoute?.route?.geometry?.coordinates) {
@@ -3251,6 +3266,9 @@
     cachedRouteCoords = [];
     lastRouteIndex = 0;
     avgSpeedSamples = [];
+    evTripEnergyUsed = 0;
+    _lastEnergyLat = 0;
+    _lastEnergyLng = 0;
     lastDrawnRouteIndex = -1;
     currentSpeed = 0;
     maxSpeed = 0;
@@ -3402,6 +3420,18 @@
     if (currentSpeed > 3) {
       avgSpeedSamples.push(currentSpeed);
       if (avgSpeedSamples.length > 30) avgSpeedSamples.shift();
+    }
+    // EV: accumulate actual energy used based on GPS distance × speed-dependent rate
+    if (isNavigating && vehicleType === 'ev' && _lastEnergyLat !== 0) {
+      const deltaKm = getDistance(_lastEnergyLat, _lastEnergyLng, latitude, longitude);
+      if (deltaKm > 0.005 && deltaKm < 2) { // 5m to 2km sanity
+        const rateAtSpeed = getEVConsumptionAtSpeed(currentSpeed);
+        evTripEnergyUsed += deltaKm * (rateAtSpeed / 100);
+      }
+    }
+    if (isNavigating && vehicleType === 'ev') {
+      _lastEnergyLat = latitude;
+      _lastEnergyLng = longitude;
     }
     // Update nearest route index FIRST (fresh for all subsequent functions)
     if (isNavigating && cachedRouteCoords.length > 0) {
@@ -4282,8 +4312,20 @@
 
   function updateFuelEstimate() {
     const distanceKm = remainingDistance / 1000;
-    fuelConsumption = distanceKm / KM_PER_LITER;
-    fuelCostEstimate = fuelConsumption * currentFuelPrice;
+    if (vehicleType === 'fuel') {
+      fuelConsumption = distanceKm / KM_PER_LITER;
+      fuelCostEstimate = fuelConsumption * currentFuelPrice;
+    } else {
+      const estRate = remainingTime > 0
+        ? getEVConsumptionForRoute(remainingDistance, remainingTime)
+        : getEVConsumptionAtSpeed(currentSpeed > 3 ? currentSpeed : 60);
+      evCurrentConsumptionRate = getEVConsumptionAtSpeed(currentSpeed > 1 ? currentSpeed : 60);
+      evEnergyConsumption = (distanceKm / 100) * estRate;
+      evCostEstimate = evEnergyConsumption * ELECTRICITY_PRICE_PER_KWH;
+      evRemainingRange = (evCurrentCharge / 100) * evRangePerCharge;
+      const energyUsedPercent = ((evTripEnergyUsed + evEnergyConsumption) / evBatteryCapacity) * 100;
+      evBatteryAfterTrip = Math.max(0, evCurrentCharge - energyUsedPercent);
+    }
   }
 
   function getCostEstimate(): number {
@@ -4493,6 +4535,26 @@
     } else {
       await optimizeRoute();
     }
+  }
+
+  // Speed-dependent EV consumption model (physics-based)
+  // Components: rolling resistance (constant) + aerodynamic drag (v²) + auxiliary loads (1/v)
+  // Normalized to 1.0× at 60 km/h (user's base KWH_PER_100KM setting)
+  function getEVConsumptionAtSpeed(speedKmh: number): number {
+    if (speedKmh < 1) return KWH_PER_100KM;
+    const ref = 60;
+    const v = Math.min(Math.max(speedKmh, 5), 180);
+    const rolling = 0.4;
+    const aero = 0.35 * (v * v) / (ref * ref);
+    const aux = 0.25 * ref / v;
+    return KWH_PER_100KM * (rolling + aero + aux);
+  }
+
+  // Get estimated average consumption for a route using distance/duration
+  function getEVConsumptionForRoute(distanceMeters: number, durationSeconds?: number): number {
+    if (!durationSeconds || durationSeconds <= 0) return KWH_PER_100KM;
+    const avgSpeedKmh = (distanceMeters / 1000) / (durationSeconds / 3600);
+    return getEVConsumptionAtSpeed(avgSpeedKmh);
   }
 
   function getEVBatteryColor(): string {
@@ -5160,7 +5222,7 @@ out center body;`;
         address: deliveredPoint.address || '',
         lat: Number(deliveredPoint.lat),
         lng: Number(deliveredPoint.lng),
-        notes: `ส่งสำเร็จ - ${new Date().toLocaleString('th-TH')}`
+        notes: `ถึงจุดหมายแล้ว - ${new Date().toLocaleString('th-TH')}`
       };
 
       if (currentUser?.id) payload.user_id = Number(currentUser.id);
@@ -5209,7 +5271,7 @@ out center body;`;
         lastDeliveryUndo = { point: deliveredPoint, index: currentTargetIndex, time: Date.now() };
         if (undoTimeout) clearTimeout(undoTimeout);
         undoTimeout = setTimeout(() => { lastDeliveryUndo = null; }, 30000);
-        addAlert('delivery', `ส่งสำเร็จ: ${deliveredPoint.name}`);
+        addAlert('delivery', `ถึงจุดหมายแล้ว: ${deliveredPoint.name}`);
         currentTargetIndex = 1;
         arrivedPoints = [0];
         if (currentLocation) { await recalculateRouteFromCurrentPosition(); } else { updateNavigationMarkers(); }
@@ -6195,44 +6257,88 @@ out center body;`;
                 
                 {#if vehicleType === 'fuel'}
                   <div class="vehicle-info-card fuel">
-                    <div class="info-row">
-                      <span class="info-icon">💰</span>
-                      <span class="info-text">ราคาที่ใช้: <strong style="color: #00ff88">฿{currentFuelPrice.toFixed(2)}/ลิตร</strong></span>
+                    <div class="vic-top-row">
+                      <div class="vic-header fuel-header">
+                        <div class="vic-header-icon">⛽</div>
+                        <div class="vic-header-info">
+                          <span class="vic-header-title">รถน้ำมัน</span>
+                          <span class="vic-header-sub">฿{currentFuelPrice.toFixed(2)}/ลิตร</span>
+                        </div>
+                      </div>
+                      <div class="vic-inline-stat fuel-stat">
+                        <span class="vic-inline-val">{KM_PER_LITER}</span>
+                        <span class="vic-inline-unit">กม./ลิตร</span>
+                      </div>
                     </div>
-                    <div class="vehicle-adjust">
+                    <div class="vic-slider-row">
                       <!-- svelte-ignore a11y_label_has_associated_control -->
-                      <label>📊 อัตราสิ้นเปลือง: <strong>{KM_PER_LITER}</strong> กม./ลิตร</label>
-                      <input type="range" min="5" max="30" step="0.5" bind:value={KM_PER_LITER} on:change={saveVehicleSettings} class="ev-slider" />
-                      <div class="adjust-range-hint"><span>5</span><span>30</span></div>
+                      <label class="vic-label-compact">อัตราสิ้นเปลือง</label>
+                      <input type="range" min="5" max="30" step="0.5" bind:value={KM_PER_LITER} on:change={saveVehicleSettings} class="vic-range fuel-range" />
+                      <div class="vic-range-hint"><span>5</span><span>30</span></div>
                     </div>
                   </div>
                 {:else}
                   <div class="vehicle-info-card ev">
-                    <div class="vehicle-adjust">
-                      <!-- svelte-ignore a11y_label_has_associated_control -->
-                      <label>🔌 ค่าไฟ: <strong>{ELECTRICITY_PRICE_PER_KWH}</strong> ฿/kWh</label>
-                      <input type="range" min="1" max="10" step="0.1" bind:value={ELECTRICITY_PRICE_PER_KWH} on:change={saveVehicleSettings} class="ev-slider" />
-                      <div class="adjust-range-hint"><span>1</span><span>10</span></div>
+                    <div class="vic-top-row">
+                      <div class="vic-header ev-header">
+                        <div class="vic-header-icon">⚡</div>
+                        <div class="vic-header-info">
+                          <span class="vic-header-title">รถไฟฟ้า</span>
+                          <span class="vic-header-sub">฿{ELECTRICITY_PRICE_PER_KWH}/kWh</span>
+                        </div>
+                      </div>
+                      <div class="vic-mini-stats">
+                        <div class="vic-mini-stat">
+                          <span class="vic-mini-val" style="color: {getEVBatteryColor()}">{evRemainingRange.toFixed(0)}</span>
+                          <span class="vic-mini-unit">กม.</span>
+                        </div>
+                        <div class="vic-mini-divider"></div>
+                        <div class="vic-mini-stat">
+                          <span class="vic-mini-val" style="color: {evCurrentConsumptionRate > KWH_PER_100KM * 1.3 ? '#ff6b6b' : evCurrentConsumptionRate < KWH_PER_100KM * 0.9 ? '#00ff88' : '#60a5fa'}">{evCurrentConsumptionRate.toFixed(1)}</span>
+                          <span class="vic-mini-unit">kWh/100กม.</span>
+                        </div>
+                        <div class="vic-mini-divider"></div>
+                        <div class="vic-mini-stat">
+                          <span class="vic-mini-val" style="color: {getEVBatteryColor()}">{evCurrentCharge}%</span>
+                          <span class="vic-mini-unit">แบต</span>
+                        </div>
+                      </div>
                     </div>
-                    <div class="vehicle-adjust">
-                      <!-- svelte-ignore a11y_label_has_associated_control -->
-                      <label>📊 กินไฟ: <strong>{KWH_PER_100KM}</strong> kWh/100กม.</label>
-                      <input type="range" min="8" max="30" step="0.5" bind:value={KWH_PER_100KM} on:change={saveVehicleSettings} class="ev-slider" />
-                      <div class="adjust-range-hint"><span>8</span><span>30</span></div>
-                    </div>
-                    <div class="ev-battery-setting">
-                      <!-- svelte-ignore a11y_label_has_associated_control -->
-                      <label>🔋 แบตเตอรี่ปัจจุบัน: {evCurrentCharge}%</label>
-                      <input 
-                        type="range" 
-                        min="0" 
-                        max="100" 
-                        bind:value={evCurrentCharge}
-                        on:change={saveVehicleSettings}
-                        class="ev-slider"
-                      />
-                      <div class="ev-range-info">
-                        <span>ระยะทางเหลือ: <strong style="color: {getEVBatteryColor()}">{evRemainingRange.toFixed(0)} กม.</strong></span>
+
+                    <div class="vic-grid-sliders">
+                      <div class="vic-slider-cell">
+                        <!-- svelte-ignore a11y_label_has_associated_control -->
+                        <label class="vic-label">
+                          <span>🔌 ค่าไฟฟ้า</span>
+                          <strong>{ELECTRICITY_PRICE_PER_KWH} <small>฿/kWh</small></strong>
+                        </label>
+                        <input type="range" min="1" max="10" step="0.1" bind:value={ELECTRICITY_PRICE_PER_KWH} on:change={saveVehicleSettings} class="vic-range ev-range" />
+                        <div class="vic-range-hint"><span>1</span><span>10</span></div>
+                      </div>
+                      <div class="vic-slider-cell">
+                        <!-- svelte-ignore a11y_label_has_associated_control -->
+                        <label class="vic-label">
+                          <span>🔋 แบตเตอรี่</span>
+                          <strong>{evCurrentCharge}<small>%</small></strong>
+                        </label>
+                        <input type="range" min="0" max="100" bind:value={evCurrentCharge} on:change={saveVehicleSettings} class="vic-range battery-range" style="--battery-color: {getEVBatteryColor()}" />
+                      </div>
+                      <div class="vic-slider-cell vic-slider-wide">
+                        <!-- svelte-ignore a11y_label_has_associated_control -->
+                        <label class="vic-label">
+                          <span>📊 กินไฟ (ฐาน @60km/h)</span>
+                          <strong>{KWH_PER_100KM} <small>kWh/100กม.</small></strong>
+                        </label>
+                        <div class="vic-consumption-row">
+                          <input type="range" min="8" max="30" step="0.5" bind:value={KWH_PER_100KM} on:change={saveVehicleSettings} class="vic-range ev-range" />
+                          <div class="vic-speed-chips">
+                            <span class="vic-chip" style="color: #34d399">{(KWH_PER_100KM * 0.86).toFixed(0)}<small>@40</small></span>
+                            <span class="vic-chip" style="color: #60a5fa">{KWH_PER_100KM}<small>@60</small></span>
+                            <span class="vic-chip" style="color: #fbbf24">{(KWH_PER_100KM * 1.21).toFixed(0)}<small>@80</small></span>
+                            <span class="vic-chip" style="color: #f87171">{(KWH_PER_100KM * 1.53).toFixed(0)}<small>@100</small></span>
+                          </div>
+                        </div>
+                        <div class="vic-range-hint"><span>8</span><span>30</span></div>
                       </div>
                     </div>
                   </div>
@@ -7102,9 +7208,19 @@ out center body;`;
                   <strong>{evRemainingRange.toFixed(0)} กม.</strong>
                 </div>
                 <div class="ev-info-row">
-                  <span>⚡ ใช้พลังงาน:</span>
+                  <span>⚡ ใช้พลังงาน (คาดการณ์):</span>
                   <strong>{evEnergyConsumption.toFixed(1)} kWh</strong>
                 </div>
+                <div class="ev-info-row">
+                  <span>📊 อัตรากินไฟ:</span>
+                  <strong style="color: {evCurrentConsumptionRate > KWH_PER_100KM * 1.3 ? '#ff6b6b' : evCurrentConsumptionRate < KWH_PER_100KM * 0.9 ? '#00ff88' : '#ffa502'}">{evCurrentConsumptionRate.toFixed(1)} kWh/100กม.</strong>
+                </div>
+                {#if isNavigating && evTripEnergyUsed > 0}
+                  <div class="ev-info-row">
+                    <span>🔌 ใช้จริง (ทริปนี้):</span>
+                    <strong style="color: #00d4ff">{evTripEnergyUsed.toFixed(2)} kWh</strong>
+                  </div>
+                {/if}
                 <div class="ev-info-row">
                   <span>🔋 แบตหลังจบ:</span>
                   <strong style="color: {evBatteryAfterTrip > 20 ? '#00ff88' : '#ff6b6b'}">{evBatteryAfterTrip.toFixed(0)}%</strong>
@@ -7132,14 +7248,16 @@ out center body;`;
                     <span>{fuelLiters.toFixed(1)} ลิตร × ฿{currentFuelPrice.toFixed(2)}</span>
                   </div>
                 {:else}
-                  {@const evKwh = ((optimizedRoute.total_distance / 1000) / 100) * KWH_PER_100KM}
+                  {@const evRate = getEVConsumptionForRoute(optimizedRoute.total_distance, optimizedRoute.total_time)}
+                  {@const evKwh = ((optimizedRoute.total_distance / 1000) / 100) * evRate}
                   {@const evCost = Math.round(evKwh * ELECTRICITY_PRICE_PER_KWH)}
+                  {@const avgSpd = optimizedRoute.total_time > 0 ? (optimizedRoute.total_distance / 1000) / (optimizedRoute.total_time / 3600) : 60}
                   <div class="cost-row">
                     <span class="cost-label">⚡ ค่าไฟฟ้า</span>
                     <span class="cost-value">฿{evCost.toLocaleString()}</span>
                   </div>
                   <div class="cost-row sub">
-                    <span>{evKwh.toFixed(1)} kWh × ฿{ELECTRICITY_PRICE_PER_KWH}</span>
+                    <span>{evKwh.toFixed(1)} kWh ({evRate.toFixed(1)} kWh/100กม. @~{Math.round(avgSpd)} km/h)</span>
                   </div>
                 {/if}
 
@@ -7167,7 +7285,8 @@ out center body;`;
                     <span>≈ ฿{(totalCost / Math.max(optimizedRoute.total_distance / 1000, 0.1)).toFixed(1)}/กม.</span>
                   </div>
                 {:else}
-                  {@const totalCostEV = Math.round((((optimizedRoute.total_distance / 1000) / 100) * KWH_PER_100KM) * ELECTRICITY_PRICE_PER_KWH) + tollCostEstimate}
+                  {@const evRateTotal = getEVConsumptionForRoute(optimizedRoute.total_distance, optimizedRoute.total_time)}
+                  {@const totalCostEV = Math.round((((optimizedRoute.total_distance / 1000) / 100) * evRateTotal) * ELECTRICITY_PRICE_PER_KWH) + tollCostEstimate}
                   <div class="cost-row total">
                     <span class="cost-label">รวมทั้งหมด</span>
                     <span class="cost-value">฿{totalCostEV.toLocaleString()}</span>
@@ -7234,7 +7353,7 @@ out center body;`;
                 </div>
                 <div class="route-stat-item">
                   <span class="route-stat-icon">{getCostIcon()}</span>
-                  <span class="route-stat-val">฿{Math.round(getFuelCostForRoute(alt.distance))}</span>
+                  <span class="route-stat-val">฿{Math.round(getFuelCostForRoute(alt.distance, alt.duration))}</span>
                 </div>
               </div>
               <div class="route-option-tags">
@@ -7290,7 +7409,7 @@ out center body;`;
               <div class="comp-col label" style="color: {alt.color}">{alt.label}</div>
               <div class="comp-col">{(alt.distance / 1000).toFixed(1)} กม.</div>
               <div class="comp-col">{Math.round(alt.duration / 60)} นาที</div>
-              <div class="comp-col">฿{Math.round(getFuelCostForRoute(alt.distance))}</div>
+              <div class="comp-col">฿{Math.round(getFuelCostForRoute(alt.distance, alt.duration))}</div>
               <div class="comp-col">
                 {#if alt.hasTolls}
                   <span style="color: #f59e0b">฿{alt.tollEstimate}</span>
@@ -7314,7 +7433,7 @@ out center body;`;
           {#if routeAlternatives.length >= 2}
             {@const fastest = routeAlternatives.reduce((a, b) => a.duration < b.duration ? a : b)}
             {@const shortest = routeAlternatives.reduce((a, b) => a.distance < b.distance ? a : b)}
-            {@const cheapest = routeAlternatives.reduce((a, b) => getFuelCostForRoute(a.distance) + a.tollEstimate < getFuelCostForRoute(b.distance) + b.tollEstimate ? a : b)}
+            {@const cheapest = routeAlternatives.reduce((a, b) => getFuelCostForRoute(a.distance, a.duration) + a.tollEstimate < getFuelCostForRoute(b.distance, b.duration) + b.tollEstimate ? a : b)}
             <div class="summary-badges">
               <span class="summary-badge" style="color: {fastest.color}">🚀 เร็วสุด: {fastest.label}</span>
               <span class="summary-badge" style="color: {cheapest.color}">💰 ถูกสุด: {cheapest.label}</span>
@@ -7942,27 +8061,7 @@ out center body;`;
   animation: spin 0.8s linear infinite;
 }
 
-/* Enhanced Vehicle Info Card for Fuel */
-.vehicle-info-card.fuel {
-  background: rgba(0, 255, 136, 0.08);
-  border: 1px solid rgba(0, 255, 136, 0.2);
-  padding: 16px;
-  max-height: 500px;
-  overflow-y: auto;
-}
-
-.vehicle-info-card.fuel::-webkit-scrollbar {
-  width: 6px;
-}
-
-.vehicle-info-card.fuel::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.vehicle-info-card.fuel::-webkit-scrollbar-thumb {
-  background: rgba(0, 255, 136, 0.3);
-  border-radius: 3px;
-}
+/* Enhanced Vehicle Info Cards */
 
 /* ==================== REORDER MODE ==================== */
 .btn-reorder-active {
@@ -8293,17 +8392,31 @@ out center body;`;
 }
 
 .day-mode .vehicle-info-card {
-  background: rgba(242, 238, 232, 0.8) !important;
+  background: rgba(242, 238, 232, 0.85) !important;
   color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
+  border-color: rgba(100, 80, 60, 0.12) !important;
 }
-
-.day-mode .info-text {
-  color: #2a2520 !important;
-}
-.day-mode .vehicle-adjust label { color: #5c5349; }
-.day-mode .vehicle-adjust label strong { color: #006a48; }
-.day-mode .adjust-range-hint { color: rgba(0,0,0,0.25); }
+.day-mode .vehicle-info-card.fuel { background: linear-gradient(135deg, rgba(0,180,100,0.06) 0%, rgba(240,237,230,0.9) 100%) !important; border-color: rgba(0,180,100,0.18) !important; }
+.day-mode .vehicle-info-card.ev { background: linear-gradient(135deg, rgba(59,130,246,0.06) 0%, rgba(240,237,230,0.9) 100%) !important; border-color: rgba(59,130,246,0.18) !important; }
+.day-mode .vic-header-title { color: #1e1b18; }
+.day-mode .vic-header-sub { color: #71717a; }
+.day-mode .fuel-header .vic-header-sub { color: #059669; }
+.day-mode .ev-header .vic-header-sub { color: #2563eb; }
+.day-mode .vic-inline-val { color: #059669; }
+.day-mode .vic-inline-unit { color: #78716c; }
+.day-mode .vic-label, .day-mode .vic-label-compact { color: #5c5349; }
+.day-mode .vic-label strong { color: #1e1b18 !important; }
+.day-mode .vehicle-info-card.fuel .vic-label strong { color: #059669 !important; }
+.day-mode .vehicle-info-card.ev .vic-label strong { color: #2563eb !important; }
+.day-mode .vic-range { background: rgba(0,0,0,0.08); }
+.day-mode .vic-range-hint { color: rgba(0,0,0,0.15); }
+.day-mode .vic-mini-stats { background: rgba(0,0,0,0.04); }
+.day-mode .vic-mini-divider { background: rgba(0,0,0,0.08); }
+.day-mode .vic-mini-unit { color: #a8a29e; }
+.day-mode .vic-slider-row { border-top-color: rgba(0,0,0,0.06); }
+.day-mode .vic-grid-sliders { border-top-color: rgba(0,0,0,0.06); }
+.day-mode .vic-slider-cell { border-color: rgba(0,0,0,0.04) !important; }
+.day-mode .vic-chip small { color: #a8a29e; }
 
 .day-mode .route-summary h3,
 .day-mode .summary-header h3 {
@@ -8964,23 +9077,65 @@ out center body;`;
   .vehicle-icon { font-size: 32px; }
   .vehicle-label { font-size: 14px; font-weight: 500; color: #e4e4e7; }
 
-  .vehicle-info-card { padding: 16px; border-radius: 12px; margin-top: 12px; }
-  .vehicle-info-card.fuel { background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2); }
-  .vehicle-info-card.ev { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); }
-  .info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
-  .info-icon { font-size: 18px; }
-  .info-text { font-size: 14px; color: #a1a1aa; }
+  /* Vehicle Info Card - shared */
+  .vehicle-info-card { border-radius: 12px; margin-top: 10px; overflow: hidden; }
+  .vehicle-info-card.fuel { background: linear-gradient(135deg, rgba(0,255,136,0.05) 0%, rgba(0,200,100,0.02) 100%); border: 1px solid rgba(0,255,136,0.15); }
+  .vehicle-info-card.ev { background: linear-gradient(135deg, rgba(59,130,246,0.05) 0%, rgba(99,102,241,0.02) 100%); border: 1px solid rgba(59,130,246,0.15); }
 
-  .vehicle-adjust { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
-  .vehicle-adjust label { display: block; font-size: 13px; color: #a1a1aa; margin-bottom: 8px; }
-  .vehicle-adjust label strong { color: #00ff88; font-size: 14px; }
-  .adjust-range-hint { display: flex; justify-content: space-between; font-size: 10px; color: rgba(255,255,255,0.25); margin-top: 4px; }
-  .ev-battery-setting { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
-  .ev-battery-setting label { display: block; font-size: 13px; color: #a1a1aa; margin-bottom: 10px; }
-  .ev-slider { width: 100%; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); appearance: none; cursor: pointer; }
-  .ev-slider::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #3b82f6; cursor: pointer; }
-  .ev-range-info { margin-top: 12px; text-align: center; font-size: 14px; color: #71717a; }
-  .ev-range-info strong { font-size: 16px; }
+  /* Top row: header left + stats right */
+  .vic-top-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; gap: 8px; }
+  .vic-header { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .vic-header-icon { font-size: 18px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 8px; flex-shrink: 0; }
+  .fuel-header .vic-header-icon { background: rgba(0,255,136,0.12); }
+  .ev-header .vic-header-icon { background: rgba(59,130,246,0.12); }
+  .vic-header-info { display: flex; flex-direction: column; gap: 0; }
+  .vic-header-title { font-size: 13px; font-weight: 600; color: #e4e4e7; line-height: 1.2; }
+  .vic-header-sub { font-size: 11px; color: #71717a; line-height: 1.2; }
+  .fuel-header .vic-header-sub { color: #34d399; }
+  .ev-header .vic-header-sub { color: #60a5fa; }
+
+  /* Fuel inline stat */
+  .vic-inline-stat { display: flex; align-items: baseline; gap: 4px; }
+  .vic-inline-val { font-size: 22px; font-weight: 700; color: #34d399; line-height: 1; }
+  .vic-inline-unit { font-size: 10px; color: #71717a; }
+
+  /* EV mini stats (inline, right side of header) */
+  .vic-mini-stats { display: flex; align-items: center; gap: 0; background: rgba(255,255,255,0.04); border-radius: 8px; padding: 4px 2px; flex-shrink: 0; }
+  .vic-mini-stat { display: flex; flex-direction: column; align-items: center; padding: 0 8px; }
+  .vic-mini-val { font-size: 14px; font-weight: 700; line-height: 1.2; }
+  .vic-mini-unit { font-size: 8px; color: #52525b; line-height: 1.2; }
+  .vic-mini-divider { width: 1px; height: 20px; background: rgba(255,255,255,0.08); flex-shrink: 0; }
+
+  /* Fuel single slider row */
+  .vic-slider-row { padding: 6px 12px 8px; border-top: 1px solid rgba(0,255,136,0.08); }
+  .vic-label-compact { display: block; font-size: 10px; color: #71717a; margin-bottom: 4px; }
+
+  /* EV grid sliders - 2 cols */
+  .vic-grid-sliders { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-top: 1px solid rgba(59,130,246,0.08); }
+  .vic-slider-cell { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .vic-slider-cell:nth-child(odd) { border-right: 1px solid rgba(255,255,255,0.04); }
+  .vic-slider-wide { grid-column: 1 / -1; border-right: none; }
+
+  .vic-label { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; font-size: 11px; color: #a1a1aa; }
+  .vic-label strong { font-size: 14px; color: #e4e4e7; font-weight: 600; }
+  .vic-label strong small { font-size: 9px; color: #71717a; font-weight: 400; }
+  .vehicle-info-card.fuel .vic-label strong { color: #34d399; }
+  .vehicle-info-card.ev .vic-label strong { color: #60a5fa; }
+
+  /* Range sliders */
+  .vic-range { width: 100%; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); appearance: none; cursor: pointer; outline: none; }
+  .vic-range::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; cursor: pointer; border: 2px solid rgba(0,0,0,0.2); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+  .fuel-range::-webkit-slider-thumb { background: #00ff88; }
+  .ev-range::-webkit-slider-thumb { background: #3b82f6; }
+  .battery-range::-webkit-slider-thumb { background: var(--battery-color, #3b82f6); }
+  .vic-range-hint { display: flex; justify-content: space-between; font-size: 8px; color: rgba(255,255,255,0.15); margin-top: 2px; }
+
+  /* Consumption row: slider + speed chips side by side */
+  .vic-consumption-row { display: flex; align-items: center; gap: 10px; }
+  .vic-consumption-row .vic-range { flex: 1; min-width: 0; }
+  .vic-speed-chips { display: flex; gap: 3px; flex-shrink: 0; }
+  .vic-chip { font-size: 11px; font-weight: 700; display: flex; align-items: baseline; gap: 1px; }
+  .vic-chip small { font-size: 8px; color: #52525b; margin-left: 1px; }
 
   /* EV Status Display during Navigation */
   .ev-status-display { position: absolute; right: 20px; bottom: 260px; padding: 12px; width: 130px; pointer-events: none; z-index: 1050; }
@@ -9145,7 +9300,12 @@ out center body;`;
     .vehicle-type-btn { padding: 12px; gap: 6px; border-radius: 10px; }
     .vehicle-icon { font-size: 20px; }
     .vehicle-label { font-size: 12px; }
-    .vehicle-info-card { padding: 12px; font-size: 13px; }
+    .vehicle-info-card { font-size: 13px; }
+    .vic-header { padding: 10px 12px; }
+    .vic-slider-group { padding: 8px 12px; }
+    .vic-stats-row { margin: 0 12px 6px; }
+    .vic-stat-val { font-size: 16px; }
+    .vic-range::-webkit-slider-thumb { width: 20px; height: 20px; }
     .toggle-setting { padding: 10px 0; font-size: 14px; }
     .toggle-btn { width: 44px; height: 24px; border-radius: 12px; }
     .toggle-knob { width: 18px; height: 18px; }
@@ -9155,8 +9315,8 @@ out center body;`;
     .settings-actions { flex-direction: column; gap: 8px; padding-top: 16px; }
     .settings-actions .btn { width: 100%; justify-content: center; padding: 14px; font-size: 14px; }
     .oil-select-group select { width: 100%; padding: 10px; font-size: 14px; }
-    .ev-slider { height: 10px; }
-    .ev-slider::-webkit-slider-thumb { width: 24px; height: 24px; }
+    .vic-range { height: 8px; }
+    .vic-range::-webkit-slider-thumb { width: 22px; height: 22px; }
     .ev-buttons { flex-direction: column; }
     .ev-buttons .btn { width: 100%; justify-content: center; }
   }
