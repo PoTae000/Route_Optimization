@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
 
-  const API_URL = 'https://backend-route-optimization.onrender.com/api';
+  const API_URL = 'https://backend-route-optimization.onrender.com//api';
 
   let username = '';
   let password = '';
