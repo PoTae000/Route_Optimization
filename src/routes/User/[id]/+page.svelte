@@ -118,7 +118,7 @@
   let optimizedRoute: any = null;
   let routeLayer: any = null;
   let markers: any[] = [];
-  const API_URL = 'https://backend-route-optimization.onrender.com/api';
+  const API_URL = 'https://backend-route-optimization-phrjxz6hk-potae000s-projects.vercel.app/api';
 
   let newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
   let isOptimizing = false;
