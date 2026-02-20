@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
 
-  const API_URL = 'https://backend-route-optimization-phrjxz6hk-potae000s-projects.vercel.app/api';
+  const API_URL = 'https://backendrouteoptimization-production.up.railway.app/api';
 
   let username = '';
   let password = '';
