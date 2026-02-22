@@ -3,6 +3,14 @@
   import { goto, beforeNavigate } from '$app/navigation';
   import { page } from '$app/stores';
   import { browser } from '$app/environment';
+  import type { TurnInstruction, DeliveryRecord, ChargingStation, OilPriceData, RoutePOI, RecentSearch, SavedRoute, TrafficIncident, VehicleType } from '$lib/types';
+  import { getDistance, formatDistance, formatTime, formatETA, escapeHtml, withTimeout, calculateBearing } from '$lib/utils/geo';
+  import { getTurnIcon, getTurnText, extractTurnInstructions, detectTollRoad, estimateTollCost } from '$lib/utils/navigation';
+  import { getEVConsumptionAtSpeed as _getEVConsumptionAtSpeed, getEVConsumptionForRoute as _getEVConsumptionForRoute, getPriorityGradient, getPriorityLabel } from '$lib/utils/vehicle';
+  import SettingsPanel from '$lib/components/SettingsPanel.svelte';
+  import AlertsPanel from '$lib/components/AlertsPanel.svelte';
+  import NavigationOverlay from '$lib/components/NavigationOverlay.svelte';
+  import SearchPanel from '$lib/components/SearchPanel.svelte';
 
   let currentUser: any = null;
 
@@ -123,13 +131,14 @@
   let newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
   let isOptimizing = false;
   let showAddForm = false;
+  let addPointMode = false;
   let clickMarker: any = null;
 
   let notification = { show: false, message: '', type: 'success' as 'success' | 'error' | 'warning' };
   let activeTab: 'points' | 'route' = 'points';
   let activePointId: number | null = null;
   let isNavigating = false;
-  let mobileSidebarOpen = true;
+  let mobileSidebarOpen = false;
   let desktopSidebarCollapsed = false;
   let isDragMode = false;
   let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
@@ -187,6 +196,7 @@
 
   // Smooth animation (Google Maps-like 60fps interpolation)
   let animFrameId: number | null = null;
+  let _animFrameCount = 0;
   let animPrevLat = 0, animPrevLng = 0;
   let animTargetLat = 0, animTargetLng = 0;
   let animCurrentLat = 0, animCurrentLng = 0;
@@ -206,17 +216,6 @@
 
 
   // ==================== OIL PRICE API ====================
-  interface OilPriceData {
-    date: string;
-    stations: {
-      [key: string]: {
-        [fuelType: string]: {
-          name: string;
-          price: string;
-        };
-      };
-    };
-  }
   let oilPriceData: OilPriceData | null = null;
   let isLoadingOilPrice = false;
   let oilPriceLastUpdated: Date | null = null;
@@ -339,7 +338,6 @@
   let fuelCostEstimate = 0;
   let KM_PER_LITER = 15;
 
-  type VehicleType = 'fuel' | 'ev';
   let vehicleType: VehicleType = 'fuel';
   let ELECTRICITY_PRICE_PER_KWH = 4.5;
   let KWH_PER_100KM = 15;
@@ -369,34 +367,6 @@
   let selectedPoints: number[] = [];
   let isMultiSelectMode = false;
 
-  interface ChargingStation {
-    id: number;
-    name: string;
-    address: string;
-    lat: number;
-    lng: number;
-    distance?: number;
-    operator?: string;
-    connectionTypes?: string[];
-    powerKW?: number;
-    numberOfPoints?: number;
-    status?: string;
-    usageCost?: string;
-    isOperational?: boolean;
-    stopNumber?: number;
-    estimatedChargingTime?: number;
-  }
-
-  interface DeliveryRecord {
-    id: number;
-    pointId: number | string;
-    pointName: string;
-    address: string;
-    status: 'success' | 'skipped';
-    timestamp: Date;
-    lat: number;
-    lng: number;
-  }
   let deliveryHistory: DeliveryRecord[] = [];
 
   let batteryLevel = 100;
@@ -409,17 +379,6 @@
   let routeChargingStops: ChargingStation[] = [];
 
   // ==================== ALONG-ROUTE POI ====================
-  interface RoutePOI {
-    id: string;
-    type: 'gas' | 'convenience' | 'restaurant' | 'cafe' | 'ev_charging' | 'viewpoint' | 'attraction' | 'temple' | 'park' | 'museum';
-    name: string;
-    lat: number;
-    lng: number;
-    routeIndex: number;
-    distFromRoute: number;
-    distAlongRoute: number;
-    tags?: Record<string, string>;
-  }
   let alongRoutePOIs: RoutePOI[] = [];
   let poiMarkers: any[] = [];
   let showPOIOverlay = false;
@@ -489,6 +448,9 @@
   // perf: direct alias instead of .map(spread) - User page has no customer system
   $: allDeliveryPoints = deliveryPoints;
 
+  // Resize map when settings/addForm opens/closes (sidebar hides/shows)
+  $: if (browser && map) { showSettings; showAddForm; desktopSidebarCollapsed; mobileSidebarOpen; setTimeout(() => map?.invalidateSize(), 50); setTimeout(() => map?.invalidateSize(), 200); setTimeout(() => map?.invalidateSize(), 350); }
+
   let alerts: { id: number; type: string; message: string; time: Date }[] = [];
   let showAlerts = false;
   let gpsStatus: 'excellent' | 'good' | 'weak' | 'poor' = 'good';
@@ -521,7 +483,7 @@
   let rerouteCooldown = 15000; // 15 seconds
   let offRouteDistance = 0;
   let consecutiveOffRouteCount = 0;
-  let offRouteRequiredCount = 3;
+  let offRouteRequiredCount = 2;
   let rerouteCount = 0;
   let isAutoRerouting = false;
   let lastVoiceTime = 0;
@@ -529,76 +491,23 @@
   let lastSpokenThreshold = '';
   let oilPriceFailCount = 0;
 
-  // ==================== PROMISE TIMEOUT UTILITY ====================
-  function withTimeout<T>(promise: Promise<T>, ms: number, label = 'operation'): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-      promise.then(
-        (val) => { clearTimeout(timer); resolve(val); },
-        (err) => { clearTimeout(timer); reject(err); }
-      );
-    });
-  }
-
-  // ==================== HTML ESCAPE (XSS Prevention) ====================
-  function escapeHtml(str: string): string {
-    if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-  }
 
 
   // Turn-by-Turn Navigation
-  interface TurnInstruction {
-    type: string;
-    modifier?: string;
-    name: string;
-    distance: number;
-    duration: number;
-    location: [number, number];
-  }
   let turnInstructions: TurnInstruction[] = [];
   let currentStepIndex = 0;
   let nextTurnDistance = 0;
   let nextTurnInstruction = '';
   let nextTurnIcon = '';
 
-  // Destination Search (Nominatim)
-  let searchQuery = '';
-  let searchResults: any[] = [];
-  let isSearching = false;
-  let searchDebounceTimer: any = null;
-  let searchAbortController: AbortController | null = null;
+  // Search (state moved to SearchPanel component)
+  let isSearchFocused = false;
   let evAbortController: AbortController | null = null;
   let poiAbortController: AbortController | null = null;
-  let showSearchResults = false;
-  let searchFocused = false;
   let destinationMarker: any = null;
-
-  // Recent Searches
-  interface RecentSearch {
-    name: string;
-    address: string;
-    lat: number;
-    lng: number;
-    timestamp: number;
-  }
-  let recentSearches: RecentSearch[] = [];
-  const MAX_RECENT_SEARCHES = 8;
-
-  // Direct A→B Navigation
   let directDestination: { lat: number; lng: number; name: string; address: string } | null = null;
 
   // Saved/Favorite Routes
-  interface SavedRoute {
-    id: string;
-    name: string;
-    from: { lat: number; lng: number; name: string };
-    to: { lat: number; lng: number; name: string };
-    distance: number;
-    duration: number;
-    avoidTolls: boolean;
-    createdAt: string;
-  }
   let savedRoutes: SavedRoute[] = [];
   let showSavedRoutes = false;
 
@@ -615,19 +524,6 @@
   let shareQRUrl = '';
 
   // ==================== TRAFFIC INCIDENTS ====================
-  interface TrafficIncident {
-    id: string;
-    type: 'accident' | 'construction' | 'road_closed' | 'congestion' | 'hazard' | 'event';
-    severity: 'minor' | 'moderate' | 'major' | 'critical';
-    title: string;
-    description: string;
-    lat: number;
-    lng: number;
-    road: string;
-    startTime: Date;
-    endTime?: Date;
-    delay?: number; // minutes
-  }
   let trafficIncidents: TrafficIncident[] = [];
   let incidentMarkers: any[] = [];
   let showIncidentsPanel = false;
@@ -678,6 +574,10 @@
       if (!saved) return false;
       const state = JSON.parse(saved);
       if (!state.alts?.length || !state.start) return false;
+      // Clear all existing layers before restoring to prevent duplicates
+      clearAlternativeRouteLayers();
+      clearTrafficLayers();
+      if (routeLayer) { try { map.removeLayer(routeLayer); } catch (e) {} routeLayer = null; }
       routeAlternatives = state.alts;
       selectRoute(state.idx || 0, state.start, state.pts || [], true);
       return true;
@@ -780,6 +680,7 @@
 
   function displayPoints() {
     if (!L || !map) return;
+    if (optimizedRoute) return; // route markers already displayed
     markers.forEach(m => m.remove());
     markers = [];
     deliveryPoints.forEach((point, i) => {
@@ -1133,91 +1034,6 @@
     return allRoutes;
   }
 
-  function extractTurnInstructions(route: any): TurnInstruction[] {
-    const instructions: TurnInstruction[] = [];
-    if (!route?.legs) return instructions;
-    for (const leg of route.legs) {
-      if (!leg?.steps) continue;
-      for (const step of leg.steps) {
-        if (step?.maneuver) {
-          instructions.push({
-            type: step.maneuver.type || '',
-            modifier: step.maneuver.modifier || '',
-            name: step.name || '',
-            distance: step.distance || 0,
-            duration: step.duration || 0,
-            location: step.maneuver.location || [0, 0]
-          });
-        }
-      }
-    }
-    return instructions;
-  }
-
-  function getTurnIcon(type: string, modifier?: string): string {
-    // Mapbox modifier-based icons
-    const modIcons: Record<string, string> = {
-      'uturn': '🔃', 'sharp right': '↪️', 'right': '➡️', 'slight right': '↗️',
-      'straight': '⬆️', 'slight left': '↖️', 'left': '⬅️', 'sharp left': '↩️'
-    };
-    // Type-based icons (fallback)
-    const typeIcons: Record<string, string> = {
-      'depart': '🚗', 'arrive': '🏁',
-      'roundabout': '🔄', 'rotary': '🔄', 'roundabout turn': '🔄',
-      'exit roundabout': '🔄', 'exit rotary': '🔄',
-      'on ramp': '🛣️', 'off ramp': '🚗',
-      'merge': '↘️', 'fork': '↗️',
-      'new name': '⬆️', 'end of road': '⬆️',
-      'turn': '➡️', 'continue': '⬆️', 'notification': '⚠️'
-    };
-    if (modifier && modIcons[modifier]) return modIcons[modifier];
-    return typeIcons[type] || '⬆️';
-  }
-
-  function getTurnText(type: string, modifier?: string, name?: string): string {
-    const road = name && name !== 'ถนนไม่ทราบชื่อ' && name !== '' ? ` ${name}` : '';
-    // Modifier-based Thai text
-    const modTexts: Record<string, string> = {
-      'uturn': 'กลับรถ', 'sharp right': 'เลี้ยวขวาแหลม', 'right': 'เลี้ยวขวา',
-      'slight right': 'เบี่ยงขวาเล็กน้อย', 'straight': 'ตรงไป',
-      'slight left': 'เบี่ยงซ้ายเล็กน้อย', 'left': 'เลี้ยวซ้าย', 'sharp left': 'เลี้ยวซ้ายแหลม'
-    };
-    // Type-specific overrides
-    if (type === 'depart') return `ออกเดินทาง${road}`;
-    if (type === 'arrive') return 'ถึงจุดหมาย';
-    if (type === 'roundabout' || type === 'rotary' || type === 'roundabout turn') return `เข้าวงเวียน${road}`;
-    if (type === 'exit roundabout' || type === 'exit rotary') return `ออกวงเวียน${road}`;
-    if (type === 'on ramp') return `ขึ้นทางด่วน${road}`;
-    if (type === 'off ramp') return `ลงทางด่วน${road}`;
-    if (type === 'merge') return `รวมเลน${modifier === 'left' ? 'ซ้าย' : modifier === 'right' ? 'ขวา' : ''}${road}`;
-    if (type === 'fork') return `${modifier === 'left' ? 'แยกซ้าย' : modifier === 'right' ? 'แยกขวา' : 'ทางแยก'}${road}`;
-    if (type === 'new name') return `ตรงไปต่อ${road}`;
-    if (type === 'end of road') return `${modifier && modTexts[modifier] ? modTexts[modifier] : 'สิ้นสุดถนน'}${road}`;
-    if (type === 'notification') return `หมายเหตุ${road}`;
-    if (type === 'continue') {
-      if (modifier === 'straight' || !modifier) return `ตรงไป${road}`;
-      return `ตรงไป${modifier && modTexts[modifier] ? ' ' + modTexts[modifier] : ''}${road}`;
-    }
-    // Default: use modifier text
-    if (modifier && modTexts[modifier]) return `${modTexts[modifier]}${road}`;
-    return `ไปต่อ${road}`;
-  }
-
-  function detectTollRoad(route: any): boolean {
-    if (!route.legs) return false;
-    for (const leg of route.legs) {
-      if (!leg.steps) continue;
-      for (const step of leg.steps) {
-        const name = (step.name || '').toLowerCase();
-        const ref = (step.ref || '').toLowerCase();
-        if (name.includes('motorway') || name.includes('expressway') || name.includes('ทางด่วน') ||
-            name.includes('toll') || ref.includes('motorway')) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
 
   function getExpresswayNames(route: any): string[] {
     const names = new Set<string>();
@@ -1236,11 +1052,6 @@
     return Array.from(names).filter(Boolean);
   }
 
-  function estimateTollCost(route: any): number {
-    const distKm = route.distance / 1000;
-    if (!detectTollRoad(route)) return 0;
-    return Math.round(distKm * 2.5 + 25); // ค่าผ่านทางโดยประมาณ
-  }
 
   // ==================== TRAFFIC CONGESTION ====================
   const CONGESTION_COLORS: Record<string, string> = {
@@ -1263,7 +1074,7 @@
       case 'heavy':
         return { weight: baseWeight + 2, opacity: 1, className: 'traffic-heavy' };
       case 'moderate':
-        return { weight: baseWeight + 1, opacity: 0.9, dashArray: '12 6' };
+        return { weight: baseWeight + 1, opacity: 0.9 };
       case 'low':
         return { weight: baseWeight, opacity: 0.85 };
       default:
@@ -1302,29 +1113,17 @@
       if (color === currentColor) {
         segCoords.push(nextCoord);
       } else {
-        // Finish current segment with enhanced styling
+        // Finish current segment
         segCoords.push(nextCoord);
         const opts = getTrafficLineOptions(currentLevel, weight);
 
-        // Draw glow layer for heavy/severe traffic
-        if (currentLevel === 'heavy' || currentLevel === 'severe') {
-          const glowLine = L.polyline(segCoords, {
-            color: currentColor,
-            weight: opts.weight + 6,
-            opacity: 0.3,
-            lineCap: 'round',
-            lineJoin: 'round'
-          }).addTo(map);
-          trafficLayers.push(glowLine);
-        }
-
-        // Main traffic line
         const line = L.polyline(segCoords, {
           color: currentColor,
           weight: opts.weight,
           opacity: opts.opacity,
           lineCap: 'round',
           lineJoin: 'round',
+          smoothFactor: 0,
           dashArray: opts.dashArray
         }).addTo(map);
         trafficLayers.push(line);
@@ -1336,21 +1135,9 @@
       }
     }
 
-    // Draw last segment with enhanced styling
+    // Draw last segment
     if (segCoords.length >= 2) {
       const opts = getTrafficLineOptions(currentLevel, weight);
-
-      // Glow for heavy/severe
-      if (currentLevel === 'heavy' || currentLevel === 'severe') {
-        const glowLine = L.polyline(segCoords, {
-          color: currentColor,
-          weight: opts.weight + 6,
-          opacity: 0.3,
-          lineCap: 'round',
-          lineJoin: 'round'
-        }).addTo(map);
-        trafficLayers.push(glowLine);
-      }
 
       const line = L.polyline(segCoords, {
         color: currentColor,
@@ -1358,6 +1145,7 @@
         opacity: opts.opacity,
         lineCap: 'round',
         lineJoin: 'round',
+        smoothFactor: 0,
         dashArray: opts.dashArray
       }).addTo(map);
       trafficLayers.push(line);
@@ -1411,9 +1199,10 @@
 
   // ปรับความหนาเส้นตาม zoom — บางลงเมื่อซูมออก
   function getRouteWeight(zoom: number): { main: number; mainSel: number } {
-    if (zoom >= 15) return { main: 4, mainSel: 5 };
-    if (zoom >= 13) return { main: 3, mainSel: 4 };
-    if (zoom >= 11) return { main: 2, mainSel: 3 };
+    if (zoom >= 16) return { main: 4, mainSel: 4 };
+    if (zoom >= 14) return { main: 3, mainSel: 3 };
+    if (zoom >= 12) return { main: 2, mainSel: 3 };
+    if (zoom >= 10) return { main: 2, mainSel: 2 };
     return { main: 1, mainSel: 2 };
   }
 
@@ -1436,9 +1225,9 @@
       const isSelected = idx === selectedRouteIndex;
       const color = alt.color || routeColors[idx % routeColors.length];
       const mainLine = L.polyline(coords, {
-        color: color, weight: isSelected ? w.mainSel : w.main, opacity: isSelected ? 1 : 0.5,
+        color: color, weight: isSelected ? w.mainSel : w.main, opacity: isSelected ? 1 : 0.7,
         lineCap: 'round', lineJoin: 'round', dashArray: isSelected ? '' : '10 8',
-        _isSelected: isSelected, _isRoute: true
+        smoothFactor: 0, _isSelected: isSelected, _isRoute: true
       } as any).addTo(map);
       mainLine.on('click', () => selectRoute(idx, startPoint, sortedPoints));
       const midIdx = Math.floor(coords.length / 2);
@@ -1472,10 +1261,10 @@
     altLabelMarkers.forEach(marker => {
       const el = marker.getElement?.();
       if (!el) return;
-      if (zoom >= 11) {
+      if (zoom >= 14) {
         el.style.opacity = '1';
         el.style.pointerEvents = 'auto';
-      } else if (zoom >= 10) {
+      } else if (zoom >= 13) {
         el.style.opacity = '0.6';
         el.style.pointerEvents = 'auto';
       } else {
@@ -1509,7 +1298,7 @@
       divergingSections.forEach(section => {
         if (section.length < 2) return;
         const line = L.polyline(section, {
-          color: color, weight: dw.main, opacity: 0.15, lineCap: 'round', lineJoin: 'round'
+          color: color, weight: dw.main, opacity: 0.5, lineCap: 'round', lineJoin: 'round', smoothFactor: 0
         }).addTo(map);
         const hit = L.polyline(section, {
           color: 'transparent', weight: 30, opacity: 0
@@ -1919,7 +1708,7 @@
       divergingSections.forEach(section => {
         if (section.length < 2) return;
         const rw = getRouteWeight(map.getZoom());
-        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.18, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.4, lineCap: 'round', lineJoin: 'round', smoothFactor: 0 }).addTo(map);
         const hit = L.polyline(section, { color: 'transparent', weight: 30, opacity: 0 }).addTo(map);
         sectionLayers.push(line, hit);
         alternativeRouteLayers.push(line, hit);
@@ -2057,16 +1846,6 @@
     upcomingCurves = curves.slice(0, 5); // Keep only next 5 curves
   }
 
-  function calculateBearing(lat1: number, lng1: number, lat2: number, lng2: number): number {
-    const dLng = (lng2 - lng1) * Math.PI / 180;
-    const lat1Rad = lat1 * Math.PI / 180;
-    const lat2Rad = lat2 * Math.PI / 180;
-
-    const x = Math.sin(dLng) * Math.cos(lat2Rad);
-    const y = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng);
-
-    return (Math.atan2(x, y) * 180 / Math.PI + 360) % 360;
-  }
 
   function updateCurveWarning() {
     if (!isNavigating || upcomingCurves.length === 0) {
@@ -2200,8 +1979,10 @@
 
   async function handleOffRouteDetection() {
     if (!isNavigating || !navigationStartTime) return;
-    // Skip off-route check for first 5 seconds (GPS settling period)
-    if (Date.now() - navigationStartTime.getTime() < 5000) return;
+    // Skip off-route check for first 8 seconds (GPS settling period)
+    if (Date.now() - navigationStartTime.getTime() < 8000) return;
+    // Skip if GPS accuracy is too poor (> 100m) - would trigger false off-route
+    if (accuracy > 100) return;
     const offRoute = checkOffRoute();
     if (offRoute) {
       consecutiveOffRouteCount++;
@@ -2287,6 +2068,13 @@
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
       isOffRoute = false;
+      offRouteDistance = 0;
+      consecutiveOffRouteCount = 0;
+      // Reset heading rotation to prevent stale heading causing map spin
+      _lastAppliedRotation = 0;
+      if (map) {
+        map.getContainer().style.transform = 'rotate(0deg)';
+      }
       showNotification('✅ คำนวณเส้นทางใหม่สำเร็จ', 'success');
       return true;
     } catch (err) {
@@ -2350,49 +2138,7 @@
     });
   }
 
-  // ==================== PLACE SEARCH (NOMINATIM) ====================
-
-  async function searchPlace(query: string) {
-    if (!query || query.length < 2) { searchResults = []; showSearchResults = false; return; }
-    // Cancel previous search
-    if (searchAbortController) { searchAbortController.abort(); }
-    searchAbortController = new AbortController();
-    const signal = searchAbortController.signal;
-    isSearching = true;
-    try {
-      const params = new URLSearchParams({
-        q: query, format: 'json', limit: '8', countrycodes: 'th',
-        addressdetails: '1', 'accept-language': 'th'
-      });
-      const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-        headers: { 'User-Agent': 'RouteOptimization/2.0' },
-        signal, timeout: 8000
-      });
-      if (signal.aborted) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (signal.aborted) return;
-      if (!Array.isArray(data)) { searchResults = []; showSearchResults = false; return; }
-      searchResults = data.filter((r: any) => r.lat && r.lon && r.display_name).map((r: any) => ({
-        lat: parseFloat(r.lat), lng: parseFloat(r.lon),
-        name: r.display_name?.split(',')[0] || 'ไม่ทราบชื่อ',
-        address: r.display_name || '',
-        type: r.type, category: r.category
-      }));
-      showSearchResults = searchResults.length > 0;
-    } catch (err: any) {
-      if (err.name === 'AbortError') return; // cancelled, not an error
-      console.error('Search error:', err);
-      showNotification('ค้นหาไม่สำเร็จ ลองใหม่อีกครั้ง', 'error');
-    } finally {
-      if (!signal.aborted) isSearching = false;
-    }
-  }
-
-  function handleSearchInput() {
-    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 400);
-  }
+  // searchPlace + handleSearchInput moved to SearchPanel component
 
   // Reverse geocode: แปลงพิกัดเป็นที่อยู่
   async function reverseGeocode(lat: number, lng: number): Promise<{ name: string; address: string } | null> {
@@ -2430,57 +2176,19 @@
   }
 
   function selectSearchResult(result: any) {
-    showSearchResults = false;
-    searchQuery = result.name;
     if (map) map.flyTo([result.lat, result.lng], 16, { duration: 0.8 });
     if (destinationMarker) destinationMarker.remove();
     destinationMarker = L.marker([result.lat, result.lng], {
       icon: L.divIcon({
         className: 'search-result-marker',
-        html: `<div class="search-pin">📍<div class="search-pin-label">${result.name}</div></div>`,
+        html: `<div class="search-pin">📍<div class="search-pin-label">${escapeHtml(result.name)}</div></div>`,
         iconSize: [40, 50], iconAnchor: [20, 50]
       })
     }).addTo(map);
     directDestination = { lat: result.lat, lng: result.lng, name: result.name, address: result.address };
-
-    // Save to recent searches
-    addToRecentSearches({ name: result.name, address: result.address, lat: result.lat, lng: result.lng });
   }
 
-  function loadRecentSearches() {
-    try {
-      const saved = localStorage.getItem(getUserKey('recentSearches'));
-      if (saved) recentSearches = JSON.parse(saved);
-    } catch (e) {
-      console.warn('Failed to parse recentSearches from localStorage:', e);
-      recentSearches = [];
-    }
-  }
-
-  function saveRecentSearches() {
-    try {
-      localStorage.setItem(getUserKey('recentSearches'), JSON.stringify(recentSearches));
-    } catch (e) {}
-  }
-
-  function addToRecentSearches(item: { name: string; address: string; lat: number; lng: number }) {
-    // Remove duplicate if exists
-    recentSearches = recentSearches.filter(r => !(Math.abs(r.lat - item.lat) < 0.0001 && Math.abs(r.lng - item.lng) < 0.0001));
-    // Add to front
-    recentSearches.unshift({ ...item, timestamp: Date.now() });
-    // Limit size
-    if (recentSearches.length > MAX_RECENT_SEARCHES) recentSearches = recentSearches.slice(0, MAX_RECENT_SEARCHES);
-    saveRecentSearches();
-  }
-
-  function selectRecentSearch(recent: RecentSearch) {
-    selectSearchResult({ name: recent.name, address: recent.address, lat: recent.lat, lng: recent.lng });
-  }
-
-  function clearRecentSearches() {
-    recentSearches = [];
-    saveRecentSearches();
-  }
+  // loadRecentSearches, saveRecentSearches, addToRecentSearches, selectRecentSearch, clearRecentSearches moved to SearchPanel component
 
   async function navigateToSearchResult() {
     if (!directDestination) return;
@@ -2740,6 +2448,13 @@
       } else {
         showNotification('คำนวณเส้นทางสำเร็จ', 'success');
       }
+      // Hide sidebar after successful route calculation
+      if (typeof window !== 'undefined' && window.innerWidth <= 1024) {
+        mobileSidebarOpen = false;
+      } else {
+        desktopSidebarCollapsed = true;
+      }
+      smoothMapResize();
     } catch (err: any) {
       if (err?.name === 'AbortError') return; // aborted by new request
       showNotification(err.message || 'คำนวณไม่สำเร็จ', 'error');
@@ -3027,53 +2742,36 @@
     // Only reduce opacity if traffic data actually exists (legs with congestion)
     const selectedAlt = routeAlternatives[selectedRouteIndex];
     const hasTrafficData = showTraffic && selectedAlt?.legs?.some((l: any) => l?.annotation?.congestion);
-    routeLayer = L.polyline(coords, { color: '#00ff88', weight: w.mainSel, opacity: hasTrafficData ? 0.3 : 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+    routeLayer = L.polyline(coords, { color: '#00ff88', weight: w.mainSel, opacity: hasTrafficData ? 0.3 : 1, lineCap: 'round', lineJoin: 'round', smoothFactor: 0 }).addTo(map);
     // Draw traffic overlay on top of base route
     if (hasTrafficData) {
       drawTrafficPolyline(selectedAlt, w.mainSel, 1);
     }
     map.fitBounds(routeLayer.getBounds(), { padding: [80, 80] });
+    // Keep GPS blue dot as real-time current location (don't remove it)
     markers.forEach(m => m.remove());
     markers = [];
     optimizedRoute.optimized_order.forEach((point: any, i: number) => {
       const isStart = i === 0;
       const isCurrentLocation = isStart && point.id === -1;
 
-      let markerHtml: string;
-      let markerSize: [number, number];
-      let markerAnchor: [number, number];
+      // Skip start point marker — use GPS blue dot instead
+      if (isCurrentLocation) return;
 
-      if (isCurrentLocation) {
-        // Clean start-point marker
-        markerHtml = `
-          <div class="start-loc-marker">
-            <div class="start-loc-ripple"></div>
-            <div class="start-loc-ripple start-loc-ripple-2"></div>
-            <div class="start-loc-core">
-              <svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/></svg>
-            </div>
-            <div class="start-loc-label">คุณอยู่ที่นี่</div>
-          </div>`;
-        markerSize = [48, 48];
-        markerAnchor = [24, 24];
-      } else {
-        const gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-        const glow = '#667eea';
-        markerHtml = `<div class="marker-pin route-pin" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${i}</span></div>`;
-        markerSize = [52, 52];
-        markerAnchor = [26, 26];
-      }
+      const gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+      const glow = '#667eea';
+      const markerHtml = `<div class="marker-pin route-pin" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${i}</span></div>`;
 
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: 'route-marker',
           html: markerHtml,
-          iconSize: markerSize,
-          iconAnchor: markerAnchor
+          iconSize: [52, 52],
+          iconAnchor: [26, 26]
         })
       }).addTo(map);
-      const popupGradient = isCurrentLocation ? 'linear-gradient(135deg, #00ff88 0%, #00c06a 100%)' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-      marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: ${popupGradient}"></div><div class="popup-header"><div class="popup-badge" style="background: ${popupGradient}">${isCurrentLocation ? '📍' : i}</div><div class="popup-header-text"><h4>${escapeHtml(point.name)}</h4><span class="popup-tag" style="color: ${isCurrentLocation ? '#00ff88' : '#818cf8'}">${isCurrentLocation ? 'จุดเริ่มต้น' : 'จุดแวะ'}</span></div></div><div class="popup-content"><p>${escapeHtml(point.address)}</p></div></div>`, { className: 'dark-popup' });
+      const popupGradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: ${popupGradient}"></div><div class="popup-header"><div class="popup-badge" style="background: ${popupGradient}">${i}</div><div class="popup-header-text"><h4>${escapeHtml(point.name)}</h4><span class="popup-tag" style="color: #818cf8">จุดแวะ</span></div></div><div class="popup-content"><p>${escapeHtml(point.address)}</p></div></div>`, { className: 'dark-popup' });
       markers.push(marker);
     });
   }
@@ -3349,16 +3047,44 @@
           arrow.style.opacity = currentSpeed > 3 ? '1' : '0';
         }
       }
+      // Update route line start to follow blue dot in real-time (every 4th frame ~15fps)
+      if (remainingRouteLayer && cachedRouteCoords.length > 0 && _animFrameCount % 4 === 0) {
+        const coords = remainingRouteLayer.getLatLngs();
+        if (coords.length > 1) {
+          coords[0] = L.latLng(animCurrentLat, animCurrentLng);
+          remainingRouteLayer.setLatLngs(coords);
+        }
+      }
+      _animFrameCount++;
       // Smooth map follow (we handle interpolation - no Leaflet animation)
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
       // Rotate map to face heading direction (perf: 2-degree threshold)
+      // Freeze rotation when off-route to prevent wild spinning from unreliable GPS heading
       if (map) {
         const mapEl = map.getContainer();
-        if (currentSpeed > 5) {
+        if (isOffRoute) {
+          // Off-route: smoothly return to north-up to avoid disorientation
+          if (_lastAppliedRotation !== 0) {
+            const dampedRot = _lastAppliedRotation * 0.9;
+            if (Math.abs(dampedRot) < 1) {
+              mapEl.style.transform = 'rotate(0deg)';
+              _lastAppliedRotation = 0;
+            } else {
+              mapEl.style.transform = `rotate(${dampedRot}deg)`;
+              _lastAppliedRotation = dampedRot;
+            }
+          }
+        } else if (currentSpeed > 5) {
           const rotDeg = -animCurrentHeading;
-          if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
+          // Extra stability: reject sudden large heading jumps (> 60deg per frame)
+          if (Math.abs(rotDeg - _lastAppliedRotation) > 60) {
+            // Dampen large jumps instead of applying directly
+            const dampedRot = _lastAppliedRotation + (rotDeg - _lastAppliedRotation) * 0.15;
+            mapEl.style.transform = `rotate(${dampedRot}deg)`;
+            _lastAppliedRotation = dampedRot;
+          } else if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
             mapEl.style.transform = `rotate(${rotDeg}deg)`;
             _lastAppliedRotation = rotDeg;
           }
@@ -3389,15 +3115,33 @@
     const { latitude, longitude, accuracy: acc, heading, speed: gpsSpeed } = position.coords;
     currentLocation = { lat: latitude, lng: longitude, heading, speed: gpsSpeed };
     accuracy = acc;
-    // Update heading from GPS or calculate from movement
+    // Update heading from GPS or calculate from movement (with smoothing)
     if (heading !== null && heading !== undefined && !isNaN(heading) && gpsSpeed && gpsSpeed > 1) {
-      currentHeading = heading;
+      // Smooth heading with low-pass filter to prevent jitter
+      if (currentHeading !== null) {
+        let diff = ((heading - currentHeading + 540) % 360) - 180;
+        // Reject impossibly fast heading changes (> 90deg between updates at low speed)
+        if (Math.abs(diff) > 90 && gpsSpeed < 5) {
+          // Dampen heavily - likely GPS noise
+          currentHeading = ((currentHeading + diff * 0.1) + 360) % 360;
+        } else {
+          currentHeading = ((currentHeading + diff * 0.4) + 360) % 360;
+        }
+      } else {
+        currentHeading = heading;
+      }
     } else if (lastPosition && gpsSpeed && gpsSpeed > 1) {
       // Calculate heading from consecutive positions (for laptops without compass)
       const dLat = latitude - lastPosition.lat;
       const dLng = longitude - lastPosition.lng;
       if (Math.abs(dLat) > 0.00003 || Math.abs(dLng) > 0.00003) {
-        currentHeading = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360;
+        const newHeading = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360;
+        if (currentHeading !== null) {
+          let diff = ((newHeading - currentHeading + 540) % 360) - 180;
+          currentHeading = ((currentHeading + diff * 0.3) + 360) % 360;
+        } else {
+          currentHeading = newHeading;
+        }
       }
     }
     // อัพเดท GPS status ตามความแม่นยำ
@@ -3793,10 +3537,12 @@
   }
 
   // Progressive search: only search near last known index (O(1) amortized instead of O(n))
+  // Forward-biased: route index only moves forward unless GPS jumps significantly backward
   function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
     if (!coords.length) return 0;
-    const searchRadius = 50; // search 50 points forward/backward from last known
-    const start = Math.max(0, lastRouteIndex - 10); // look 10 back (in case of GPS correction)
+    const searchRadius = 50;
+    // Forward-biased search: only look 5 back (GPS correction), but 50 forward
+    const start = Math.max(0, lastRouteIndex - 5);
     const end = Math.min(coords.length, lastRouteIndex + searchRadius);
     let minDist = Infinity;
     let nearestIndex = lastRouteIndex;
@@ -3808,10 +3554,9 @@
       }
     }
     // If nearest is at edge of search window, do a wider search (rare)
-    if (nearestIndex === start && start > 0 || nearestIndex === end - 1 && end < coords.length) {
-      const wideStart = Math.max(0, nearestIndex - 200);
+    if (nearestIndex === end - 1 && end < coords.length) {
       const wideEnd = Math.min(coords.length, nearestIndex + 200);
-      for (let i = wideStart; i < wideEnd; i++) {
+      for (let i = end; i < wideEnd; i++) {
         const dist = getDistance(location.lat, location.lng, coords[i][0], coords[i][1]);
         if (dist < minDist) {
           minDist = dist;
@@ -3819,18 +3564,20 @@
         }
       }
     }
-    lastRouteIndex = nearestIndex;
-    return nearestIndex;
+    // Prevent backward jumps of more than 5 points (GPS jitter)
+    // Only allow backward if significantly closer (> 50% closer)
+    if (nearestIndex < lastRouteIndex - 2) {
+      const currentDist = getDistance(location.lat, location.lng, coords[lastRouteIndex][0], coords[lastRouteIndex][1]);
+      if (minDist < currentDist * 0.5) {
+        lastRouteIndex = nearestIndex; // genuinely moved backward
+      }
+      // else keep lastRouteIndex (ignore jitter)
+    } else {
+      lastRouteIndex = nearestIndex;
+    }
+    return lastRouteIndex;
   }
 
-  function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
 
   // ==================== TRAFFIC INCIDENTS FUNCTIONS ====================
   async function fetchTrafficIncidents() {
@@ -4169,31 +3916,26 @@
   function updateRouteDisplayForNavigation() {
     if (!L || !map || !cachedRouteCoords.length) return;
     const startIndex = lastRouteIndex;
-    // Only redraw if moved at least 3 route points (prevents flicker)
-    if (Math.abs(startIndex - lastDrawnRouteIndex) < 3 && lastDrawnRouteIndex >= 0) return;
+    // Use animated position for smooth route-following connection to blue dot
+    const dotLat = animReady ? animCurrentLat : (currentLocation?.lat || 0);
+    const dotLng = animReady ? animCurrentLng : (currentLocation?.lng || 0);
+    // Only redraw if moved at least 1 route point
+    if (Math.abs(startIndex - lastDrawnRouteIndex) < 1 && lastDrawnRouteIndex >= 0) return;
     lastDrawnRouteIndex = startIndex;
     const nw = getRouteWeight(map.getZoom());
-    // perf: reuse existing polylines via setLatLngs instead of destroy+recreate
-    if (startIndex > 0) {
-      const traveledCoords = cachedRouteCoords.slice(0, startIndex + 1);
-      if (traveledLayer) {
-        traveledLayer.setLatLngs(traveledCoords);
-        traveledLayer.setStyle({ weight: nw.mainSel });
-      } else {
-        traveledLayer = L.polyline(traveledCoords, { color: '#6b7280', weight: nw.mainSel, opacity: 0.6 }).addTo(map);
-      }
-    } else if (traveledLayer) {
+    if (traveledLayer) {
       traveledLayer.remove(); traveledLayer = null;
     }
     const remainingCoords = cachedRouteCoords.slice(startIndex);
     if (remainingCoords.length > 1) {
+      // Prepend animated blue dot position for seamless connection
+      const displayCoords: [number, number][] = [[dotLat, dotLng] as [number, number], ...remainingCoords];
       if (remainingRouteLayer) {
-        remainingRouteLayer.setLatLngs(remainingCoords);
+        remainingRouteLayer.setLatLngs(displayCoords);
         remainingRouteLayer.setStyle({ weight: nw.mainSel });
       } else {
-        // Clear old routeLayer if transitioning
         if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-        remainingRouteLayer = L.polyline(remainingCoords, { color: '#00ff88', weight: nw.mainSel, opacity: 1 }).addTo(map);
+        remainingRouteLayer = L.polyline(displayCoords, { color: '#00ff88', weight: nw.mainSel, opacity: 1, lineCap: 'round', lineJoin: 'round', smoothFactor: 0 }).addTo(map);
       }
     }
   }
@@ -4305,10 +4047,6 @@
     estimatedArrivalTime = new Date(Date.now() + hoursRemaining * 3600 * 1000);
   }
 
-  function formatETA(date: Date | null): string {
-    if (!date) return '--:--';
-    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-  }
 
   function updateFuelEstimate() {
     const distanceKm = remainingDistance / 1000;
@@ -4538,23 +4276,12 @@
   }
 
   // Speed-dependent EV consumption model (physics-based)
-  // Components: rolling resistance (constant) + aerodynamic drag (v²) + auxiliary loads (1/v)
-  // Normalized to 1.0× at 60 km/h (user's base KWH_PER_100KM setting)
   function getEVConsumptionAtSpeed(speedKmh: number): number {
-    if (speedKmh < 1) return KWH_PER_100KM;
-    const ref = 60;
-    const v = Math.min(Math.max(speedKmh, 5), 180);
-    const rolling = 0.4;
-    const aero = 0.35 * (v * v) / (ref * ref);
-    const aux = 0.25 * ref / v;
-    return KWH_PER_100KM * (rolling + aero + aux);
+    return _getEVConsumptionAtSpeed(speedKmh, KWH_PER_100KM);
   }
 
-  // Get estimated average consumption for a route using distance/duration
   function getEVConsumptionForRoute(distanceMeters: number, durationSeconds?: number): number {
-    if (!durationSeconds || durationSeconds <= 0) return KWH_PER_100KM;
-    const avgSpeedKmh = (distanceMeters / 1000) / (durationSeconds / 3600);
-    return getEVConsumptionAtSpeed(avgSpeedKmh);
+    return _getEVConsumptionForRoute(distanceMeters, durationSeconds || 0, KWH_PER_100KM);
   }
 
   function getEVBatteryColor(): string {
@@ -4583,34 +4310,6 @@
       case 'rainy': return '🌧️';
       default: return '🌤️';
     }
-  }
-
-  function getBatteryColor(): string {
-    if (batteryLevel > 50) return '#00ff88';
-    if (batteryLevel > 20) return '#ffa502';
-    return '#ff6b6b';
-  }
-
-  function getPriorityGradient(p: number) {
-    const colorMap: Record<number, { bg: string; glow: string }> = {
-      1: { bg: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%)', glow: '#ff6b6b' },
-      2: { bg: 'linear-gradient(135deg, #ffa502 0%, #ff7f00 100%)', glow: '#ffa502' },
-      3: { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', glow: '#667eea' },
-      4: { bg: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)', glow: '#a855f7' },
-      5: { bg: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)', glow: '#6b7280' }
-    };
-    return colorMap[p] || colorMap[3];
-  }
-
-  function getPriorityLabel(p: number) {
-    const labels: Record<number, string> = {
-      1: 'ด่วนมาก',
-      2: 'ด่วน',
-      3: 'ปกติ',
-      4: 'ไม่เร่ง',
-      5: 'ยืดหยุ่น'
-    };
-    return labels[p] || 'ปกติ';
   }
 
   function showNotification(msg: string, type: 'success' | 'error' | 'warning') {
@@ -4689,17 +4388,9 @@
     return deliveryHistory.filter(d => d.status === 'success').length;
   }
 
-  function getSkippedCount(): number {
-    return deliveryHistory.filter(d => d.status === 'skipped').length;
-  }
-
   function getRemainingPointsCount(): number {
     if (!optimizedRoute) return allDeliveryPoints.length;
     return optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length;
-  }
-
-  function formatHistoryTime(date: Date): string {
-    return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
   }
 
   // ==================== MULTI-SELECT FUNCTIONS ====================
@@ -4763,18 +4454,6 @@
     showNotification(`ลบจุดสำเร็จ`, 'success');
   }
 
-  function formatDistance(meters: number): string {
-    if (meters < 1000) return `${Math.round(meters)} ม.`;
-    return `${(meters / 1000).toFixed(1)} กม.`;
-  }
-
-  function formatTime(seconds: number): string {
-    const mins = Math.round(seconds / 60);
-    if (mins < 60) return `${mins} นาที`;
-    const hours = Math.floor(mins / 60);
-    const remainMins = mins % 60;
-    return `${hours} ชม. ${remainMins} นาที`;
-  }
 
   function centerOnCurrentLocation() {
     if (currentLocation && map) {
@@ -5176,36 +4855,6 @@ out center body;`;
     window.open(shareQRUrl, '_blank');
   }
 
-  function getGPSStatusColor(): string {
-    switch (gpsStatus) {
-      case 'excellent': return '#00ff88';
-      case 'good': return '#ffd93d';
-      case 'weak': return '#ffa502';
-      case 'poor': return '#ff6b6b';
-      default: return '#71717a';
-    }
-  }
-
-  function getGPSStatusText(): string {
-    switch (gpsStatus) {
-      case 'excellent': return `GPS แม่นยำมาก (${Math.round(accuracy)}m)`;
-      case 'good': return `GPS ปกติ (${Math.round(accuracy)}m)`;
-      case 'weak': return `GPS อ่อน (${Math.round(accuracy)}m)`;
-      case 'poor': return `GPS แย่มาก (${Math.round(accuracy)}m)`;
-      default: return 'กำลังค้นหา GPS...';
-    }
-  }
-
-  function getGPSIcon(): string {
-    switch (gpsStatus) {
-      case 'excellent': return '📡';
-      case 'good': return '📶';
-      case 'weak': return '📉';
-      case 'poor': return '⚠️';
-      default: return '🔍';
-    }
-  }
-
   // ==================== DELIVERY FUNCTIONS - ใช้ user_id ====================
   async function markDeliverySuccess() {
     if (isProcessingDelivery) { showNotification('กำลังประมวลผล...', 'warning'); return; }
@@ -5227,8 +4876,7 @@ out center body;`;
 
       if (currentUser?.id) payload.user_id = Number(currentUser.id);
       if (currentUser?.name) payload.user_name = String(currentUser.name);
-      payload.table = 'users';
-      
+
       const res = await fetch(`${API_URL}/deliveries/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5303,8 +4951,7 @@ out center body;`;
 
       if (currentUser?.id) payload.user_id = Number(currentUser.id);
       if (currentUser?.name) payload.user_name = String(currentUser.name);
-      payload.table = 'users';
-      
+
       const res = await fetch(`${API_URL}/deliveries/skip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5672,7 +5319,10 @@ out center body;`;
 
   function smoothMapResize() {
     if (!map) return;
-    setTimeout(() => { if (map) map.invalidateSize(); }, 150);
+    // Multiple invalidations to cover transition duration
+    setTimeout(() => { if (map) map.invalidateSize(); }, 50);
+    setTimeout(() => { if (map) map.invalidateSize(); }, 200);
+    setTimeout(() => { if (map) map.invalidateSize(); }, 350);
   }
 
   function handleKeyboardShortcuts(e: KeyboardEvent) {
@@ -5978,9 +5628,6 @@ out center body;`;
     const savedAvoidHwy = localStorage.getItem(getUserKey('avoidExpressways'));
     if (savedAvoidHwy) avoidExpressways = savedAvoidHwy === 'true';
 
-    // Load recent searches
-    loadRecentSearches();
-
     const savedAutoReroute = localStorage.getItem(getUserKey('autoRerouteEnabled'));
     if (savedAutoReroute !== null) autoRerouteEnabled = savedAutoReroute === 'true';
     const savedSpeedAlert = localStorage.getItem(getUserKey('speedAlertEnabled'));
@@ -6034,7 +5681,8 @@ out center body;`;
         maxZoom: 19, keepBuffer: 2,
         updateWhenZooming: false,
         updateWhenIdle: true,
-        crossOrigin: 'anonymous'
+        crossOrigin: 'anonymous',
+        detectRetina: true
       }).addTo(map);
 
       // Set current location immediately if GPS succeeded
@@ -6082,12 +5730,17 @@ out center body;`;
       const onZoomEnd = () => {
         updateRouteWeights();
         if (alongRoutePOIs.length > 0) displayPOIMarkers();
+        // Zoom-dependent marker scaling (mobile)
+        const z = map.getZoom();
+        const scale = z >= 17 ? 1 : z >= 15 ? 0.85 : z >= 13 ? 0.7 : z >= 11 ? 0.55 : 0.4;
+        document.getElementById('map')?.style.setProperty('--marker-scale', String(scale));
       };
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
+        if (!addPointMode) return;
         if (clickMarker) clickMarker.remove();
         newPoint.lat = parseFloat(e.latlng.lat.toFixed(6));
         newPoint.lng = parseFloat(e.latlng.lng.toFixed(6));
@@ -6207,340 +5860,48 @@ out center body;`;
 
 <div class="app-container" class:day-mode={!nightMode}>
   <!-- Settings Panel -->
-  {#if showSettings}
-    <div class="settings-overlay" on:click={() => showSettings = false} on:keypress={() => {}} role="button" tabindex="-1">
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_interactive_supports_focus -->
-      <div class="settings-panel glass-card" on:click|stopPropagation role="dialog">
-        <div class="settings-header">
-          <h3>⚙️ ตั้งค่า</h3>
-          <button class="close-btn" on:click={() => showSettings = false}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
-        </div>
+  <SettingsPanel
+    bind:show={showSettings}
+    {userInfo}
+    bind:vehicleType
+    {voiceEnabled}
+    bind:nightMode
+    bind:KM_PER_LITER
+    bind:ELECTRICITY_PRICE_PER_KWH
+    bind:KWH_PER_100KM
+    bind:evCurrentCharge
+    {evRemainingRange}
+    {evCurrentConsumptionRate}
+    {currentFuelPrice}
+    {oilPriceData}
+    {isLoadingOilPrice}
+    bind:selectedStation
+    bind:selectedFuelType
+    {showChargingStations}
+    {isLoadingStations}
+    {chargingStations}
+    {optimizedRoute}
+    {getUserKey}
+    on:saveVehicleSettings={saveVehicleSettings}
+    on:toggleVoice={toggleVoice}
+    on:fetchOilPrices={fetchOilPrices}
+    on:updateFuelPrice={updateCurrentFuelPrice}
+    on:toggleChargingStations={toggleChargingStations}
+    on:loadNearbyChargingStations={loadNearbyChargingStations}
+    on:searchEVAlongRoute={searchEVAlongRoute}
+    on:clearChargingStations={clearChargingStations}
+    on:exportRouteData={exportRouteData}
+    on:logout={() => showLogoutConfirm = true}
+  />
 
-        <div class="settings-content">
-          <!-- Two Column Layout -->
-          <div class="settings-grid">
-            <!-- Left Column -->
-            <div class="settings-column">
-              <div class="settings-section">
-                <h4>🚗 ข้อมูลคนขับ</h4>
-                <div class="driver-card">
-                  <div class="driver-avatar">{userInfo.avatar}</div>
-                  <div class="driver-details">
-                    <div class="driver-name">{userInfo.name}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="settings-section">
-                <h4>{getVehicleIcon()} ประเภทรถ</h4>
-                <div class="vehicle-type-selector">
-                  <button 
-                    class="vehicle-type-btn" 
-                    class:active={vehicleType === 'fuel'}
-                    on:click={() => { vehicleType = 'fuel'; saveVehicleSettings(); }}
-                  >
-                    <span class="vehicle-icon">🚗</span>
-                    <span class="vehicle-label">รถน้ำมัน</span>
-                  </button>
-                  <button 
-                    class="vehicle-type-btn" 
-                    class:active={vehicleType === 'ev'}
-                    on:click={() => { vehicleType = 'ev'; saveVehicleSettings(); }}
-                  >
-                    <span class="vehicle-icon">🚙</span>
-                    <span class="vehicle-label">รถไฟฟ้า (EV)</span>
-                  </button>
-                </div>
-                
-                {#if vehicleType === 'fuel'}
-                  <div class="vehicle-info-card fuel">
-                    <div class="vic-top-row">
-                      <div class="vic-header fuel-header">
-                        <div class="vic-header-icon">⛽</div>
-                        <div class="vic-header-info">
-                          <span class="vic-header-title">รถน้ำมัน</span>
-                          <span class="vic-header-sub">฿{currentFuelPrice.toFixed(2)}/ลิตร</span>
-                        </div>
-                      </div>
-                      <div class="vic-inline-stat fuel-stat">
-                        <span class="vic-inline-val">{KM_PER_LITER}</span>
-                        <span class="vic-inline-unit">กม./ลิตร</span>
-                      </div>
-                    </div>
-                    <div class="vic-slider-row">
-                      <!-- svelte-ignore a11y_label_has_associated_control -->
-                      <label class="vic-label-compact">อัตราสิ้นเปลือง</label>
-                      <input type="range" min="5" max="30" step="0.5" bind:value={KM_PER_LITER} on:change={saveVehicleSettings} class="vic-range fuel-range" />
-                      <div class="vic-range-hint"><span>5</span><span>30</span></div>
-                    </div>
-                  </div>
-                {:else}
-                  <div class="vehicle-info-card ev">
-                    <div class="vic-top-row">
-                      <div class="vic-header ev-header">
-                        <div class="vic-header-icon">⚡</div>
-                        <div class="vic-header-info">
-                          <span class="vic-header-title">รถไฟฟ้า</span>
-                          <span class="vic-header-sub">฿{ELECTRICITY_PRICE_PER_KWH}/kWh</span>
-                        </div>
-                      </div>
-                      <div class="vic-mini-stats">
-                        <div class="vic-mini-stat">
-                          <span class="vic-mini-val" style="color: {getEVBatteryColor()}">{evRemainingRange.toFixed(0)}</span>
-                          <span class="vic-mini-unit">กม.</span>
-                        </div>
-                        <div class="vic-mini-divider"></div>
-                        <div class="vic-mini-stat">
-                          <span class="vic-mini-val" style="color: {evCurrentConsumptionRate > KWH_PER_100KM * 1.3 ? '#ff6b6b' : evCurrentConsumptionRate < KWH_PER_100KM * 0.9 ? '#00ff88' : '#60a5fa'}">{evCurrentConsumptionRate.toFixed(1)}</span>
-                          <span class="vic-mini-unit">kWh/100กม.</span>
-                        </div>
-                        <div class="vic-mini-divider"></div>
-                        <div class="vic-mini-stat">
-                          <span class="vic-mini-val" style="color: {getEVBatteryColor()}">{evCurrentCharge}%</span>
-                          <span class="vic-mini-unit">แบต</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="vic-grid-sliders">
-                      <div class="vic-slider-cell">
-                        <!-- svelte-ignore a11y_label_has_associated_control -->
-                        <label class="vic-label">
-                          <span>🔌 ค่าไฟฟ้า</span>
-                          <strong>{ELECTRICITY_PRICE_PER_KWH} <small>฿/kWh</small></strong>
-                        </label>
-                        <input type="range" min="1" max="10" step="0.1" bind:value={ELECTRICITY_PRICE_PER_KWH} on:change={saveVehicleSettings} class="vic-range ev-range" />
-                        <div class="vic-range-hint"><span>1</span><span>10</span></div>
-                      </div>
-                      <div class="vic-slider-cell">
-                        <!-- svelte-ignore a11y_label_has_associated_control -->
-                        <label class="vic-label">
-                          <span>🔋 แบตเตอรี่</span>
-                          <strong>{evCurrentCharge}<small>%</small></strong>
-                        </label>
-                        <input type="range" min="0" max="100" bind:value={evCurrentCharge} on:change={saveVehicleSettings} class="vic-range battery-range" style="--battery-color: {getEVBatteryColor()}" />
-                      </div>
-                      <div class="vic-slider-cell vic-slider-wide">
-                        <!-- svelte-ignore a11y_label_has_associated_control -->
-                        <label class="vic-label">
-                          <span>📊 กินไฟ (ฐาน @60km/h)</span>
-                          <strong>{KWH_PER_100KM} <small>kWh/100กม.</small></strong>
-                        </label>
-                        <div class="vic-consumption-row">
-                          <input type="range" min="8" max="30" step="0.5" bind:value={KWH_PER_100KM} on:change={saveVehicleSettings} class="vic-range ev-range" />
-                          <div class="vic-speed-chips">
-                            <span class="vic-chip" style="color: #34d399">{(KWH_PER_100KM * 0.86).toFixed(0)}<small>@40</small></span>
-                            <span class="vic-chip" style="color: #60a5fa">{KWH_PER_100KM}<small>@60</small></span>
-                            <span class="vic-chip" style="color: #fbbf24">{(KWH_PER_100KM * 1.21).toFixed(0)}<small>@80</small></span>
-                            <span class="vic-chip" style="color: #f87171">{(KWH_PER_100KM * 1.53).toFixed(0)}<small>@100</small></span>
-                          </div>
-                        </div>
-                        <div class="vic-range-hint"><span>8</span><span>30</span></div>
-                      </div>
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Right Column -->
-            <div class="settings-column">
-              <div class="settings-section">
-                <h4>🔊 เสียง</h4>
-                <label class="toggle-setting">
-                  <span>เสียงนำทาง</span>
-                  <button class="toggle-btn" class:active={voiceEnabled} on:click={toggleVoice}><div class="toggle-knob"></div></button>
-                </label>
-              </div>
-
-              <div class="settings-section">
-                <h4>🌓 โหมดแสง</h4>
-                <div class="night-mode-selector">
-                  <button class="night-mode-btn" class:active={nightMode} on:click={() => { nightMode = true; try { localStorage.setItem(getUserKey('nightMode'), 'dark'); } catch(e) {} }}>
-                    <span>🌙</span><span>มืด</span>
-                  </button>
-                  <button class="night-mode-btn" class:active={!nightMode} on:click={() => { nightMode = false; try { localStorage.setItem(getUserKey('nightMode'), 'light'); } catch(e) {} }}>
-                    <span>☀️</span><span>สว่าง</span>
-                  </button>
-                </div>
-              </div>
-
-              <!-- ⛽ ราคาน้ำมันวันนี้ -->
-              {#if vehicleType === 'fuel'}
-                <div class="settings-section">
-                  <div class="oil-price-header">
-                    <h4>⛽ ราคาน้ำมันวันนี้</h4>
-                    <button class="refresh-oil-btn" on:click={fetchOilPrices} disabled={isLoadingOilPrice} title="รีเฟรชราคา">
-                      {#if isLoadingOilPrice}
-                        <div class="spinner-tiny"></div>
-                      {:else}
-                        🔄
-                      {/if}
-                    </button>
-                  </div>
-                  
-                  {#if oilPriceData}
-                    <div class="oil-price-date">📅 {oilPriceData.date}</div>
-                  {/if}
-
-                  <!-- เลือกปั๊ม -->
-                  <div class="oil-select-group">
-                    <label>เลือกปั๊ม:</label>
-                    <select bind:value={selectedStation} on:change={updateCurrentFuelPrice}>
-                      {#each stationOptions as station}
-                        <option value={station.value}>{station.label}</option>
-                      {/each}
-                    </select>
-                  </div>
-
-                  <!-- เลือกประเภทน้ำมัน -->
-                  <div class="oil-select-group">
-                    <label>ประเภทน้ำมัน:</label>
-                    <select bind:value={selectedFuelType} on:change={updateCurrentFuelPrice}>
-                      {#each getAvailableFuelTypes() as fuel}
-                        <option value={fuel.value}>{fuel.label} - ฿{fuel.price}</option>
-                      {/each}
-                    </select>
-                  </div>
-
-                  <!-- แสดงราคาปัจจุบัน -->
-                  <div class="current-oil-price">
-                    <span class="price-label">ราคาที่ใช้คำนวณ:</span>
-                    <span class="price-value">฿{currentFuelPrice.toFixed(2)}/ลิตร</span>
-                  </div>
-
-                  <!-- เปรียบเทียบราคา -->
-                  {#if getAllStationPrices().length > 1}
-                    <div class="price-comparison">
-                      <div class="comparison-header">📊 เปรียบเทียบราคา ({getSelectedFuelName()})</div>
-                      <div class="comparison-list">
-                        {#each getAllStationPrices().slice(0, 5) as priceInfo, i}
-                          <div class="comparison-item" class:cheapest={i === 0} class:selected={priceInfo.station === selectedStation}>
-                            <span class="station-name">{priceInfo.label}</span>
-                            <span class="station-price">฿{priceInfo.price}</span>
-                            {#if i === 0}
-                              <span class="cheapest-badge">ถูกสุด!</span>
-                            {/if}
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-
-              <div class="settings-section">
-                <h4>⚡ สถานีชาร์จ EV</h4>
-                <label class="toggle-setting">
-                  <span>แสดงสถานีชาร์จบนแผนที่</span>
-                  <button class="toggle-btn" class:active={showChargingStations} on:click={toggleChargingStations}>
-                    <div class="toggle-knob"></div>
-                  </button>
-                </label>
-                <div class="ev-buttons">
-                  <button class="btn btn-ev-search" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
-                    {#if isLoadingStations}
-                      <div class="spinner-small"></div>
-                      <span>กำลังค้นหา...</span>
-                    {:else}
-                      <span>🔍</span>
-                      <span>ค้นหาสถานีชาร์จ (100กม.)</span>
-                    {/if}
-                  </button>
-                  <button class="btn btn-ev-search" on:click={searchEVAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
-                    <span>🛣️</span>
-                    <span>ค้นหาตามเส้นทาง</span>
-                  </button>
-
-                  {#if chargingStations.length > 0}
-                    <button class="btn btn-ev-clear" on:click={clearChargingStations}>
-                      <span>🗑️</span>
-                      <span>ล้าง ({chargingStations.length})</span>
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Full Width Actions -->
-          <div class="settings-actions">
-            <button class="btn btn-secondary" on:click={exportRouteData}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              ส่งออกข้อมูล
-            </button>
-            <button class="btn btn-danger" on:click={() => { showSettings = false; showLogoutConfirm = true; }}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
-              ออกจากระบบ
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  {/if}
 
   <!-- Alerts Panel -->
-  {#if showAlerts}
-    <div class="alerts-backdrop" on:click={() => showAlerts = false} role="presentation"></div>
-    <div class="alerts-panel">
-      <div class="alerts-header">
-        <div class="alerts-title-row">
-          <div class="alerts-bell">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>
-          </div>
-          <h3>การแจ้งเตือน</h3>
-          {#if alerts.length > 0}
-            <span class="alerts-count">{alerts.length}</span>
-          {/if}
-        </div>
-        <div class="alerts-actions">
-          <button class="alerts-clear-btn" on:click={clearAlerts}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            ล้าง
-          </button>
-          <button class="alerts-close-btn" on:click={() => showAlerts = false}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="alerts-list">
-        {#if alerts.length === 0}
-          <div class="empty-alerts">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0" stroke-linecap="round"/><path d="M2 2l20 20" stroke-linecap="round"/></svg>
-            <span>ไม่มีการแจ้งเตือน</span>
-          </div>
-        {:else}
-          {#each alerts as alert, i}
-            <div class="alert-item" class:alert-emergency={alert.type === 'emergency'} style="--delay:{i * 0.05}s">
-              <div class="alert-icon-wrap" class:icon-delivery={alert.type === 'delivery'} class:icon-navigation={alert.type === 'navigation'} class:icon-break={alert.type === 'break'} class:icon-emergency={alert.type === 'emergency'}>
-                {#if alert.type === 'delivery'}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
-                {:else if alert.type === 'navigation'}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
-                {:else if alert.type === 'break'}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 8h1a4 4 0 110 8h-1M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4V8zM6 2v4M10 2v4M14 2v4"/></svg>
-                {:else if alert.type === 'emergency'}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01"/></svg>
-                {:else}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-                {/if}
-              </div>
-              <div class="alert-content">
-                <div class="alert-message">{alert.message}</div>
-                <div class="alert-time">{alert.time.toLocaleTimeString('th-TH')}</div>
-              </div>
-              <button class="alert-dismiss" on:click={() => dismissAlert(alert.id)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-              </button>
-            </div>
-          {/each}
-        {/if}
-      </div>
-    </div>
-  {/if}
+  <AlertsPanel
+    bind:show={showAlerts}
+    {alerts}
+    on:clearAlerts={clearAlerts}
+    on:dismissAlert={(e) => dismissAlert(e.detail.id)}
+  />
 
   <!-- Logout Confirmation -->
   {#if showLogoutConfirm}
@@ -6827,153 +6188,62 @@ out center body;`;
   {/if}
 
   <!-- Navigation Overlay -->
-  {#if isNavigating}
-    <div class="nav-overlay">
-
-      <!-- Turn-by-Turn Navigation Display -->
-      <div class="turn-by-turn-panel glass-card" class:off-route={isOffRoute}>
-        {#if isOffRoute}
-          <div class="off-route-warning">
-            <span class="off-route-icon">⚠️</span>
-            <div class="off-route-text">
-              <div class="off-route-title">ออกนอกเส้นทาง!</div>
-              <div class="off-route-detail">ห่าง {Math.round(offRouteDistance)} ม. - {autoRerouteEnabled ? 'กำลังคำนวณใหม่...' : 'กดปุ่มเพื่อคำนวณใหม่'}</div>
-            </div>
-            {#if !autoRerouteEnabled}
-              <button class="reroute-btn" on:click={autoReroute}>🔄 คำนวณใหม่</button>
-            {/if}
-          </div>
-        {:else}
-          <div class="turn-instruction">
-            <div class="turn-icon-wrap">
-              <span class="turn-icon">{nextTurnIcon}</span>
-            </div>
-            <div class="turn-info">
-              <div class="turn-text">{nextTurnInstruction}</div>
-              <div class="turn-distance">อีก {formatDistance(nextTurnDistance)}</div>
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <div class="nav-top-bar glass-card">
-        <div class="nav-target-info">
-          <div class="nav-target-label">มุ่งหน้าไป</div>
-          <div class="nav-target-name">
-            {#if currentTargetIndex < optimizedRoute?.optimized_order?.length}
-              {optimizedRoute.optimized_order[currentTargetIndex].name}
-            {:else}
-              ถึงจุดหมายแล้ว
-            {/if}
-          </div>
-          <div class="nav-eta">{formatDistance(distanceToNextPoint)} · {formatETA(estimatedArrivalTime)}</div>
-        </div>
-      </div>
-
-      <!-- Curve Warning (below nav-top-bar, left side) -->
-      {#if curveWarning?.active}
-        <div class="curve-warning glass-card" class:sharp={curveWarning.severity === 'sharp'} class:hairpin={curveWarning.severity === 'hairpin'}>
-          <div class="curve-icon">
-            {#if curveWarning.direction === 'left'}↰{:else}↱{/if}
-          </div>
-          <div class="curve-info">
-            <div class="curve-text">
-              {curveWarning.severity === 'hairpin' ? '⚠️ โค้งหักศอก!' : curveWarning.severity === 'sharp' ? 'โค้งแรง' : 'ทางโค้ง'}
-              {curveWarning.direction === 'left' ? 'ซ้าย' : 'ขวา'}
-            </div>
-            <div class="curve-distance">อีก {curveWarning.distance} ม.</div>
-          </div>
-        </div>
-      {/if}
-
-      <!-- Lane Guidance (below nav-top-bar, left side) -->
-      {#if laneGuidance?.show}
-        <div class="lane-guidance glass-card">
-          <div class="lane-visual">
-            <div class="lane" class:active={laneGuidance.lane === 'left'}></div>
-            <div class="lane" class:active={laneGuidance.lane === 'center'}></div>
-            <div class="lane" class:active={laneGuidance.lane === 'right'}></div>
-          </div>
-          <div class="lane-text">{laneGuidance.instruction}</div>
-        </div>
-      {/if}
-
-      <!-- Right side: Speed + Compass + Lock -->
-      <div class="nav-right-cluster">
-        <div class="speed-display glass-card">
-          <div class="speed-value">{Math.round(currentSpeed)}</div>
-          <div class="speed-unit">km/h</div>
-        </div>
-        <div class="compass-widget glass-card" title="เข็มทิศ">
-          <div class="compass-ring" style="transform: rotate({-compassHeading}deg)">
-            <div class="compass-n">N</div>
-            <div class="compass-e">E</div>
-            <div class="compass-s">S</div>
-            <div class="compass-w">W</div>
-            <svg class="compass-needle" viewBox="0 0 40 40" width="40" height="40">
-              <polygon points="20,4 16,22 20,19 24,22" fill="#ff4444"/>
-              <polygon points="20,36 16,22 20,25 24,22" fill="#a0a0a0"/>
-            </svg>
-          </div>
-          <div class="compass-heading-text">{Math.round(compassHeading)}° {compassDir}</div>
-        </div>
-        <button class="lock-btn glass-card" class:locked={isMapFollowing} on:click={() => { if (isMapFollowing) { isMapFollowing = false; map.getContainer().style.transform = 'rotate(0deg)'; } else { centerOnCurrentLocation(); } }}>
-          {#if isMapFollowing}
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg>
-          {:else}
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg>
-          {/if}
-        </button>
-      </div>
-
-      <div class="nav-bottom-panel glass-card">
-        <div class="nav-stats">
-          <div class="nav-stat">
-            <div class="nav-stat-content"><div class="nav-stat-value">{formatDistance(remainingDistance)}</div><div class="nav-stat-label">เหลือ</div></div>
-          </div>
-          <div class="nav-stat">
-            <div class="nav-stat-content"><div class="nav-stat-value">{formatTime(remainingTime)}</div><div class="nav-stat-label">เวลา</div></div>
-          </div>
-          <div class="nav-stat">
-            <div class="nav-stat-content"><div class="nav-stat-value">{formatETA(estimatedArrivalTime)}</div><div class="nav-stat-label">ถึงเวลา</div></div>
-          </div>
-          <div class="nav-stat">
-            <div class="nav-stat-content"><div class="nav-stat-value">{getSuccessCount()}/{getSuccessCount() + getRemainingPointsCount()}</div><div class="nav-stat-label">เป้าหมาย</div></div>
-          </div>
-        </div>
-
-        <div class="nav-actions">
-          <button class="nav-btn nav-btn-success" on:click={markDeliverySuccess} disabled={isProcessingDelivery || getRemainingPointsCount() === 0}>
-            {#if isProcessingDelivery}<div class="spinner-small"></div>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>{/if}
-            ถึงแล้ว
-          </button>
-          <button class="nav-btn nav-btn-skip" on:click={skipToNextPoint} disabled={isProcessingDelivery || getRemainingPointsCount() === 0}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
-            ข้าม
-          </button>
-          <button class="nav-btn nav-btn-voice" class:active={voiceEnabled} on:click={toggleVoice}>
-            {#if voiceEnabled}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6"/></svg>{/if}
-          </button>
-          <button class="nav-btn nav-btn-share" on:click={shareETA} title="แชร์เวลาถึง">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-          </button>
-          <button class="nav-btn nav-btn-stop" on:click={stopNavigation}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-            หยุด
-          </button>
-        </div>
-      </div>
-
-    </div>
-  {/if}
+  <NavigationOverlay
+    {isNavigating}
+    {isOffRoute}
+    {offRouteDistance}
+    {autoRerouteEnabled}
+    {nextTurnIcon}
+    {nextTurnInstruction}
+    {nextTurnDistance}
+    {currentTargetIndex}
+    {optimizedRoute}
+    {distanceToNextPoint}
+    {estimatedArrivalTime}
+    {curveWarning}
+    {laneGuidance}
+    {currentSpeed}
+    {compassHeading}
+    {compassDir}
+    {isMapFollowing}
+    {remainingDistance}
+    {remainingTime}
+    {isProcessingDelivery}
+    {voiceEnabled}
+    successCount={getSuccessCount()}
+    remainingPointsCount={getRemainingPointsCount()}
+    onAutoReroute={autoReroute}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.getContainer().style.transform = 'rotate(0deg)'; } else { centerOnCurrentLocation(); } }}
+    onMarkDeliverySuccess={markDeliverySuccess}
+    onSkipToNextPoint={skipToNextPoint}
+    onToggleVoice={toggleVoice}
+    onShareETA={shareETA}
+    onStopNavigation={stopNavigation}
+  />
 
   <!-- Sidebar -->
   {#if !isNavigating}
-    <aside class="sidebar" class:collapsed={!mobileSidebarOpen} class:desktop-collapsed={desktopSidebarCollapsed}>
+    <aside class="sidebar" class:collapsed={!mobileSidebarOpen || showSettings || showAddForm} class:desktop-collapsed={desktopSidebarCollapsed || showSettings || showAddForm}>
       <!-- Mobile toggle handle -->
       <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; smoothMapResize(); }}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class:flipped={mobileSidebarOpen}><path d="M6 9l6 6 6-6"/></svg>
-        <span>{mobileSidebarOpen ? 'ซ่อนเมนู' : optimizedRoute ? `สรุป: ${(optimizedRoute.total_distance/1000).toFixed(1)} กม. · ${Math.round(optimizedRoute.total_time/60)} นาที` : `${allDeliveryPoints.length} จุดแวะ`}</span>
+        {#if mobileSidebarOpen}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flipped"><path d="M6 9l6 6 6-6"/></svg>
+          <span class="toggle-text">ซ่อนเมนู</span>
+        {:else if optimizedRoute}
+          <div class="collapsed-summary">
+            <div class="cs-stat"><span class="cs-val">{(optimizedRoute.total_distance/1000).toFixed(1)}</span><span class="cs-unit">กม.</span></div>
+            <div class="cs-divider"></div>
+            <div class="cs-stat"><span class="cs-val">{Math.round(optimizedRoute.total_time/60)}</span><span class="cs-unit">นาที</span></div>
+            <div class="cs-divider"></div>
+            <div class="cs-stat"><span class="cs-val">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length}</span><span class="cs-unit">จุดแวะ</span></div>
+            <div class="cs-divider"></div>
+            <div class="cs-stat">{#if vehicleType === 'fuel'}<span class="cs-val cs-cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span>{:else}<span class="cs-val cs-cost">฿{Math.round(evCostEstimate)}</span>{/if}<span class="cs-unit">ค่าใช้จ่าย</span></div>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cs-arrow"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+          <span>{allDeliveryPoints.length} จุดแวะ</span>
+        {/if}
       </button>
       <div class="sidebar-header">
         <div class="logo">
@@ -6984,7 +6254,7 @@ out center body;`;
           <button class="icon-btn keyboard-help-btn" on:click={() => showKeyboardHelp = true} title="คีย์ลัด [?]">⌨️</button>
           <button class="icon-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง [D]' : 'เปลี่ยนเป็นโหมดมืด [D]'}>{nightMode ? '🌙' : '☀️'}</button>
           <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">🔔{#if alerts.length > 0}<span class="badge">{alerts.length}</span>{/if}</button>
-          <button class="icon-btn" on:click={() => showSettings = true} title="ตั้งค่า">⚙️</button>
+          <button class="icon-btn" on:click={() => { showSettings = true; smoothMapResize(); }} title="ตั้งค่า">⚙️</button>
         </div>
       </div>
 
@@ -6992,11 +6262,26 @@ out center body;`;
 
       {#if isMultiSelectMode}
         <div class="multi-select-toolbar">
-          <span>{selectedPoints.length} รายการที่เลือก</span>
-          <div class="multi-select-actions">
-            <button class="text-btn" on:click={selectAllPoints}>เลือกทั้งหมด</button>
-            <button class="text-btn" on:click={deselectAllPoints}>ยกเลิกทั้งหมด</button>
-            <button class="text-btn danger" on:click={deleteSelectedPoints}>ลบที่เลือก</button>
+          <div class="mst-left">
+            <div class="mst-count" class:has-selected={selectedPoints.length > 0}>
+              <span class="mst-num">{selectedPoints.length}</span>
+            </div>
+            <span class="mst-label">{selectedPoints.length > 0 ? `เลือกแล้ว ${selectedPoints.length} จุด` : 'เลือกจุดที่ต้องการ'}</span>
+          </div>
+          <div class="mst-actions">
+            <button class="mst-btn" on:click={selectAllPoints} title="เลือกทั้งหมด">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></svg>
+            </button>
+            <button class="mst-btn" on:click={deselectAllPoints} title="ยกเลิกทั้งหมด">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
+            </button>
+            <button class="mst-btn delete" on:click={deleteSelectedPoints} disabled={selectedPoints.length === 0} title="ลบที่เลือก ({selectedPoints.length})">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            </button>
+            <div class="mst-divider"></div>
+            <button class="mst-btn close" on:click={toggleMultiSelect} title="ปิด">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
           </div>
         </div>
       {/if}
@@ -7019,7 +6304,6 @@ out center body;`;
           <button class="btn btn-ghost" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }} title="ล้างเส้นทาง [C]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg><span>ล้างเส้นทาง</span></button>
         {/if}
         {#if !optimizedRoute}
-          <button class="btn btn-secondary" on:click={() => showAddForm = !showAddForm} title="เพิ่มจุดแวะ [A]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg><span>เพิ่มจุดแวะ</span></button>
           <button class="btn btn-ghost" on:click={toggleMultiSelect}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>{isMultiSelectMode ? 'ยกเลิกเลือก' : 'เลือกหลายรายการ'}</span></button>
           <button class="btn {isDragMode ? 'btn-drag-active' : 'btn-ghost'}" on:click={toggleDragMode} disabled={deliveryPoints.length < 1}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 3-3 3M12 2L9 5l3 3M12 22l3-3-3-3M12 22l-3-3 3-3M2 12l3-3 3 3M2 12l3 3 3-3M22 12l-3-3-3 3M22 12l-3 3-3-3"/><circle cx="12" cy="12" r="1"/></svg>
@@ -7059,28 +6343,6 @@ out center body;`;
         {/if}
       </div>
 
-      {#if showAddForm && !optimizedRoute}
-        <div class="add-form-overlay">
-          <div class="add-form glass-card">
-            <div class="form-header"><h3>เพิ่มจุดแวะใหม่</h3><button class="close-btn" on:click={cancelAddForm}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg></button></div>
-            <p class="form-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>คลิกบนแผนที่เพื่อเลือกตำแหน่ง</p>
-            <form on:submit|preventDefault={addDeliveryPoint}>
-              <div class="form-group"><label>ชื่อสถานที่</label><input type="text" bind:value={newPoint.name} placeholder="สถานที่ ที่ต้องการจะคำนวณเส้นทาง" required /></div>
-              <div class="form-group"><label>ที่อยู่</label><textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea></div>
-              <div class="form-group coords-group">
-                <div class="coord-input"><label>Latitude</label><input type="text" value={newPoint.lat} readonly /></div>
-                <div class="coord-input"><label>Longitude</label><input type="text" value={newPoint.lng} readonly /></div>
-              </div>
-              
-              <div class="form-actions">
-                <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>บันทึก</button>
-                <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      {/if}
-
       <div class="tabs">
         <button class="tab" class:active={activeTab === 'points'} on:click={() => activeTab = 'points'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดแวะ ({deliveryPoints.length})</button>
         <button class="tab" class:active={activeTab === 'route'} on:click={() => activeTab = 'route'} disabled={!optimizedRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>เส้นทาง</button>
@@ -7101,10 +6363,10 @@ out center body;`;
                   <div class="point-info">
                     <h4 class="point-name">{point.name}</h4>
                     <p class="point-address">{point.address}</p>
-                    <div class="point-meta">
-                      <span class="priority-tag" style="background: {colors.bg}">P{point.priority} · {getPriorityLabel(point.priority)}</span>
-                      {#if currentLocation && pointDistances[i] !== undefined}<span class="distance-tag">📍 {formatDistance(pointDistances[i])}</span>{/if}
-                    </div>
+                  </div>
+                  <div class="point-meta">
+                    <span class="priority-tag" style="background: {colors.bg}">P{point.priority}</span>
+                    {#if currentLocation && pointDistances[i] !== undefined}<span class="distance-tag">{formatDistance(pointDistances[i])}</span>{/if}
                   </div>
                   <button class="delete-btn" on:click|stopPropagation={() => deletePoint(point.id, point.name)} title="ลบจุดนี้"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
                 </div>
@@ -7113,192 +6375,95 @@ out center body;`;
           </div>
         {:else if activeTab === 'route' && optimizedRoute}
           <div class="route-summary">
-            <div class="summary-header">
-              <h3>สรุปเส้นทาง</h3>
-              <span class="route-badge" class:ev-badge={vehicleType === 'ev'}>
-                {vehicleType === 'ev' ? '⚡ เส้นทาง EV' : '⛽ เส้นทางที่ดีที่สุด'}
-              </span>
-            </div>
-            
-            <div class="summary-stats">
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
-                  </svg>
+            <div class="route-detail-card">
+              <div class="rd-header">สรุปเส้นทาง</div>
+              <div class="rd-grid">
+                <div class="rd-row">
+                  <span class="rd-icon">📏</span>
+                  <span class="rd-label">ระยะทาง</span>
+                  <span class="rd-value">{(optimizedRoute.total_distance / 1000).toFixed(1)} กม.</span>
                 </div>
-                <div class="stat-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</div>
-                <div class="stat-label">กิโลเมตร</div>
+                <div class="rd-row">
+                  <span class="rd-icon">⏱️</span>
+                  <span class="rd-label">เวลาเดินทาง</span>
+                  <span class="rd-value">
+                    {#if optimizedRoute.total_time >= 3600}
+                      {Math.floor(optimizedRoute.total_time / 3600)} ชม. {Math.round((optimizedRoute.total_time % 3600) / 60)} น.
+                    {:else}
+                      {Math.round(optimizedRoute.total_time / 60)} นาที
+                    {/if}
+                  </span>
+                </div>
+                <div class="rd-row">
+                  <span class="rd-icon">📍</span>
+                  <span class="rd-label">จุดแวะ</span>
+                  <span class="rd-value">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length} จุด</span>
+                </div>
+                <div class="rd-row">
+                  <span class="rd-icon">🕐</span>
+                  <span class="rd-label">ถึงโดยประมาณ</span>
+                  <span class="rd-value">{new Date(Date.now() + optimizedRoute.total_time * 1000).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</span>
+                </div>
+                <div class="rd-row">
+                  <span class="rd-icon">🚗</span>
+                  <span class="rd-label">ความเร็วเฉลี่ย</span>
+                  <span class="rd-value">{optimizedRoute.total_time > 0 ? Math.round((optimizedRoute.total_distance / 1000) / (optimizedRoute.total_time / 3600)) : 0} กม./ชม.</span>
+                </div>
               </div>
-              
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
-                  </svg>
-                </div>
-                <div class="stat-value">{Math.round(optimizedRoute.total_time / 60)}</div>
-                <div class="stat-label">นาที</div>
-              </div>
-              
-              <div class="stat-card">
-                <div class="stat-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-                    <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-                  </svg>
-                </div>
-                <div class="stat-value">{optimizedRoute.optimized_order.filter((p: any) => p.id !== -1).length}</div>
-                <div class="stat-label">จุดแวะ</div>
-              </div>
-              
-              {#if vehicleType === 'fuel'}
-                <div class="stat-card fuel">
-                  <div class="stat-icon">⛽</div>
-                  <div class="stat-value">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</div>
-                  <div class="stat-label">ค่าน้ำมัน</div>
-                </div>
-              {:else}
-                <div class="stat-card ev">
-                  <div class="stat-icon">⚡</div>
-                  <div class="stat-value">฿{Math.round(evCostEstimate)}</div>
-                  <div class="stat-label">ค่าไฟฟ้า</div>
-                </div>
-              {/if}
-            </div>
-
-            {#if vehicleType === 'fuel'}
-              <div class="fuel-route-info">
-                <div class="fuel-info-row">
-                  <span>⛽ ปั๊ม:</span>
-                  <strong>{getSelectedStationName()}</strong>
-                </div>
-                <div class="fuel-info-row">
-                  <span>🛢️ ประเภท:</span>
-                  <strong>{getSelectedFuelName()}</strong>
-                </div>
-                <div class="fuel-info-row">
-                  <span>💰 ราคาน้ำมัน:</span>
-                  <strong style="color: #00ff88">฿{currentFuelPrice.toFixed(2)}/ลิตร</strong>
-                </div>
-                <div class="fuel-info-row">
-                  <span>⛽ ใช้น้ำมัน:</span>
-                  <strong>{((optimizedRoute.total_distance / 1000) / KM_PER_LITER).toFixed(1)} ลิตร</strong>
-                </div>
-                <div class="fuel-info-row">
-                  <span>📊 อัตราสิ้นเปลือง:</span>
-                  <strong>{KM_PER_LITER} กม./ลิตร</strong>
-                </div>
-                
-                {#if getCheapestStation() && getCheapestStation()?.label !== getSelectedStationName()}
-                  <div class="cheapest-tip">
-                    💡 ปั๊มถูกที่สุด: <strong>{getCheapestStation()?.label}</strong> (฿{getCheapestStation()?.price})
-                    - ประหยัดได้ ฿{Math.round(((optimizedRoute.total_distance / 1000) / KM_PER_LITER) * (currentFuelPrice - parseFloat(getCheapestStation()?.price || '0')))}
-                  </div>
-                {/if}
-              </div>
-            {:else}
-              <div class="ev-route-info" class:warning={!isEVRangeSufficient()}>
-                <div class="ev-info-row">
-                  <span>🔋 แบตปัจจุบัน:</span>
-                  <strong style="color: {getEVBatteryColor()}">{evCurrentCharge}%</strong>
-                </div>
-                <div class="ev-info-row">
-                  <span>📍 ระยะวิ่งได้:</span>
-                  <strong>{evRemainingRange.toFixed(0)} กม.</strong>
-                </div>
-                <div class="ev-info-row">
-                  <span>⚡ ใช้พลังงาน (คาดการณ์):</span>
-                  <strong>{evEnergyConsumption.toFixed(1)} kWh</strong>
-                </div>
-                <div class="ev-info-row">
-                  <span>📊 อัตรากินไฟ:</span>
-                  <strong style="color: {evCurrentConsumptionRate > KWH_PER_100KM * 1.3 ? '#ff6b6b' : evCurrentConsumptionRate < KWH_PER_100KM * 0.9 ? '#00ff88' : '#ffa502'}">{evCurrentConsumptionRate.toFixed(1)} kWh/100กม.</strong>
-                </div>
-                {#if isNavigating && evTripEnergyUsed > 0}
-                  <div class="ev-info-row">
-                    <span>🔌 ใช้จริง (ทริปนี้):</span>
-                    <strong style="color: #00d4ff">{evTripEnergyUsed.toFixed(2)} kWh</strong>
-                  </div>
-                {/if}
-                <div class="ev-info-row">
-                  <span>🔋 แบตหลังจบ:</span>
-                  <strong style="color: {evBatteryAfterTrip > 20 ? '#00ff88' : '#ff6b6b'}">{evBatteryAfterTrip.toFixed(0)}%</strong>
-                </div>
-                {#if !isEVRangeSufficient()}
-                  <div class="ev-warning-banner">
-                    ⚠️ ระยะทางมากกว่าแบตเตอรี่ที่เหลือ! อาจต้องชาร์จระหว่างทาง
-                  </div>
-                {/if}
-              </div>
-            {/if}
-            
-            <!-- Trip Cost Summary -->
-            <div class="trip-cost-card">
-              <h4>💰 สรุปค่าใช้จ่าย</h4>
-              <div class="cost-rows">
+              <div class="rd-divider"></div>
+              <div class="rd-header">ค่าใช้จ่าย</div>
+              <div class="rd-grid">
                 {#if vehicleType === 'fuel'}
-                  {@const fuelLiters = (optimizedRoute.total_distance / 1000) / KM_PER_LITER}
-                  {@const fuelCost = Math.round(fuelLiters * currentFuelPrice)}
-                  <div class="cost-row">
-                    <span class="cost-label">⛽ ค่าน้ำมัน</span>
-                    <span class="cost-value">฿{fuelCost.toLocaleString()}</span>
+                  <div class="rd-row">
+                    <span class="rd-icon">⛽</span>
+                    <span class="rd-label">น้ำมัน ({(optimizedRoute.total_distance / 1000 / KM_PER_LITER).toFixed(1)} ลิตร)</span>
+                    <span class="rd-value cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span>
                   </div>
-                  <div class="cost-row sub">
-                    <span>{fuelLiters.toFixed(1)} ลิตร × ฿{currentFuelPrice.toFixed(2)}</span>
+                  <div class="rd-row sub">
+                    <span class="rd-icon"></span>
+                    <span class="rd-label">ราคาน้ำมัน</span>
+                    <span class="rd-value">฿{currentFuelPrice.toFixed(2)}/ลิตร</span>
+                  </div>
+                  <div class="rd-row sub">
+                    <span class="rd-icon"></span>
+                    <span class="rd-label">อัตราสิ้นเปลือง</span>
+                    <span class="rd-value">{KM_PER_LITER} กม./ลิตร</span>
                   </div>
                 {:else}
-                  {@const evRate = getEVConsumptionForRoute(optimizedRoute.total_distance, optimizedRoute.total_time)}
-                  {@const evKwh = ((optimizedRoute.total_distance / 1000) / 100) * evRate}
-                  {@const evCost = Math.round(evKwh * ELECTRICITY_PRICE_PER_KWH)}
-                  {@const avgSpd = optimizedRoute.total_time > 0 ? (optimizedRoute.total_distance / 1000) / (optimizedRoute.total_time / 3600) : 60}
-                  <div class="cost-row">
-                    <span class="cost-label">⚡ ค่าไฟฟ้า</span>
-                    <span class="cost-value">฿{evCost.toLocaleString()}</span>
+                  <div class="rd-row">
+                    <span class="rd-icon">⚡</span>
+                    <span class="rd-label">ค่าไฟ ({evEnergyConsumption.toFixed(1)} kWh)</span>
+                    <span class="rd-value cost">฿{Math.round(evCostEstimate)}</span>
                   </div>
-                  <div class="cost-row sub">
-                    <span>{evKwh.toFixed(1)} kWh ({evRate.toFixed(1)} kWh/100กม. @~{Math.round(avgSpd)} km/h)</span>
+                  <div class="rd-row sub">
+                    <span class="rd-icon"></span>
+                    <span class="rd-label">อัตราค่าไฟ</span>
+                    <span class="rd-value">฿{ELECTRICITY_PRICE_PER_KWH}/kWh</span>
+                  </div>
+                  <div class="rd-row sub">
+                    <span class="rd-icon"></span>
+                    <span class="rd-label">อัตราสิ้นเปลือง</span>
+                    <span class="rd-value">{KWH_PER_100KM} kWh/100กม.</span>
+                  </div>
+                  <div class="rd-row sub">
+                    <span class="rd-icon"></span>
+                    <span class="rd-label">แบตหลังเดินทาง</span>
+                    <span class="rd-value" style="color: {evBatteryAfterTrip < 20 ? '#ef4444' : '#00ff88'}">{Math.round(evBatteryAfterTrip)}%</span>
                   </div>
                 {/if}
-
-                <div class="cost-row">
-                  <span class="cost-label">🛣️ ค่าทางด่วน</span>
-                  <span class="cost-value {tollCostEstimate > 0 ? '' : 'no-toll'}">{tollCostEstimate > 0 ? `฿${tollCostEstimate}` : 'ไม่มี ✅'}</span>
+                {#if tollCostEstimate > 0}
+                  <div class="rd-row">
+                    <span class="rd-icon">🛣️</span>
+                    <span class="rd-label">ค่าผ่านทาง</span>
+                    <span class="rd-value cost">฿{Math.round(tollCostEstimate)}</span>
+                  </div>
+                {/if}
+                <div class="rd-total">
+                  <span class="rd-label">รวมทั้งหมด</span>
+                  <span class="rd-value total">฿{vehicleType === 'fuel' ? Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice + tollCostEstimate) : Math.round(evCostEstimate + tollCostEstimate)}</span>
                 </div>
-                {#if tollCostEstimate > 0 && routeAlternatives[selectedRouteIndex]}
-                  {@const expNames = getExpresswayNames(routeAlternatives[selectedRouteIndex])}
-                  {#if expNames.length > 0}
-                    <div class="cost-row sub"><span>ผ่าน: {expNames.join(', ')}</span></div>
-                  {/if}
-                {/if}
-
-                <div class="cost-divider"></div>
-
-                <!-- Total -->
-                {#if vehicleType === 'fuel'}
-                  {@const totalCost = Math.round(((optimizedRoute.total_distance / 1000) / KM_PER_LITER) * currentFuelPrice) + tollCostEstimate}
-                  <div class="cost-row total">
-                    <span class="cost-label">รวมทั้งหมด</span>
-                    <span class="cost-value">฿{totalCost.toLocaleString()}</span>
-                  </div>
-                  <div class="cost-row sub">
-                    <span>≈ ฿{(totalCost / Math.max(optimizedRoute.total_distance / 1000, 0.1)).toFixed(1)}/กม.</span>
-                  </div>
-                {:else}
-                  {@const evRateTotal = getEVConsumptionForRoute(optimizedRoute.total_distance, optimizedRoute.total_time)}
-                  {@const totalCostEV = Math.round((((optimizedRoute.total_distance / 1000) / 100) * evRateTotal) * ELECTRICITY_PRICE_PER_KWH) + tollCostEstimate}
-                  <div class="cost-row total">
-                    <span class="cost-label">รวมทั้งหมด</span>
-                    <span class="cost-value">฿{totalCostEV.toLocaleString()}</span>
-                  </div>
-                  <div class="cost-row sub">
-                    <span>≈ ฿{(totalCostEV / Math.max(optimizedRoute.total_distance / 1000, 0.1)).toFixed(1)}/กม.</span>
-                  </div>
-                {/if}
               </div>
             </div>
-            <!-- Route Timeline -->
-             <br>
             <div class="route-timeline">
               <h4>ลำดับการเดินทาง</h4>
               {#each optimizedRoute.optimized_order as point, i}
@@ -7318,6 +6483,28 @@ out center body;`;
 
       <div class="sidebar-footer"><span>Route Planning</span><span>ระบบเพิ่มประสิทธิภาพในการวางแผนเส้นทาง</span></div>
     </aside>
+  {/if}
+
+  <!-- Add Point Form Overlay (outside sidebar for proper z-index) -->
+  {#if showAddForm && !optimizedRoute}
+    <div class="add-form-overlay">
+      <div class="add-form glass-card">
+        <div class="form-header"><h3>เพิ่มจุดแวะใหม่</h3><button class="close-btn" on:click={cancelAddForm}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg></button></div>
+        <p class="form-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/></svg>คลิกบนแผนที่เพื่อเลือกตำแหน่ง</p>
+        <form on:submit|preventDefault={addDeliveryPoint}>
+          <div class="form-group"><label>ชื่อสถานที่</label><input type="text" bind:value={newPoint.name} placeholder="สถานที่ ที่ต้องการจะคำนวณเส้นทาง" required /></div>
+          <div class="form-group"><label>ที่อยู่</label><textarea bind:value={newPoint.address} placeholder="รายละเอียดที่อยู่..." rows="2" required></textarea></div>
+          <div class="form-group coords-group">
+            <div class="coord-input"><label>Latitude</label><input type="text" value={newPoint.lat} readonly /></div>
+            <div class="coord-input"><label>Longitude</label><input type="text" value={newPoint.lng} readonly /></div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>บันทึก</button>
+            <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
+          </div>
+        </form>
+      </div>
+    </div>
   {/if}
 
   <!-- Route Selector Overlay -->
@@ -7445,7 +6632,7 @@ out center body;`;
   {/if}
 
   <!-- Desktop Sidebar Toggle Button (fixed position) -->
-  {#if !isNavigating}
+  {#if !isNavigating && !showSettings && !showAddForm}
     <button class="desktop-sidebar-toggle" class:sidebar-hidden={desktopSidebarCollapsed} on:click={() => { desktopSidebarCollapsed = !desktopSidebarCollapsed; smoothMapResize(); }} title={desktopSidebarCollapsed ? 'แสดงเมนู [M]' : 'ซ่อนเมนู [M]'}>
       {#if desktopSidebarCollapsed}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -7457,86 +6644,94 @@ out center body;`;
     </button>
   {/if}
 
-  <div class="map-container" class:fullscreen={isNavigating}>
+  <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm}>
     <div id="map"></div>
 
-    {#if !isNavigating}
+    {#if !isNavigating && !isSearchFocused && !directDestination}
       <div class="map-stats glass-card">
         <div class="map-stat"><span class="map-stat-value">{deliveryPoints.length}</span><span class="map-stat-label">จุดแวะ</span></div>
         <div class="map-stat"><span class="map-stat-value">{getSuccessCount()}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
         <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
       </div>
     {/if}
-    {#if !isNavigating && !optimizedRoute}
+
+    <!-- Add Point Mode Toggle -->
+    {#if !isNavigating && !isSearchFocused && !directDestination}
+      <button class="add-point-toggle glass-card" class:active={addPointMode} on:click={() => { addPointMode = !addPointMode; if (map) map.getContainer().style.cursor = addPointMode ? 'crosshair' : ''; if (!addPointMode && clickMarker) { clickMarker.remove(); clickMarker = null; } }}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        <span>{addPointMode ? 'ปักหมุดอยู่...' : 'เพิ่มจุด'}</span>
+      </button>
+    {/if}
+
+    {#if !isNavigating && !optimizedRoute && addPointMode}
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
+    {/if}
+
+    <!-- Floating Route Summary (mobile) -->
+    {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination && !showIncidentsPanel}
+      <div class="map-route-summary glass-card">
+        <div class="mrs-stats">
+          <div class="mrs-stat">
+            <span class="mrs-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</span>
+            <span class="mrs-unit">กม.</span>
+          </div>
+          <div class="mrs-divider"></div>
+          <div class="mrs-stat">
+            {#if optimizedRoute.total_time >= 3600}
+              <span class="mrs-value">{Math.floor(optimizedRoute.total_time / 3600)}:{String(Math.round((optimizedRoute.total_time % 3600) / 60)).padStart(2, '0')}</span>
+              <span class="mrs-unit">ชม.</span>
+            {:else}
+              <span class="mrs-value">{Math.round(optimizedRoute.total_time / 60)}</span>
+              <span class="mrs-unit">นาที</span>
+            {/if}
+          </div>
+          <div class="mrs-divider"></div>
+          <div class="mrs-stat">
+            <span class="mrs-value">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length}</span>
+            <span class="mrs-unit">จุด</span>
+          </div>
+          <div class="mrs-divider"></div>
+          <div class="mrs-stat">
+            {#if vehicleType === 'fuel'}
+              <span class="mrs-value cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span>
+              <span class="mrs-unit">น้ำมัน</span>
+            {:else}
+              <span class="mrs-value cost">฿{Math.round(evCostEstimate)}</span>
+              <span class="mrs-unit">ค่าไฟ</span>
+            {/if}
+          </div>
+          {#if tollCostEstimate > 0}
+            <div class="mrs-divider"></div>
+            <div class="mrs-stat">
+              <span class="mrs-value cost">฿{Math.round(tollCostEstimate)}</span>
+              <span class="mrs-unit">ค่าผ่านทาง</span>
+            </div>
+          {/if}
+        </div>
+        <div class="mrs-actions">
+          <button class="mrs-btn start" on:click={() => { if (allDeliveryPoints.length > 0) startNavigation(); }} title="เริ่มนำทาง">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
+          </button>
+          <button class="mrs-btn clear" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }} title="ล้างเส้นทาง">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
     {/if}
 
     <!-- ==================== FLOATING PANELS ON MAP ==================== -->
 
     <!-- Floating Search Bar -->
-    {#if !isNavigating}
-      <div class="map-search-float glass-card">
-        <div class="search-input-wrapper">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-          <input
-            type="text"
-            class="search-input"
-            placeholder="ค้นหาสถานที่..."
-            bind:value={searchQuery}
-            on:input={handleSearchInput}
-            on:focus={() => { searchFocused = true; if (searchResults.length > 0) showSearchResults = true; }}
-            on:blur={() => { setTimeout(() => { searchFocused = false; }, 200); }}
-          />
-          {#if searchQuery}
-            <button class="search-clear" on:click={() => { searchQuery = ''; searchResults = []; showSearchResults = false; if (destinationMarker) { destinationMarker.remove(); destinationMarker = null; } directDestination = null; }}>×</button>
-          {/if}
-          {#if isSearching}
-            <div class="search-spinner"></div>
-          {/if}
-        </div>
-        {#if showSearchResults && searchResults.length > 0}
-          <div class="search-dropdown">
-            {#each searchResults as result}
-              <button class="search-result-item" on:click={() => selectSearchResult(result)}>
-                <span class="result-icon">📍</span>
-                <div class="result-info">
-                  <span class="result-name">{result.name}</span>
-                  <span class="result-address">{result.address}</span>
-                </div>
-              </button>
-            {/each}
-          </div>
-        {:else if !searchQuery && searchFocused && recentSearches.length > 0}
-          <div class="search-dropdown recent-searches">
-            <div class="recent-header">
-              <span>🕐 ค้นหาล่าสุด</span>
-              <button class="recent-clear-btn" on:click={clearRecentSearches}>ล้าง</button>
-            </div>
-            {#each recentSearches as recent}
-              <button class="search-result-item" on:click={() => selectRecentSearch(recent)}>
-                <span class="result-icon">🕐</span>
-                <div class="result-info">
-                  <span class="result-name">{recent.name}</span>
-                  <span class="result-address">{recent.address}</span>
-                </div>
-              </button>
-            {/each}
-          </div>
-        {/if}
-        {#if directDestination}
-          <div class="direct-nav-bar">
-            <div class="direct-dest-info">
-              <span class="dest-icon">📍</span>
-              <span class="dest-name">{directDestination.name}</span>
-            </div>
-            <button class="btn btn-navigate-direct" on:click={navigateToSearchResult}>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
-              ปักหมุด
-            </button>
-          </div>
-        {/if}
-      </div>
-    {/if}
+    <SearchPanel
+      {isNavigating}
+      {directDestination}
+      {getUserKey}
+      on:selectResult={(e) => selectSearchResult(e.detail)}
+      on:navigate={navigateToSearchResult}
+      on:clearDestination={() => { if (destinationMarker) { destinationMarker.remove(); destinationMarker = null; } directDestination = null; }}
+      on:searchError={(e) => showNotification(e.detail.message, 'error')}
+      on:searchFocus={(e) => isSearchFocused = e.detail}
+    />
 
     <!-- Floating Route Preferences -->
     {#if !isNavigating}
@@ -7706,7 +6901,7 @@ out center body;`;
     {/if}
 
     <!-- Floating Along-Route POI -->
-    {#if optimizedRoute && !isNavigating}
+    {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination}
       <div class="map-poi-float glass-card">
         <div class="poi-header">
           <button class="poi-search-btn" on:click={searchPOIsAlongRoute} disabled={isLoadingPOIs}>
@@ -8286,10 +7481,24 @@ out center body;`;
 }
 
 .day-mode .multi-select-toolbar {
-  background: rgba(242, 238, 232, 0.9) !important;
-  color: #2a2520 !important;
-  border-color: rgba(100, 80, 60, 0.08) !important;
+  background: linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(139,92,246,0.05) 100%) !important;
+  border-color: rgba(99,102,241,0.2) !important;
 }
+.day-mode .mst-label { color: #6366f1 !important; }
+.day-mode .mst-count { background: rgba(99,102,241,0.1) !important; border-color: rgba(99,102,241,0.25) !important; }
+.day-mode .mst-count.has-selected { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; }
+.day-mode .mst-num { color: #6366f1 !important; }
+.day-mode .mst-count.has-selected .mst-num { color: #fff !important; }
+.day-mode .mst-btn { background: rgba(99,102,241,0.06) !important; color: #6366f1 !important; }
+.day-mode .mst-btn:hover { background: rgba(99,102,241,0.15) !important; }
+.day-mode .mst-btn.delete { color: #9ca3af !important; }
+.day-mode .mst-btn.delete:hover:not(:disabled) { background: rgba(239,68,68,0.1) !important; color: #ef4444 !important; }
+.day-mode .mst-btn.close { color: #9ca3af !important; }
+.day-mode .mst-btn.close:hover { background: rgba(0,0,0,0.06) !important; color: #374151 !important; }
+.day-mode .mst-divider { background: rgba(99,102,241,0.15) !important; }
+.day-mode .checkbox { background: rgba(0,0,0,0.04) !important; border-color: rgba(99,102,241,0.25) !important; }
+.day-mode .checkbox.checked { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; border-color: transparent !important; }
+.day-mode .point-card.selected { background: rgba(99,102,241,0.04) !important; border-color: rgba(99,102,241,0.15) !important; }
 
 .day-mode .sidebar-scroll {
   scrollbar-color: rgba(100, 80, 60, 0.18) transparent;
@@ -8341,6 +7550,15 @@ out center body;`;
   color: #1e1b18 !important;
   border-color: rgba(100, 80, 60, 0.1) !important;
 }
+.day-mode .map-route-summary {
+  background: rgba(235, 230, 222, 0.94) !important;
+  border-color: rgba(100, 80, 60, 0.1) !important;
+}
+.day-mode .mrs-value { color: #00875a !important; }
+.day-mode .mrs-value.cost { color: #d97706 !important; }
+.day-mode .mrs-unit { color: #6b6058 !important; }
+.day-mode .mrs-divider { background: rgba(100, 80, 60, 0.12) !important; }
+.day-mode .mrs-btn.clear { background: rgba(0,0,0,0.04) !important; color: #9ca3af !important; }
 
 .day-mode .search-panel {
   background: rgba(235, 230, 222, 0.97) !important;
@@ -8500,9 +7718,9 @@ out center body;`;
     overflow: hidden;
     max-width: 100%;
     position: relative;
-    transition: margin-left 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
                 opacity 0.15s ease;
-    will-change: margin-left, opacity;
+    will-change: width, opacity;
   }
   .sidebar-toggle { display: none; }
 
@@ -8528,7 +7746,7 @@ out center body;`;
     font-size: 11px;
     font-weight: 600;
     z-index: 1500;
-    transition: left 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    transition: left 0.3s cubic-bezier(0.22, 1, 0.36, 1),
                 transform 0.2s ease,
                 background 0.2s ease,
                 box-shadow 0.2s ease;
@@ -8557,37 +7775,40 @@ out center body;`;
 
   /* Desktop collapsed state - uses margin-left instead of width for smooth GPU animation */
   .sidebar.desktop-collapsed {
-    margin-left: -500px;
+    width: 0;
+    min-width: 0;
+    margin-left: 0;
     opacity: 0;
     pointer-events: none;
     border-right: none;
+    overflow: hidden;
   }
-  .sidebar-header { padding: 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: rgba(0, 0, 0, 0.1); }
+  .sidebar-header { padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: rgba(0, 0, 0, 0.1); }
   .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
   .sidebar-scroll::-webkit-scrollbar { width: 5px; }
   .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
   .sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(0, 255, 136, 0.15); border-radius: 10px; transition: background 0.3s; }
   .sidebar-scroll::-webkit-scrollbar-thumb:hover { background: rgba(0, 255, 136, 0.35); }
 
-  .logo { display: flex; align-items: center; gap: 14px; }
-  .logo-icon { width: 44px; height: 44px; background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); border-radius: 12px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 12px rgba(0, 255, 136, 0.25); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease; }
-  .logo-icon:hover { transform: scale(1.08) rotate(-3deg); box-shadow: 0 4px 20px rgba(0, 255, 136, 0.35); }
-  .logo-icon svg { width: 24px; height: 24px; color: #0a0a0f; }
-  .logo-text h1 { font-size: 20px; font-weight: 700; color: #00ff88; }
-  .logo-text span { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 1.5px; }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo-icon { width: 34px; height: 34px; background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0, 255, 136, 0.2); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease; }
+  .logo-icon:hover { transform: scale(1.08) rotate(-3deg); box-shadow: 0 4px 16px rgba(0, 255, 136, 0.3); }
+  .logo-icon svg { width: 18px; height: 18px; color: #0a0a0f; }
+  .logo-text h1 { font-size: 15px; font-weight: 700; color: #00ff88; }
+  .logo-text span { font-size: 9px; color: #71717a; text-transform: uppercase; letter-spacing: 1px; }
 
-  .stats-badge { display: flex; flex-direction: column; align-items: center; background: rgba(0, 255, 136, 0.08); border: 1px solid rgba(0, 255, 136, 0.15); border-radius: 10px; padding: 8px 16px; transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease; }
+  .stats-badge { display: flex; flex-direction: column; align-items: center; background: rgba(0, 255, 136, 0.08); border: 1px solid rgba(0, 255, 136, 0.15); border-radius: 8px; padding: 6px 12px; transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease; }
   .stats-badge:hover { transform: scale(1.05); box-shadow: 0 4px 16px rgba(0, 255, 136, 0.12); }
-  .stats-number { font-size: 22px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
-  .stats-label { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stats-number { font-size: 16px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
+  .stats-label { font-size: 9px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
 
-  .action-buttons { padding: 16px 20px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-  .action-buttons .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .action-buttons { padding: 10px 14px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .action-buttons .btn { flex: 1 1 calc(50% - 3px); min-width: 0; }
 
   .btn {
-    display: flex; align-items: center; justify-content: center; gap: 10px;
-    padding: 14px 20px; border-radius: 12px;
-    font-family: 'Kanit', sans-serif; font-size: 15px; font-weight: 500;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 9px 12px; border-radius: 10px;
+    font-family: 'Kanit', sans-serif; font-size: 12px; font-weight: 500;
     cursor: pointer; border: none; outline: none;
     transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
                 box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1),
@@ -8609,7 +7830,7 @@ out center body;`;
     pointer-events: none;
   }
   .btn:hover::after { opacity: 1; }
-  .btn svg { width: 20px; height: 20px; transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+  .btn svg { width: 16px; height: 16px; transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
   .btn:hover svg { transform: scale(1.1); }
   .btn:active:not(:disabled) { transform: scale(0.95); transition-duration: 0.1s; }
   .btn-primary { background: #00ff88; color: #0a0a0f; box-shadow: 0 2px 12px rgba(0, 255, 136, 0.2); }
@@ -8663,8 +7884,13 @@ out center body;`;
     .btn-ev-clear:hover {
       background: rgba(255, 107, 107, 0.25);
     }
-  .add-form { margin: 0 16px 300px; padding: 16px; animation: slideIn 0.4s cubic-bezier(0.22, 1, 0.36, 1); }
-  .add-form-overlay { display: contents; }
+  .add-form { padding: 20px; animation: slideIn 0.4s cubic-bezier(0.22, 1, 0.36, 1); width: 100%; max-width: 440px; max-height: 85vh; overflow-y: auto; border-radius: 16px; }
+  .add-form-overlay {
+    position: fixed; inset: 0; z-index: 2100;
+    background: rgba(0,0,0,0.6); display: flex;
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
   @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInFloat { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   .form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -8704,33 +7930,33 @@ out center body;`;
   /* Clean Tabs */
   .tabs {
     display: flex;
-    gap: 8px;
-    margin: 0 20px 16px;
-    padding: 4px;
+    gap: 4px;
+    margin: 0 14px 10px;
+    padding: 3px;
     background: rgba(255, 255, 255, 0.03);
-    border-radius: 14px;
+    border-radius: 10px;
   }
   .tab {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    padding: 12px 16px;
-    border-radius: 10px;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
     background: transparent;
     border: none;
     color: #71717a;
     font-family: 'Kanit', sans-serif;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 500;
     cursor: pointer;
     transition: color 0.3s ease, background 0.3s ease, box-shadow 0.3s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
     position: relative;
   }
   .tab svg {
-    width: 18px;
-    height: 18px;
+    width: 14px;
+    height: 14px;
     transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
   .tab:hover:not(:disabled) {
@@ -8752,7 +7978,7 @@ out center body;`;
     cursor: not-allowed;
   }
 
-  .content-area { flex: 1; overflow-y: auto; padding: 0 50px; }
+  .content-area { flex: 1; overflow-y: auto; padding: 0 14px; }
   .content-area::-webkit-scrollbar { width: 5px; }
   .content-area::-webkit-scrollbar-track { background: transparent; }
   .content-area::-webkit-scrollbar-thumb { background: rgba(0, 255, 136, 0.15); border-radius: 10px; }
@@ -8761,13 +7987,13 @@ out center body;`;
   /* Clean Empty State */
   .empty-state {
     text-align: center;
-    padding: 48px 24px;
+    padding: 30px 16px;
     margin: 10px;
   }
   .empty-icon {
-    width: 80px;
-    height: 80px;
-    margin: 0 auto 20px;
+    width: 50px;
+    height: 50px;
+    margin: 0 auto 12px;
     background: rgba(139, 92, 246, 0.08);
     border: 1px solid rgba(139, 92, 246, 0.15);
     border-radius: 50%;
@@ -8776,18 +8002,18 @@ out center body;`;
     justify-content: center;
   }
   .empty-icon svg {
-    width: 36px;
-    height: 36px;
+    width: 24px;
+    height: 24px;
     color: #8b5cf6;
   }
   .empty-state h4 {
-    font-size: 16px;
+    font-size: 13px;
     font-weight: 600;
     color: #a1a1aa;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
   }
   .empty-state p {
-    font-size: 13px;
+    font-size: 11px;
     color: #71717a;
     line-height: 1.5;
   }
@@ -8796,49 +8022,44 @@ out center body;`;
   .points-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-bottom: 20px;
+    gap: 8px;
+    padding-bottom: 16px;
   }
   .point-card {
     display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 14px 16px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 14px;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
     cursor: pointer;
     position: relative;
-    transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: background 0.15s ease;
   }
   .point-card::before {
     content: '';
     position: absolute;
     top: 0;
     left: 0;
-    width: 3px;
+    width: 2px;
     height: 100%;
-    background: linear-gradient(180deg, #00ff88, #00cc6a);
-    border-radius: 3px 0 0 3px;
+    background: #00ff88;
+    border-radius: 2px 0 0 2px;
     opacity: 0;
-    transition: opacity 0.3s ease, height 0.3s ease;
+    transition: opacity 0.2s ease;
   }
   .point-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(0, 255, 136, 0.15);
-    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 255, 136, 0.05);
-    transform: translateX(2px);
+    background: rgba(255, 255, 255, 0.05);
   }
   .point-card:hover::before {
-    opacity: 0.8;
+    opacity: 0.6;
   }
   .point-card:active {
-    transform: scale(0.98) translateX(2px);
-    transition-duration: 0.1s;
+    background: rgba(255, 255, 255, 0.06);
   }
   .point-card.active {
-    background: rgba(0, 255, 136, 0.06);
-    border-color: rgba(0, 255, 136, 0.2);
+    background: rgba(0, 255, 136, 0.04);
   }
   .point-card.active::before {
     opacity: 1;
@@ -8862,32 +8083,31 @@ out center body;`;
   .point-info h4 {
     font-size: 15px;
     font-weight: 600;
-    color: #f4f4f5;
-    margin-bottom: 5px;
+    color: #e4e4e7;
+    margin-bottom: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .point-info p {
     font-size: 12px;
-    color: #71717a;
-    margin-bottom: 10px;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    color: #52525b;
+    margin-bottom: 0;
+    white-space: nowrap;
     overflow: hidden;
-    line-height: 1.5;
+    text-overflow: ellipsis;
+    line-height: 1.3;
   }
   .point-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .priority-tag {
     display: inline-flex;
     align-items: center;
-    padding: 4px 10px;
+    padding: 3px 10px;
     border-radius: 6px;
     font-size: 11px;
     font-weight: 600;
@@ -8895,24 +8115,24 @@ out center body;`;
   }
   .distance-tag {
     font-size: 11px;
-    color: #a1a1aa;
-    background: rgba(255, 255, 255, 0.05);
-    padding: 4px 10px;
-    border-radius: 6px;
+    color: #71717a;
+    background: none;
+    padding: 0;
+    border-radius: 0;
   }
   .delete-btn {
-    width: 38px;
-    height: 38px;
-    border-radius: 12px;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
     background: transparent;
-    border: 1px solid transparent;
-    color: #52525b;
+    border: none;
+    color: #3f3f46;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     opacity: 0;
-    transition: all 0.25s ease;
+    transition: all 0.15s ease;
     flex-shrink: 0;
   }
   .point-card:hover .delete-btn {
@@ -8920,36 +8140,105 @@ out center body;`;
   }
   .delete-btn:hover {
     background: rgba(239, 68, 68, 0.15);
-    border-color: rgba(239, 68, 68, 0.3);
     color: #ef4444;
-    transform: scale(1.05);
   }
   .delete-btn svg {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
   }
 
   /* Modern Route Summary */
   .route-summary {
-    padding-bottom: 20px;
+    padding-bottom: 12px;
+  }
+  .route-detail-card {
+    margin-bottom: 10px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .rd-header {
+    font-size: 10px;
+    font-weight: 600;
+    color: #a1a1aa;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .rd-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rd-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+  }
+  .rd-row.sub {
+    padding-left: 22px;
+    opacity: 0.6;
+  }
+  .rd-icon {
+    width: 16px;
+    font-size: 11px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .rd-label {
+    flex: 1;
+    font-size: 12px;
+    color: #d4d4d8;
+  }
+  .rd-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: #00ff88;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+  }
+  .rd-value.cost { color: #fbbf24; }
+  .rd-value.total {
+    font-size: 14px;
+    font-weight: 700;
+    color: #f59e0b;
+  }
+  .rd-divider {
+    height: 1px;
+    background: rgba(255,255,255,0.06);
+    margin: 8px 0;
+  }
+  .rd-total {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0 2px;
+    margin-top: 4px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .rd-total .rd-label {
+    font-weight: 600;
+    color: #e4e4e7;
   }
   .summary-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: 10px;
   }
   .summary-header h3 {
-    font-size: 16px;
+    font-size: 13px;
     font-weight: 600;
     color: #f4f4f5;
   }
   .route-badge {
-    padding: 6px 14px;
+    padding: 3px 10px;
     background: rgba(0, 255, 136, 0.1);
     border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 20px;
-    font-size: 12px;
+    border-radius: 14px;
+    font-size: 10px;
     font-weight: 600;
     color: #00ff88;
   }
@@ -8961,14 +8250,14 @@ out center body;`;
   .summary-stats {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    margin-bottom: 20px;
+    gap: 8px;
+    margin-bottom: 12px;
   }
   .stat-card {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 14px;
-    padding: 18px 14px;
+    border-radius: 10px;
+    padding: 10px 8px;
     text-align: center;
     transition: all 0.2s ease;
   }
@@ -8977,32 +8266,32 @@ out center body;`;
     border-color: rgba(255, 255, 255, 0.1);
   }
   .stat-icon {
-    width: 44px;
-    height: 44px;
-    margin: 0 auto 12px;
+    width: 30px;
+    height: 30px;
+    margin: 0 auto 6px;
     background: rgba(0, 255, 136, 0.08);
     border: 1px solid rgba(0, 255, 136, 0.15);
-    border-radius: 12px;
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
+    font-size: 14px;
   }
   .stat-icon svg {
-    width: 22px;
-    height: 22px;
+    width: 16px;
+    height: 16px;
     color: #00ff88;
   }
   .stat-value {
-    font-size: 28px;
+    font-size: 18px;
     font-weight: 700;
     color: #f4f4f5;
     font-family: 'JetBrains Mono', 'SF Mono', monospace;
     line-height: 1;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
   }
   .stat-label {
-    font-size: 11px;
+    font-size: 9px;
     color: #71717a;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -9018,24 +8307,24 @@ out center body;`;
   .stat-card.fuel .stat-value {
     color: #fb923c;
   }
-  .route-timeline h4 { font-size: 12px; font-weight: 600; color: #a1a1aa; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .timeline-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 10px; margin-bottom: 8px; cursor: pointer; transition: all 0.2s; }
+  .route-timeline h4 { font-size: 10px; font-weight: 600; color: #a1a1aa; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .timeline-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; margin-bottom: 6px; cursor: pointer; transition: all 0.2s; }
   .timeline-item:hover { background: rgba(255, 255, 255, 0.04); }
   .timeline-item.start .timeline-marker { background: #3b82f6; }
   .timeline-item.end .timeline-marker { background: #ff6b6b; }
-  .timeline-marker { width: 32px; height: 32px; border-radius: 8px; background: #667eea; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: white; flex-shrink: 0; }
+  .timeline-marker { width: 24px; height: 24px; border-radius: 6px; background: #667eea; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: white; flex-shrink: 0; }
   .timeline-content { flex: 1; }
-  .timeline-label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-  .timeline-name { font-size: 14px; font-weight: 500; color: #e4e4e7; }
+  .timeline-label { font-size: 9px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+  .timeline-name { font-size: 12px; font-weight: 500; color: #e4e4e7; }
 
-  .sidebar-footer { padding: 16px 24px; border-top: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; font-size: 11px; color: #52525b; flex-shrink: 0; }
+  .sidebar-footer { padding: 10px 14px; border-top: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; font-size: 9px; color: #52525b; flex-shrink: 0; }
 
   /* ==================== NEW FEATURES CSS ==================== */
 
   /* Header Actions */
-  .header-actions { display: flex; gap: 8px; }
+  .header-actions { display: flex; gap: 6px; }
   .icon-btn {
-    width: 40px; height: 40px; border-radius: 10px;
+    width: 32px; height: 32px; border-radius: 8px;
     background: rgba(255, 255, 255, 0.05); border: none;
     font-size: 18px; cursor: pointer; position: relative;
     transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
@@ -9186,15 +8475,74 @@ out center body;`;
   .filter-sort-bar { padding: 12px 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
   .sort-dropdown select { width: 100%; padding: 10px 12px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #e4e4e7; font-family: 'Kanit', sans-serif; font-size: 13px; margin-bottom: 10px; }
 
-  /* Multi-select */
-  .multi-select-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 24px; background: rgba(102, 126, 234, 0.1); border-bottom: 1px solid rgba(102, 126, 234, 0.3); }
-  .multi-select-actions { display: flex; gap: 12px; }
-  .text-btn { background: none; border: none; color: #818cf8; font-size: 12px; cursor: pointer; }
-  .text-btn:hover { text-decoration: underline; }
-  .text-btn.danger { color: #ff6b6b; }
-  .checkbox { width: 24px; height: 24px; border-radius: 6px; background: rgba(255, 255, 255, 0.1); border: 2px solid rgba(255, 255, 255, 0.2); display: flex; align-items: center; justify-content: center; font-size: 14px; color: white; flex-shrink: 0; }
-  .checkbox.checked { background: #00ff88; border-color: #00ff88; }
-  .point-card.selected { background: rgba(0, 255, 136, 0.1); border-color: rgba(0, 255, 136, 0.3); }
+  /* Multi-select Toolbar */
+  .multi-select-toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; margin: 0 8px 6px;
+    background: linear-gradient(135deg, rgba(99,102,241,0.12) 0%, rgba(139,92,246,0.08) 100%);
+    border: 1px solid rgba(99,102,241,0.25);
+    border-radius: 12px;
+    animation: mstSlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes mstSlideIn {
+    from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .mst-left { display: flex; align-items: center; gap: 10px; }
+  .mst-count {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: rgba(99,102,241,0.2); border: 1px solid rgba(99,102,241,0.3);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .mst-count.has-selected {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    border-color: transparent;
+    box-shadow: 0 0 14px rgba(99,102,241,0.4);
+    transform: scale(1.05);
+  }
+  .mst-num {
+    font-size: 13px; font-weight: 700; color: #c7d2fe;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .mst-count.has-selected .mst-num { color: #fff; }
+  .mst-label { font-size: 12px; color: #a5b4fc; font-weight: 500; }
+  .mst-actions { display: flex; align-items: center; gap: 4px; }
+  .mst-btn {
+    width: 32px; height: 32px; border-radius: 8px; border: none;
+    background: rgba(255,255,255,0.05);
+    color: #a5b4fc; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s ease;
+  }
+  .mst-btn svg { width: 16px; height: 16px; }
+  .mst-btn:hover { background: rgba(99,102,241,0.2); color: #c7d2fe; transform: scale(1.1); }
+  .mst-btn:active { transform: scale(0.95); }
+  .mst-btn.delete { color: #71717a; }
+  .mst-btn.delete:hover:not(:disabled) { background: rgba(239,68,68,0.15); color: #f87171; }
+  .mst-btn.delete:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+  .mst-btn.close { color: #71717a; }
+  .mst-btn.close:hover { background: rgba(255,255,255,0.08); color: #d4d4d8; }
+  .mst-divider { width: 1px; height: 20px; background: rgba(99,102,241,0.2); margin: 0 4px; }
+
+  /* Multi-select Checkbox */
+  .checkbox {
+    width: 20px; height: 20px; border-radius: 6px;
+    background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.15);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: white; flex-shrink: 0;
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .checkbox.checked {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    border-color: transparent;
+    box-shadow: 0 0 10px rgba(99,102,241,0.3);
+    transform: scale(1.1);
+  }
+  .point-card.selected {
+    background: rgba(99,102,241,0.06);
+    border-color: rgba(99,102,241,0.2);
+  }
   .distance-tag { font-size: 11px; color: #71717a; margin-left: 8px; }
 
   /* Modal Overlay */
@@ -9242,112 +8590,7 @@ out center body;`;
   .add-form-modal .priority-btn.active .priority-num, .add-form-modal .priority-btn.active .priority-label { color: white; }
   .add-form-modal .form-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 24px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
 
-  /* Settings Panel */
-  .settings-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; }
-  .settings-panel { 
-    width: 100%; 
-    max-width: 1000px;  /* เพิ่มความกว้าง */
-    max-height: 100vh; 
-    overflow-y: auto; 
-    padding: 24px; 
-  }
-  .settings-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 24px;
-    
-  }
-
-  .settings-column {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    padding: 20px;
-  }
-
-  /* Responsive - tablet */
-  @media (max-width: 1024px) {
-    .settings-panel {
-      max-width: 95%;
-      padding: 20px;
-    }
-  }
-  /* Responsive - mobile: full screen settings */
-  @media (max-width: 768px) {
-    .settings-overlay { padding: 0; align-items: stretch; }
-    .settings-panel {
-      max-width: 100%;
-      width: 100%;
-      max-height: 100vh;
-      height: 100vh;
-      border-radius: 0;
-      padding: 16px;
-      padding-bottom: 80px;
-      -webkit-overflow-scrolling: touch;
-    }
-    .settings-header { position: sticky; top: 0; z-index: 1; background: rgba(15, 15, 25, 0.98); padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-    .settings-header h3 { font-size: 18px; }
-    .settings-grid {
-      grid-template-columns: 1fr;
-      gap: 16px;
-    }
-    .settings-column { padding: 12px; gap: 16px; }
-    .settings-section h4 { font-size: 12px; }
-    .driver-card { padding: 12px; gap: 12px; }
-    .driver-avatar { width: 42px; height: 42px; font-size: 20px; }
-    .driver-name { font-size: 14px; }
-    .vehicle-type-selector { gap: 8px; }
-    .vehicle-type-btn { padding: 12px; gap: 6px; border-radius: 10px; }
-    .vehicle-icon { font-size: 20px; }
-    .vehicle-label { font-size: 12px; }
-    .vehicle-info-card { font-size: 13px; }
-    .vic-header { padding: 10px 12px; }
-    .vic-slider-group { padding: 8px 12px; }
-    .vic-stats-row { margin: 0 12px 6px; }
-    .vic-stat-val { font-size: 16px; }
-    .vic-range::-webkit-slider-thumb { width: 20px; height: 20px; }
-    .toggle-setting { padding: 10px 0; font-size: 14px; }
-    .toggle-btn { width: 44px; height: 24px; border-radius: 12px; }
-    .toggle-knob { width: 18px; height: 18px; }
-    .toggle-btn.active .toggle-knob { left: 22px; }
-    .info-grid { grid-template-columns: 1fr; gap: 8px; }
-    .info-item { padding: 10px; }
-    .settings-actions { flex-direction: column; gap: 8px; padding-top: 16px; }
-    .settings-actions .btn { width: 100%; justify-content: center; padding: 14px; font-size: 14px; }
-    .oil-select-group select { width: 100%; padding: 10px; font-size: 14px; }
-    .vic-range { height: 8px; }
-    .vic-range::-webkit-slider-thumb { width: 22px; height: 22px; }
-    .ev-buttons { flex-direction: column; }
-    .ev-buttons .btn { width: 100%; justify-content: center; }
-  }
-  /* Responsive - small phone */
-  @media (max-width: 480px) {
-    .settings-panel { padding: 12px; padding-bottom: 60px; }
-    .settings-column { padding: 8px; gap: 12px; }
-    .vehicle-type-selector { flex-direction: row; }
-    .vehicle-type-btn { padding: 10px 8px; }
-    .vehicle-icon { font-size: 18px; }
-    .vehicle-label { font-size: 11px; }
-  }
-  .settings-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-  .settings-header h3 { font-size: 20px; font-weight: 600; }
-  .settings-content { display: flex; flex-direction: column; gap: 24px; }
-  .settings-section h4 { font-size: 13px; color: #71717a; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
-  .driver-card { display: flex; gap: 16px; padding: 16px; background: rgba(0, 0, 0, 0.3); border-radius: 12px; }
-  .driver-avatar { width: 50px; height: 50px; background: linear-gradient(135deg, #667eea, #764ba2); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
-  .driver-name { font-weight: 600; font-size: 16px; }
-  .driver-id { font-size: 12px; color: #71717a; }
-  .driver-vehicle { font-size: 12px; color: #a1a1aa; margin-top: 4px; }
-  .toggle-setting { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; }
-  .toggle-btn { width: 50px; height: 28px; border-radius: 14px; background: rgba(255, 255, 255, 0.1); border: none; cursor: pointer; position: relative; transition: all 0.3s; }
-  .toggle-btn.active { background: #00ff88; }
-  .toggle-knob { width: 22px; height: 22px; border-radius: 50%; background: white; position: absolute; top: 3px; left: 3px; transition: all 0.3s; }
-  .toggle-btn.active .toggle-knob { left: 25px; }
-  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .info-item { padding: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 8px; }
-  .info-label { display: block; font-size: 11px; color: #71717a; margin-bottom: 4px; }
-  .info-value { font-weight: 600; color: #e4e4e7; }
-  .settings-actions { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+  /* SettingsPanel CSS moved to $lib/components/SettingsPanel.svelte */
 
   /* ====== Logout Confirm ====== */
   .logout-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 2999; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); animation: logoutFadeIn 0.3s ease; }
@@ -9411,114 +8654,7 @@ out center body;`;
   .logout-btn-confirm:hover { background: linear-gradient(135deg, rgba(255,60,60,1), rgba(230,50,50,1)); box-shadow: 0 6px 30px rgba(255,50,50,0.35); transform: translateY(-1px); }
   .logout-btn-confirm:active { transform: translateY(0); }
 
-  /* Alerts Backdrop */
-  .alerts-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 1999; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); animation: alertBackdropIn 0.3s ease; }
-  @keyframes alertBackdropIn { from { opacity: 0; } to { opacity: 1; } }
-  /* Alerts Panel - Centered (Glassmorphism) */
-  .alerts-panel {
-    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 440px; max-width: calc(100% - 32px); max-height: 520px; z-index: 2000;
-    overflow: hidden; display: flex; flex-direction: column;
-    background: rgba(12, 12, 20, 0.95); backdrop-filter: blur(30px) saturate(1.4);
-    -webkit-backdrop-filter: blur(30px) saturate(1.4);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 20px;
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03), 0 0 80px rgba(0, 255, 136, 0.05);
-    animation: alertPanelIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  @keyframes alertPanelIn { from { opacity: 0; transform: translate(-50%, -50%) scale(0.9) translateY(20px); } to { opacity: 1; transform: translate(-50%, -50%) scale(1) translateY(0); } }
-
-  .alerts-header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 20px 20px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 100%);
-  }
-  .alerts-title-row { display: flex; align-items: center; gap: 10px; }
-  .alerts-bell {
-    width: 36px; height: 36px; border-radius: 10px;
-    background: rgba(0, 255, 136, 0.12); display: flex; align-items: center; justify-content: center;
-    animation: bellSwing 2s ease-in-out infinite;
-  }
-  .alerts-bell svg { width: 18px; height: 18px; color: #00ff88; }
-  @keyframes bellSwing { 0%,100% { transform: rotate(0); } 15% { transform: rotate(10deg); } 30% { transform: rotate(-8deg); } 45% { transform: rotate(5deg); } 60% { transform: rotate(0); } }
-  .alerts-header h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; }
-  .alerts-count {
-    min-width: 22px; height: 22px; padding: 0 6px;
-    background: linear-gradient(135deg, #00ff88, #00cc6a); color: #0a0a0f;
-    border-radius: 11px; font-size: 11px; font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-    animation: countPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  @keyframes countPop { from { transform: scale(0); } to { transform: scale(1); } }
-  .alerts-actions { display: flex; gap: 8px; align-items: center; }
-  .alerts-clear-btn {
-    display: flex; align-items: center; gap: 4px; padding: 6px 12px;
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px; color: #a1a1aa; font-size: 12px; font-family: 'Kanit';
-    cursor: pointer; transition: all 0.2s;
-  }
-  .alerts-clear-btn:hover { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; border-color: rgba(255, 107, 107, 0.3); }
-  .alerts-clear-btn svg { width: 14px; height: 14px; }
-  .alerts-close-btn {
-    width: 32px; height: 32px; border-radius: 8px;
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
-    color: #71717a; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.2s;
-  }
-  .alerts-close-btn:hover { background: rgba(255,255,255,0.1); color: #e4e4e7; }
-  .alerts-close-btn svg { width: 16px; height: 16px; }
-
-  .alerts-list { flex: 1; overflow-y: auto; padding: 12px; }
-  .alerts-list::-webkit-scrollbar { width: 4px; }
-  .alerts-list::-webkit-scrollbar-track { background: transparent; }
-  .alerts-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
-
-  .empty-alerts {
-    text-align: center; padding: 48px 24px; color: #3f3f46;
-    display: flex; flex-direction: column; align-items: center; gap: 12px;
-  }
-  .empty-alerts svg { width: 48px; height: 48px; opacity: 0.3; }
-  .empty-alerts span { font-size: 14px; }
-
-  .alert-item {
-    display: flex; gap: 12px; padding: 14px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    border-radius: 14px; margin-bottom: 8px; align-items: flex-start;
-    transition: all 0.2s; cursor: default;
-    animation: alertItemIn 0.35s calc(var(--delay, 0s)) cubic-bezier(0.34, 1.56, 0.64, 1) both;
-  }
-  @keyframes alertItemIn { from { opacity: 0; transform: translateX(-12px) scale(0.95); } to { opacity: 1; transform: translateX(0) scale(1); } }
-  .alert-item:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.08); }
-  .alert-item.alert-emergency {
-    background: rgba(255, 107, 107, 0.08); border: 1px solid rgba(255, 107, 107, 0.2);
-    animation: alertItemIn 0.35s calc(var(--delay, 0s)) cubic-bezier(0.34, 1.56, 0.64, 1) both, emergencyPulse 2s ease-in-out infinite;
-  }
-  @keyframes emergencyPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0); } 50% { box-shadow: 0 0 16px rgba(255, 107, 107, 0.15); } }
-
-  .alert-icon-wrap {
-    width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    background: rgba(255,255,255,0.05);
-  }
-  .alert-icon-wrap svg { width: 18px; height: 18px; }
-  .alert-icon-wrap.icon-delivery { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
-  .alert-icon-wrap.icon-navigation { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
-  .alert-icon-wrap.icon-break { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-  .alert-icon-wrap.icon-emergency { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }
-
-  .alert-content { flex: 1; min-width: 0; }
-  .alert-message { font-size: 13px; color: #d4d4d8; line-height: 1.4; }
-  .alert-time { font-size: 11px; color: #52525b; margin-top: 4px; }
-  .alert-dismiss {
-    width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px;
-    background: none; border: 1px solid transparent;
-    color: #52525b; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.2s;
-  }
-  .alert-dismiss:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); color: #a1a1aa; }
-  .alert-dismiss svg { width: 14px; height: 14px; }
+  /* AlertsPanel CSS moved to $lib/components/AlertsPanel.svelte */
 
   /* Navigation Status Bar */
   .nav-status-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: center; gap: 20px; padding: 8px 16px; background: rgba(0, 0, 0, 0.6); pointer-events: none; }
@@ -9526,7 +8662,7 @@ out center body;`;
   .status-icon { font-size: 14px; }
 
   /* Left cluster: speed + stats grouped together */
-  .nav-right-cluster { position: absolute; right: 20px; bottom: 200px; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; z-index: 1050; }
+  .nav-right-cluster { position: absolute; right: 20px; bottom: 260px; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; z-index: 1050; }
 
   /* Speed Display */
   .speed-display { width: 100px; height: 100px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; position: relative; }
@@ -9576,16 +8712,41 @@ out center body;`;
   .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
   .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
   .map-container.fullscreen { width: 100vw; }
-  .map-container.fullscreen { width: 100vw; }
+  .map-container.settings-open > *:not(#map) { display: none !important; }
+  .map-container.addform-open > *:not(#map) { display: none !important; }
   
+  /* Add Point Toggle - Top Left below stats */
+  .add-point-toggle {
+    position: absolute; top: 70px; left: 16px; z-index: 1001;
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 14px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #a1a1aa; font-size: 12px; font-weight: 500;
+    font-family: 'Kanit', sans-serif;
+    cursor: pointer; transition: all 0.2s;
+    animation: fadeInFloat 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
+  }
+  .add-point-toggle svg { width: 16px; height: 16px; }
+  .add-point-toggle:hover { background: rgba(0,255,136,0.08); border-color: rgba(0,255,136,0.2); color: #00ff88; }
+  .add-point-toggle.active {
+    background: rgba(0,255,136,0.15); border-color: rgba(0,255,136,0.4);
+    color: #00ff88; box-shadow: 0 0 12px rgba(0,255,136,0.15);
+  }
+  .add-point-toggle.active svg { animation: pulse-icon 1.5s ease infinite; }
+  @keyframes pulse-icon { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
   /* Map Stats - Top Left */
-  .map-stats { position: absolute; top: 16px; left: 16px; z-index: 1001; display: flex; gap: 10px; padding: 10px 14px; border-radius: 12px; animation: fadeInFloat 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both; }
+  /* Floating Route Summary (mobile only) */
+  .map-route-summary { display: none; }
+
+  .map-stats { position: absolute; top: 118px; left: 16px; z-index: 1001; display: flex; gap: 10px; padding: 10px 14px; border-radius: 12px; animation: fadeInFloat 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both; }
   .map-stat { text-align: center; padding: 4px 8px; }
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
   #map { width: 100%; height: 100%; will-change: transform; }
-  :global(.leaflet-tile-pane) { filter: grayscale(1) invert(1) brightness(0.55); }
+  :global(.leaflet-tile-pane) { filter: grayscale(1) invert(1) brightness(0.55); image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
+  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
@@ -9638,30 +8799,21 @@ out center body;`;
   .nav-btn-stop:hover { background: rgba(255, 107, 107, 0.3); }
 
   .toast {
-    position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 12px;
-    padding: 14px 20px 14px 16px; border-radius: 16px;
-    font-size: 14px; font-weight: 500; z-index: 9999;
-    animation: toastSlideIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
-    /* perf: removed backdrop-filter */
+    position: fixed; bottom: 140px; right: 16px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px 10px 12px; border-radius: 12px;
+    font-size: 12px; font-weight: 500; z-index: 9999;
+    animation: toastSlideIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
     white-space: nowrap; overflow: hidden;
-    max-width: calc(100vw - 32px);
+    max-width: 320px;
   }
   @keyframes toastSlideIn {
-    0% { opacity: 0; transform: translateX(-50%) translateY(-40px) scale(0.85); }
-    60% { transform: translateX(-50%) translateY(4px) scale(1.02); }
-    100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+    0% { opacity: 0; transform: translateX(40px) scale(0.9); }
+    60% { transform: translateX(-4px) scale(1.02); }
+    100% { opacity: 1; transform: translateX(0) scale(1); }
   }
 
-  .toast-glow {
-    position: absolute; inset: -1px; border-radius: 17px; opacity: 0.6;
-    animation: toastGlow 2s ease-in-out infinite alternate;
-    pointer-events: none;
-  }
-  @keyframes toastGlow { from { opacity: 0.3; } to { opacity: 0.7; } }
-  .toast-success .toast-glow { box-shadow: 0 0 20px rgba(0, 255, 136, 0.3), inset 0 0 20px rgba(0, 255, 136, 0.05); }
-  .toast-error .toast-glow { box-shadow: 0 0 20px rgba(255, 107, 107, 0.3), inset 0 0 20px rgba(255, 107, 107, 0.05); }
-  .toast-warning .toast-glow { box-shadow: 0 0 20px rgba(245, 158, 11, 0.3), inset 0 0 20px rgba(245, 158, 11, 0.05); }
+  .toast-glow { display: none; }
 
   .toast-success {
     background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3); color: #00ff88;
@@ -9677,10 +8829,10 @@ out center body;`;
   }
 
   .toast-icon-wrap {
-    width: 32px; height: 32px; flex-shrink: 0;
-    border-radius: 10px; display: flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; flex-shrink: 0;
+    border-radius: 8px; display: flex; align-items: center; justify-content: center;
   }
-  .toast-icon-wrap svg { width: 18px; height: 18px; }
+  .toast-icon-wrap svg { width: 14px; height: 14px; }
   .toast-success .toast-icon-wrap { background: rgba(0, 255, 136, 0.2); }
   .toast-error .toast-icon-wrap { background: rgba(255, 107, 107, 0.2); }
   .toast-warning .toast-icon-wrap { background: rgba(245, 158, 11, 0.2); }
@@ -9688,13 +8840,13 @@ out center body;`;
   .toast-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .toast-close {
-    width: 24px; height: 24px; flex-shrink: 0;
+    width: 20px; height: 20px; flex-shrink: 0;
     background: none; border: none; cursor: pointer; color: inherit; opacity: 0.5;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 6px; transition: all 0.2s;
+    border-radius: 5px; transition: all 0.2s;
   }
   .toast-close:hover { opacity: 1; background: rgba(255,255,255,0.1); }
-  .toast-close svg { width: 14px; height: 14px; }
+  .toast-close svg { width: 12px; height: 12px; }
 
   .toast-progress {
     position: absolute; bottom: 0; left: 0; height: 2px; border-radius: 0 0 16px 16px;
@@ -9704,7 +8856,7 @@ out center body;`;
   .toast-error .toast-progress { background: linear-gradient(90deg, #ff6b6b, #ff4757); }
   .toast-warning .toast-progress { background: linear-gradient(90deg, #f59e0b, #f97316); }
   @keyframes toastProgress { from { width: 100%; } to { width: 0%; } }
-  .undo-btn { background: rgba(255, 255, 255, 0.15); color: inherit; border: 1px solid rgba(255, 255, 255, 0.25); padding: 4px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: 'Kanit', sans-serif; transition: background 0.2s; margin-left: 4px; }
+  .undo-btn { background: rgba(255, 255, 255, 0.15); color: inherit; border: 1px solid rgba(255, 255, 255, 0.25); padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: 'Kanit', sans-serif; transition: background 0.2s; margin-left: 4px; }
   .undo-btn:hover { background: rgba(255, 255, 255, 0.25); }
 
   :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #0a0a0f; }
@@ -9715,12 +8867,21 @@ out center body;`;
   :global(.leaflet-control-zoom-in) { border-radius: 10px 10px 0 0 !important; }
   :global(.leaflet-control-zoom-out) { border-radius: 0 0 10px 10px !important; }
 
-  :global(.marker-pin) { width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: white; font-family: 'Kanit', sans-serif; border: 3px solid rgba(255, 255, 255, 0.3); position: relative; transition: border-color 0.2s, transform 0.2s; }
+  :global(.marker-pin) {
+    width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 800; color: white; font-family: 'Kanit', sans-serif;
+    border: 2.5px solid rgba(255, 255, 255, 0.5); position: relative;
+    transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+    transform: scale(var(--marker-scale, 1));
+    transform-origin: center bottom;
+  }
+  :global(.marker-pin:hover) { filter: brightness(1.15); }
   :global(.marker-pin.draggable) { border-color: #fb923c; cursor: grab; animation: drag-pulse 1.5s ease-in-out infinite; }
-  :global(.marker-pin.draggable:active) { cursor: grabbing; transform: scale(1.15); }
-  :global(.drag-hint) { position: absolute; top: -8px; right: -8px; width: 18px; height: 18px; background: #fb923c; border-radius: 50%; font-size: 10px; display: flex; align-items: center; justify-content: center; color: white; border: 2px solid rgba(0,0,0,0.3); }
+  :global(.marker-pin.draggable:active) { cursor: grabbing; }
+  :global(.drag-hint) { position: absolute; top: -8px; right: -8px; width: 16px; height: 16px; background: #fb923c; border-radius: 50%; font-size: 9px; display: flex; align-items: center; justify-content: center; color: white; border: 2px solid rgba(0,0,0,0.3); }
   @keyframes drag-pulse { 0%, 100% { border-color: #fb923c; } 50% { border-color: #fdba74; } }
-  :global(.route-pin) { width: 52px; height: 52px; font-size: 18px; }
+  :global(.route-pin) { width: 40px; height: 40px; font-size: 15px; border-width: 3px; }
   :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
   @keyframes pulse-label { 0%, 100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.1); } }
@@ -9829,7 +8990,7 @@ out center body;`;
   /* Tablet */
   @media (max-width: 1024px) {
     .app-container { flex-direction: column; }
-    .sidebar { width: 100%; height: auto; max-height: 55vh; min-height: 200px; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.1); overflow-y: auto; }
+    .sidebar { width: 100%; height: auto; max-height: 60vh; min-height: 200px; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.1); overflow-y: auto; }
     .map-container { flex: 1; height: 60vh; min-height: 300px; position: relative; overflow: hidden; }
     #map { position: absolute; inset: 0; width: 100%; height: 100%; }
     .sidebar-content { padding: 12px; }
@@ -9842,7 +9003,7 @@ out center body;`;
     .map-stats { flex-wrap: wrap; gap: 8px; padding: 10px; }
     .nav-top-bar { top: 110px; right: 15px; padding: 14px 20px; min-width: auto; }
     .nav-target-name { font-size: 16px; max-width: 240px; }
-    .nav-right-cluster { right: 15px; bottom: 190px; }
+    .nav-right-cluster { right: 15px; bottom: 250px; }
     .speed-display { width: 85px; height: 85px; }
     .speed-value { font-size: 30px; }
     .lock-btn { width: 40px; height: 40px; }
@@ -9859,7 +9020,7 @@ out center body;`;
     .sidebar {
       width: 100%;
       height: auto;
-      max-height: 55vh;
+      max-height: 50vh;
       border-right: none;
       border-bottom: 1px solid rgba(255,255,255,0.08);
       overflow: hidden;
@@ -9869,13 +9030,12 @@ out center body;`;
       will-change: max-height;
     }
     .sidebar.collapsed {
-      max-height: 38px !important;
+      max-height: 46px !important;
       overflow: hidden !important;
       min-height: 0 !important;
     }
     .sidebar.collapsed > *:not(.sidebar-toggle) {
-      opacity: 0;
-      pointer-events: none;
+      display: none !important;
     }
     /* Keyboard M ซ่อน sidebar สมบูรณ์บนมือถือ */
     .sidebar.desktop-collapsed {
@@ -9886,23 +9046,56 @@ out center body;`;
       border-bottom: none !important;
       overflow: hidden !important;
     }
-    .desktop-sidebar-toggle { display: none !important; } /* ซ่อนปุ่ม desktop toggle บน mobile */
+    .desktop-sidebar-toggle { display: none !important; }
     .sidebar-toggle {
-      display: flex; align-items: center; justify-content: center; gap: 6px;
-      width: 100%; padding: 10px 16px; border: none; background: rgba(15, 15, 25, 0.98);
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      width: 100%; padding: 0 12px; border: none; background: rgba(15, 15, 25, 0.98);
       color: #a1a1aa; font-size: 12px; font-family: 'Kanit', sans-serif; cursor: pointer;
       border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
-      transition: background 0.2s ease, color 0.2s ease;
+      transition: background 0.2s ease, color 0.2s ease; height: 44px;
     }
     .sidebar-toggle:active { background: rgba(0, 255, 136, 0.1); }
     .sidebar-toggle svg {
-      width: 16px; height: 16px;
+      width: 14px; height: 14px; flex-shrink: 0;
       transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
     }
     .sidebar-toggle svg.flipped { transform: rotate(180deg); }
-    .sidebar-toggle span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .sidebar-header { padding: 10px 14px; flex-shrink: 0; }
-    .sidebar-scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; }
+    .sidebar-toggle span { white-space: nowrap; }
+    .sidebar-toggle .toggle-text { font-weight: 500; color: #d4d4d8; }
+
+    /* Collapsed summary bar */
+    .collapsed-summary {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; width: 100%;
+    }
+    .cs-stat { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    .cs-val {
+      font-size: 14px; font-weight: 700; color: #e4e4e7;
+      font-family: 'JetBrains Mono', monospace; line-height: 1.1;
+    }
+    .cs-val.cs-cost { color: #00ff88; }
+    .cs-unit { font-size: 7px; color: #71717a; text-transform: uppercase; letter-spacing: 0.3px; }
+    .cs-divider { width: 1px; height: 22px; background: rgba(255,255,255,0.1); flex-shrink: 0; }
+    .cs-arrow { width: 12px; height: 12px; color: #71717a; margin-left: 4px; flex-shrink: 0; }
+    .sidebar-header { padding: 6px 10px; flex-shrink: 0; }
+    .sidebar-header .logo-text h1 { font-size: 14px; }
+    .sidebar-header .logo-text span { font-size: 8px; }
+    .sidebar-header .logo-icon { width: 28px; height: 28px; }
+    .sidebar-header .logo-icon svg { width: 16px; height: 16px; }
+    .sidebar-header .icon-btn { width: 30px; height: 30px; font-size: 12px; }
+    .sidebar-scroll {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+      min-height: 0; display: flex; flex-direction: column;
+    }
+    /* Tabs */
+    .tabs { margin: 0; padding: 4px 8px; gap: 4px; flex-shrink: 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .tab { padding: 7px 12px; font-size: 11px; }
+    .tab svg { width: 13px; height: 13px; }
+    /* Content area */
+    .content-area { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 10px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-height: 0; }
+    /* Add form modal overlay */
+    .add-form { max-width: 400px; padding: 16px; border-radius: 14px; }
 
     .map-container { flex: 1; width: 100%; position: relative; overflow: hidden; min-height: 0; }
     #map { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
@@ -9915,120 +9108,248 @@ out center body;`;
     .logo { gap: 10px; }
     .icon-btn { width: 34px; height: 34px; font-size: 14px; }
 
-    /* Action buttons: horizontal scroll */
-    .action-buttons { flex-direction: row; flex-wrap: wrap; gap: 6px; padding: 8px 14px; }
-    .action-buttons .btn { flex: 1 1 calc(50% - 3px); min-width: 0; justify-content: center; padding: 10px 8px; font-size: 12px; }
+    /* Action buttons: 2-column grid */
+    .action-buttons {
+      display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+    }
+    .action-buttons .btn {
+      flex: 1 1 calc(50% - 3px); min-width: 0; justify-content: center;
+      padding: 10px 8px; font-size: 12px; gap: 5px; border-radius: 10px;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    }
+    .action-buttons .btn:active { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.25); }
     .action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
     .action-buttons .btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .action-buttons .btn.btn-primary { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.2); color: #00ff88; }
+    .action-buttons .btn.btn-navigate { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.2); color: #60a5fa; }
+    .action-buttons .btn.btn-secondary { background: rgba(168,85,247,0.1); border-color: rgba(168,85,247,0.2); color: #c084fc; }
 
     /* Tabs compact */
     .tabs { gap: 4px; margin: 0 10px 12px; padding: 4px; }
     .tab { padding: 10px 14px; font-size: 12px; white-space: nowrap; flex-shrink: 0; border-radius: 10px; }
     .tab svg { width: 16px; height: 16px; }
 
-    /* Cards compact */
-    .point-card { padding: 12px 14px; margin-bottom: 8px; border-radius: 14px; }
-    .point-number { width: 38px; height: 38px; font-size: 15px; border-radius: 12px; }
-    .stat-card { padding: 16px 12px; border-radius: 14px; }
-    .stat-icon { width: 42px; height: 42px; margin-bottom: 10px; }
-    .stat-value { font-size: 26px; }
-    .point-name { font-size: 13px; }
-    .point-address { font-size: 11px; }
-    /* Route Summary - full width, 4 columns on mobile */
-    .route-summary { padding: 0 4px 12px; }
-    .summary-header { margin-bottom: 10px; flex-wrap: wrap; gap: 6px; }
-    .summary-header h3 { font-size: 15px; }
-    .route-badge { font-size: 10px; padding: 4px 10px; }
-    .summary-stats { grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
-    .stat-card { padding: 10px 6px; border-radius: 10px; background: rgba(0, 255, 136, 0.04); border: 1px solid rgba(0, 255, 136, 0.12); }
-    .stat-icon { width: 28px; height: 28px; margin-bottom: 4px; border-radius: 8px; }
-    .stat-icon svg { width: 16px; height: 16px; }
-    .stat-value { font-size: 20px; font-weight: 800; color: #00ff88; }
-    .stat-label { font-size: 9px; color: #a1a1aa; }
+    /* Cards compact - wide but thin */
+    .point-card { padding: 6px 8px; margin-bottom: 2px; border-radius: 6px; gap: 6px; width: 100%; }
+    .point-card::before { width: 2px; }
+    .point-card:hover { transform: none; }
+    .point-card:active { transform: none; }
+    .point-number { width: 22px; height: 22px; font-size: 10px; border-radius: 6px; flex-shrink: 0; }
+    .point-info p { display: none; }
+    .point-info h4 { font-size: 11px; margin-bottom: 0; }
+    .stat-card { padding: 14px 10px; border-radius: 12px; }
+    .stat-icon { width: 36px; height: 36px; margin-bottom: 8px; }
+    .stat-value { font-size: 22px; }
+    .point-meta { gap: 4px; }
+    .point-meta .priority-tag { font-size: 9px; padding: 2px 6px; }
+    .point-meta .distance-tag { font-size: 9px; }
+    .point-actions { gap: 3px; }
+    .point-actions .action-btn { width: 22px; height: 22px; border-radius: 5px; }
+    .point-actions .action-btn svg { width: 10px; height: 10px; }
+    .delete-btn { width: 20px; height: 20px; top: 3px; right: 3px; }
+    .delete-btn svg { width: 10px; height: 10px; }
+    /* Route Summary - hidden on mobile (floating panel replaces it) */
+    .route-summary { display: none !important; }
+    .summary-header { margin-bottom: 6px; flex-wrap: wrap; gap: 4px; }
+    .summary-header h3 { font-size: 13px; }
+    .route-badge { font-size: 9px; padding: 3px 8px; }
+    .summary-stats { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; }
+    .stat-card { padding: 6px 4px; border-radius: 8px; background: rgba(0,255,136,0.04); border: 1px solid rgba(0,255,136,0.1); }
+    .stat-icon { width: 22px; height: 22px; margin-bottom: 2px; border-radius: 6px; }
+    .stat-icon svg { width: 12px; height: 12px; }
+    .stat-value { font-size: 16px; font-weight: 800; color: #00ff88; }
+    .stat-label { font-size: 8px; color: #a1a1aa; }
     .stat-card.fuel .stat-value, .stat-card.ev .stat-value { color: #f59e0b; }
+    /* Fuel/EV info compact */
+    .fuel-route-info, .ev-route-info { padding: 8px; border-radius: 8px; margin-bottom: 8px; }
+    .fuel-info-row, .ev-info-row { padding: 4px 0; font-size: 11px; }
+    .fuel-info-row span, .ev-info-row span { font-size: 11px; }
+    .fuel-info-row strong, .ev-info-row strong { font-size: 11px; }
+    .cheapest-tip { font-size: 10px; padding: 6px; margin-top: 4px; }
+    .ev-warning-banner { font-size: 10px; padding: 6px; }
+    /* Trip cost compact */
+    .trip-cost-card { padding: 8px; margin-top: 6px; border-radius: 8px; }
+    .trip-cost-card h4 { font-size: 12px; margin-bottom: 6px; }
+    .cost-label { font-size: 11px; }
+    .cost-value { font-size: 12px; }
+    .cost-row.sub span { font-size: 9px; }
+    .cost-row.total .cost-label { font-size: 12px; }
+    .cost-row.total .cost-value { font-size: 14px; }
     /* Timeline compact */
-    .timeline-item { padding: 10px; gap: 10px; }
-    .timeline-marker { width: 30px; height: 30px; font-size: 12px; border-radius: 8px; }
-    .timeline-name { font-size: 13px; }
-    .timeline-label { font-size: 10px; }
+    .timeline-item { padding: 6px 8px; gap: 8px; margin-bottom: 4px; }
+    .timeline-marker { width: 26px; height: 26px; font-size: 11px; border-radius: 6px; }
+    .timeline-name { font-size: 12px; }
+    .timeline-label { font-size: 9px; margin-bottom: 1px; }
+    .route-timeline h4 { font-size: 10px; margin-bottom: 6px; }
 
     /* Add Form Mobile */
-    .add-form-overlay { display: contents; }
-    .add-form { margin: 0 10px 10px; padding: 12px; }
-    .add-form .form-header { margin-bottom: 8px; }
-    .add-form .form-header h3 { font-size: 14px; }
-    .add-form .close-btn { width: 28px; height: 28px; }
-    .add-form .form-hint { font-size: 10px; padding: 6px 8px; margin-bottom: 8px; }
-    .add-form .form-group { margin-bottom: 8px; }
-    .add-form .form-group label { font-size: 11px; margin-bottom: 3px; }
-    .add-form .form-group input, .add-form .form-group textarea { padding: 8px 10px; font-size: 13px; }
-    .add-form .form-group textarea { min-height: 36px; }
-    .add-form .coords-group { grid-template-columns: 1fr 1fr; gap: 6px; }
+    .add-form-overlay { z-index: 2100; padding: 12px; }
+    .add-form { max-width: 400px; max-height: 80vh; padding: 16px !important; border-radius: 14px !important; }
+    .add-form .form-header { margin-bottom: 10px; }
+    .add-form .form-header h3 { font-size: 16px; }
+    .add-form .close-btn { width: 32px; height: 32px; }
+    .add-form .form-hint { font-size: 11px; padding: 8px 10px; margin-bottom: 10px; }
+    .add-form .form-group { margin-bottom: 10px; }
+    .add-form .form-group label { font-size: 12px; margin-bottom: 4px; }
+    .add-form .form-group input, .add-form .form-group textarea { padding: 10px 12px; font-size: 14px; }
+    .add-form .form-group textarea { min-height: 50px; }
+    .add-form .coords-group { grid-template-columns: 1fr 1fr; gap: 8px; }
     .add-form .priority-selector { gap: 4px; justify-content: center; }
-    .add-form .priority-btn { min-width: 46px; max-width: 58px; padding: 6px 2px; }
-    .add-form .priority-num { font-size: 13px; }
-    .add-form .priority-label { font-size: 7px; }
-    .add-form .form-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
-    .add-form .form-actions .btn { flex: 1; padding: 10px; font-size: 12px; }
+    .add-form .priority-btn { min-width: 50px; max-width: 60px; padding: 8px 4px; }
+    .add-form .priority-num { font-size: 14px; }
+    .add-form .priority-label { font-size: 8px; }
+    .add-form .form-actions { flex-direction: row; gap: 8px; margin-top: 12px; }
+    .add-form .form-actions .btn { flex: 1; padding: 12px; font-size: 14px; }
+
+    /* Marker pins on mobile */
+    :global(.marker-pin) { width: 34px; height: 34px; font-size: 13px; border-width: 2px; }
+    :global(.route-pin) { width: 38px; height: 38px; font-size: 14px; }
+    :global(.marker-label) { font-size: 9px; bottom: -20px; padding: 2px 7px; }
+    :global(.start-loc-marker) { width: 34px; height: 34px; }
+    :global(.start-loc-core) { width: 18px; height: 18px; border-width: 2px; }
 
     /* Map overlays */
-    .map-stats { position: absolute; top: auto; bottom: 12px; left: 8px; right: auto; width: auto; max-width: calc(100% - 16px); flex-wrap: wrap; gap: 4px; padding: 6px 8px; z-index: 1000; }
-    .map-stat { padding: 2px 4px; }
-    .map-stat-value { font-size: 13px; }
-    .map-stat-label { font-size: 8px; }
+    .add-point-toggle { top: 80px; left: 8px; padding: 6px 10px; font-size: 11px; border-radius: 8px; }
+    .add-point-toggle svg { width: 14px; height: 14px; }
+    .map-stats { position: absolute; top: 118px; bottom: auto; left: 8px; right: auto; width: auto; flex-wrap: nowrap; gap: 0; padding: 2px 4px; z-index: 1000; border-radius: 6px; }
+    .map-stat { padding: 1px 4px; }
+    .map-stat-value { font-size: 10px; font-weight: 600; }
+    .map-stat-label { font-size: 6px; letter-spacing: 0; }
+    .map-stat.weather .map-stat-value { font-size: 10px; }
     .map-info { display: none; }
+
+    /* Floating Route Summary - mobile */
+    .map-route-summary {
+      display: flex;
+      position: absolute;
+      bottom: 70px;
+      left: 10px;
+      right: 52px;
+      z-index: 1002;
+      padding: 4px 22px;
+      border-radius: 9999px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      animation: mrsSlideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @keyframes mrsSlideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .mrs-stats {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      flex: 1;
+      min-width: 0;
+    }
+    .mrs-stat {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+      min-width: 0;
+    }
+    .mrs-value {
+      font-size: 11px;
+      font-weight: 700;
+      color: #00ff88;
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1;
+      letter-spacing: -0.3px;
+    }
+    .mrs-value.cost { color: #fbbf24; }
+    .mrs-unit {
+      font-size: 7px;
+      color: #71717a;
+      margin-top: 1px;
+      letter-spacing: 0.2px;
+    }
+    .mrs-divider {
+      width: 1px;
+      height: 16px;
+      background: rgba(255,255,255,0.06);
+      flex-shrink: 0;
+    }
+    .mrs-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .mrs-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 9999px;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .mrs-btn svg { width: 13px; height: 13px; }
+    .mrs-btn.start {
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+      color: white;
+    }
+    .mrs-btn.start:hover { transform: scale(1.08); }
+    .mrs-btn.clear {
+      background: rgba(255,255,255,0.06);
+      color: #71717a;
+    }
+    .mrs-btn.clear:hover { background: rgba(239,68,68,0.15); color: #f87171; }
 
     /* ===== Navigation Mode Mobile ===== */
     .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
 
     /* Turn instruction - top right, compact */
-    .turn-by-turn-panel { right: 8px; left: auto; min-width: auto; max-width: calc(100% - 16px); top: 10px; padding: 10px 14px; }
-    .turn-icon-wrap { width: 36px; height: 36px; }
-    .turn-icon { font-size: 20px; }
-    .turn-text { font-size: 13px; }
-    .turn-distance { font-size: 11px; }
+    .turn-by-turn-panel { right: 6px; left: auto; min-width: auto; max-width: calc(100% - 12px); top: 6px; padding: 6px 10px; border-radius: 10px; }
+    .turn-icon-wrap { width: 28px; height: 28px; }
+    .turn-icon { font-size: 16px; }
+    .turn-text { font-size: 11px; }
+    .turn-distance { font-size: 9px; }
 
     /* Target bar - below turn */
-    .nav-top-bar { position: absolute; top: 85px; right: 8px; left: auto; width: auto; max-width: calc(100% - 16px); padding: 10px 14px; min-width: auto; gap: 12px; }
-    .nav-target-label { font-size: 9px; }
-    .nav-target-name { font-size: 14px; max-width: 200px; }
-    .nav-eta { font-size: 12px; }
-    .nav-distance-value { font-size: 16px; }
-    .nav-distance-badge { padding: 8px 12px; }
+    .nav-top-bar { position: absolute; top: 60px; right: 6px; left: auto; width: auto; max-width: calc(100% - 12px); padding: 6px 10px; min-width: auto; gap: 8px; border-radius: 10px; }
+    .nav-target-label { font-size: 8px; }
+    .nav-target-name { font-size: 12px; max-width: 160px; }
+    .nav-eta { font-size: 10px; }
+    .nav-distance-value { font-size: 13px; }
+    .nav-distance-badge { padding: 5px 8px; border-radius: 8px; }
 
     /* Speed + Lock - right side */
-    .nav-right-cluster { right: 8px; bottom: 200px; gap: 6px; }
-    .speed-display { width: 64px; height: 64px; }
-    .speed-value { font-size: 22px; }
-    .speed-unit { font-size: 9px; }
-    .compass-widget { width: 52px; height: 52px; }
-    .compass-ring { width: 42px; height: 42px; }
-    .compass-n, .compass-e, .compass-s, .compass-w { font-size: 8px; }
-    .compass-needle { width: 28px; height: 28px; }
-    .compass-heading-text { font-size: 8px; bottom: -14px; }
-    .lock-btn { width: 36px; height: 36px; }
-    .lock-btn svg { width: 16px; height: 16px; }
+    .nav-right-cluster { right: 6px; bottom: 220px; gap: 4px; }
+    .speed-display { width: 50px; height: 50px; }
+    .speed-value { font-size: 18px; }
+    .speed-unit { font-size: 8px; }
+    .compass-widget { width: 40px; height: 40px; }
+    .compass-ring { width: 32px; height: 32px; }
+    .compass-n, .compass-e, .compass-s, .compass-w { font-size: 6px; }
+    .compass-needle { width: 22px; height: 22px; }
+    .compass-heading-text { font-size: 7px; bottom: -12px; }
+    .lock-btn { width: 30px; height: 30px; }
+    .lock-btn svg { width: 14px; height: 14px; }
 
     /* Bottom panel - full width, compact */
-    .nav-bottom-panel { position: absolute; padding: 10px; left: 8px; right: 8px; width: auto; transform: none; max-width: none; bottom: 8px; }
-    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px; }
-    .nav-stat { padding: 6px 4px; gap: 0; flex-direction: column; align-items: center; text-align: center; }
+    .nav-bottom-panel { position: absolute; padding: 6px; left: 6px; right: 6px; width: auto; transform: none; max-width: none; bottom: 6px; border-radius: 10px; }
+    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 6px; }
+    .nav-stat { padding: 4px 2px; gap: 0; flex-direction: column; align-items: center; text-align: center; border-radius: 6px; }
     .nav-stat-icon { display: none; }
-    .nav-stat-value { font-size: 14px; }
-    .nav-stat-label { font-size: 9px; }
-    .nav-actions { flex-wrap: nowrap; gap: 6px; }
-    .nav-btn { padding: 10px 6px; font-size: 11px; flex: 1 1 auto; min-width: 0; white-space: nowrap; }
-    .nav-btn svg { width: 16px; height: 16px; }
+    .nav-stat-value { font-size: 12px; }
+    .nav-stat-label { font-size: 7px; }
+    .nav-actions { flex-wrap: nowrap; gap: 4px; }
+    .nav-btn { padding: 7px 4px; font-size: 10px; flex: 1 1 auto; min-width: 0; white-space: nowrap; border-radius: 8px; }
+    .nav-btn svg { width: 14px; height: 14px; }
     .nav-btn-success, .nav-btn-skip { flex: 1 1 30%; }
-    .nav-btn-voice, .nav-btn-share, .nav-btn-stop { flex: 0 0 auto; width: 40px; }
-    .nav-btn-share svg { width: 14px; height: 14px; }
+    .nav-btn-voice, .nav-btn-share, .nav-btn-stop { flex: 0 0 auto; width: 34px; }
+    .nav-btn-share svg { width: 12px; height: 12px; }
 
     /* History Panel */
 
     /* Modals */
     .alerts-panel { position: fixed; width: calc(100% - 24px); left: 50%; top: 50%; transform: translate(-50%, -50%); max-height: 70vh; z-index: 2000; }
-    .settings-panel { width: calc(100% - 32px); max-width: none; }
-    .settings-grid { grid-template-columns: 1fr; }
 
     /* Popups */
     :global(.custom-popup) { min-width: 170px; max-width: 250px; }
@@ -10047,76 +9368,104 @@ out center body;`;
   /* Small Mobile */
   @media (max-width: 480px) {
     .app-container { height: 100vh; height: 100dvh; }
-    .sidebar { max-height: 40vh; min-height: 90px; }
+    .sidebar { max-height: 48vh; min-height: 80px; }
+    .sidebar.collapsed { max-height: 46px !important; }
+    .cs-val { font-size: 13px; }
+    .cs-unit { font-size: 6px; }
+    .collapsed-summary { gap: 6px; }
+    .cs-divider { height: 18px; }
     .map-container { flex: 1; min-height: 0; }
-    .sidebar-header { padding: 10px 12px; }
-    .logo-text h1 { font-size: 16px; }
-    .header-actions { gap: 4px; }
-    .icon-btn { width: 32px; height: 32px; font-size: 14px; }
-    .tabs { padding: 0 8px; }
-    .tab { padding: 8px 10px; font-size: 11px; gap: 4px; }
-    .tab svg { width: 14px; height: 14px; }
-    .point-card { margin-bottom: 8px; }
-    
-    /* Add Form Small Mobile */
-    .add-form-overlay { padding: 12px; }
-    .add-form { padding: 16px; max-height: 80vh; }
-    .add-form .form-header h3 { font-size: 16px; }
-    .add-form .form-hint { font-size: 11px; padding: 8px; }
-    .add-form .form-group { margin-bottom: 12px; }
-    .add-form .form-group label { font-size: 11px; }
-    .add-form .form-group input, .add-form .form-group textarea { padding: 10px; font-size: 13px; }
-    .add-form .coords-group { gap: 8px; }
-    .add-form .priority-selector { gap: 4px; }
-    .add-form .priority-btn { min-width: 48px; max-width: 58px; padding: 8px 2px; }
-    .add-form .priority-num { font-size: 14px; }
-    .add-form .priority-label { font-size: 7px; }
-    .add-form .form-actions { gap: 8px; margin-top: 14px; }
-    .add-form .form-actions .btn { padding: 12px; font-size: 13px; }
-    
-    /* Route Summary - 2 cols on very small screens */
-    .summary-stats { grid-template-columns: repeat(2, 1fr); gap: 6px; }
-    .stat-card { padding: 10px 8px; }
-    .stat-value { font-size: 22px; }
-    .stat-label { font-size: 9px; }
+    .sidebar-header { padding: 5px 8px; }
+    .sidebar-header .logo-text h1 { font-size: 12px; }
+    .sidebar-header .logo-text span { font-size: 7px; }
+    .sidebar-header .logo-icon { width: 24px; height: 24px; }
+    .sidebar-header .icon-btn { width: 26px; height: 26px; font-size: 11px; }
+    .header-actions { gap: 3px; }
+    .action-buttons { padding: 6px 8px !important; gap: 5px !important; }
+    .action-buttons .btn { padding: 8px 6px !important; font-size: 10px !important; border-radius: 10px !important; }
+    .action-buttons .btn svg { width: 13px; height: 13px; }
+    .action-buttons .btn span { font-size: 10px; }
+    .tabs { padding: 2px 6px; gap: 3px; }
+    .tab { padding: 5px 8px; font-size: 9px; gap: 3px; }
+    .tab svg { width: 11px; height: 11px; }
+    .point-card { padding: 6px 8px; margin-bottom: 3px; border-radius: 6px; gap: 6px; }
+    .point-card:hover { transform: none; }
+    .point-card:active { transform: none; }
+    .point-number { width: 22px; height: 22px; font-size: 10px; border-radius: 6px; }
+    .point-name { font-size: 11px; }
+    .point-address { font-size: 9px; }
+    .point-actions { gap: 2px; }
+    .point-actions .action-btn { width: 20px; height: 20px; border-radius: 4px; }
+    .point-actions .action-btn svg { width: 9px; height: 9px; }
+    .delete-btn { width: 18px; height: 18px; top: 2px; right: 2px; }
+    .delete-btn svg { width: 9px; height: 9px; }
 
-    /* Map Stats Small Mobile - bottom left */
-    .map-stats { top: auto; bottom: 8px; padding: 5px 6px; gap: 3px; }
-    .map-stat { padding: 2px 4px; }
-    .map-stat-value { font-size: 12px; }
-    .map-stat-label { font-size: 7px; }
+    /* Add Form Small Mobile - modal stays same, just tighter padding */
+    .add-form-overlay { padding: 12px; }
+    .add-form { padding: 14px !important; }
+    .add-form .form-header h3 { font-size: 15px; }
+    .add-form .form-group { margin-bottom: 8px; }
+    .add-form .form-group label { font-size: 11px; }
+    .add-form .form-group input, .add-form .form-group textarea { padding: 9px 10px; font-size: 13px; }
+    
+    /* Route Summary - 4 cols stays, even smaller */
+    .summary-stats { grid-template-columns: repeat(4, 1fr); gap: 3px; }
+    .stat-card { padding: 5px 3px; }
+    .stat-icon { width: 18px; height: 18px; margin-bottom: 1px; }
+    .stat-icon svg { width: 10px; height: 10px; }
+    .stat-value { font-size: 14px; }
+    .stat-label { font-size: 7px; }
+
+    /* Map Stats Small Mobile */
+    .add-point-toggle { top: 78px; left: 6px; padding: 5px 8px; font-size: 10px; }
+    .map-stats { top: 114px; bottom: auto; padding: 2px 3px; gap: 0; border-radius: 5px; }
+    .map-stat { padding: 0px 3px; }
+    .map-stat-value { font-size: 9px; font-weight: 600; }
+    .map-stat-label { font-size: 5px; letter-spacing: 0; }
+    .map-stat.weather .map-stat-value { font-size: 9px; }
     
     /* Navigation Small Mobile */
-    .nav-right-cluster { right: 6px; bottom: 170px; }
-    .speed-display { width: 56px; height: 56px; }
-    .speed-value { font-size: 18px; }
-    .speed-unit { font-size: 8px; }
+    .nav-right-cluster { right: 4px; bottom: 200px; gap: 3px; }
+    .speed-display { width: 44px; height: 44px; }
+    .speed-value { font-size: 16px; }
+    .speed-unit { font-size: 7px; }
+    .compass-widget { width: 36px; height: 36px; }
+    .compass-ring { width: 28px; height: 28px; }
+    .compass-needle { width: 20px; height: 20px; }
     .today-stats { gap: 4px; padding: 3px 6px; }
     .today-stat .stat-value { font-size: 12px; }
-    .nav-bottom-panel { padding: 8px; left: 6px; right: 6px; bottom: 6px; }
-    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; }
-    .nav-stat { padding: 4px 2px; }
-    .nav-stat-value { font-size: 12px; }
-    .nav-stat-label { font-size: 8px; }
-    .nav-actions { gap: 4px; }
-    .nav-btn { padding: 8px 4px; font-size: 10px; min-width: 0; }
+    .nav-bottom-panel { padding: 5px; left: 4px; right: 4px; bottom: 4px; border-radius: 8px; }
+    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 3px; margin-bottom: 5px; }
+    .nav-stat { padding: 3px 2px; border-radius: 5px; }
+    .nav-stat-value { font-size: 11px; }
+    .nav-stat-label { font-size: 7px; }
+    .nav-actions { gap: 3px; }
+    .nav-btn { padding: 6px 3px; font-size: 9px; min-width: 0; border-radius: 6px; }
+    .nav-btn svg { width: 12px; height: 12px; }
     .nav-btn-success, .nav-btn-skip { flex: 1 1 30%; }
+    .nav-btn-voice, .nav-btn-share, .nav-btn-stop { width: 30px; }
 
     /* History Panel Small Mobile */
     
 
     /* Nav top bar small */
-    .nav-top-bar { top: 90px; right: 8px; padding: 10px; min-width: auto; }
-    .nav-target-name { font-size: 13px; max-width: 160px; }
-    .nav-target-label { font-size: 9px; }
-    .nav-eta { font-size: 11px; }
+    .nav-top-bar { top: 52px; right: 4px; padding: 5px 8px; min-width: auto; border-radius: 8px; }
+    .nav-target-name { font-size: 11px; max-width: 140px; }
+    .nav-target-label { font-size: 7px; }
+    .nav-eta { font-size: 9px; }
+    .nav-distance-value { font-size: 11px; }
+    .nav-distance-badge { padding: 4px 6px; border-radius: 6px; }
 
     /* Lock btn small */
-    .lock-btn { width: 34px; height: 34px; }
-    .lock-btn svg { width: 14px; height: 14px; }
+    .lock-btn { width: 28px; height: 28px; }
+    .lock-btn svg { width: 12px; height: 12px; }
 
     /* Turn-by-turn small */
-    .turn-by-turn-panel { right: 8px; max-width: calc(100% - 16px); padding: 8px 12px; }
+    .turn-by-turn-panel { right: 4px; max-width: calc(100% - 8px); padding: 5px 8px; border-radius: 8px; }
+    .turn-text { font-size: 10px; }
+    .turn-distance { font-size: 8px; }
+    .turn-icon-wrap { width: 24px; height: 24px; }
+    .turn-icon { font-size: 14px; }
 
     /* Alerts small */
     .alerts-panel { width: calc(100% - 20px); }
@@ -10240,7 +9589,7 @@ out center body;`;
 
   .nav-right-cluster {
     right: 10px;
-    bottom: 180px;
+    bottom: 240px;
   }
 }
 
@@ -10814,123 +10163,7 @@ out center body;`;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   position: relative;
 }
-.search-input-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.search-icon {
-  position: absolute;
-  left: 12px;
-  width: 18px;
-  height: 18px;
-  color: #52525b;
-  pointer-events: none;
-}
-.search-input {
-  width: 100%;
-  padding: 12px 40px 12px 38px;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  color: #e4e4e7;
-  font-family: 'Kanit', sans-serif;
-  font-size: 14px;
-  transition: border-color 0.35s ease, box-shadow 0.35s ease, background 0.35s ease;
-}
-.search-input:focus {
-  outline: none;
-  border-color: #00ff88;
-  background: rgba(0, 0, 0, 0.55);
-  box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1), 0 4px 20px rgba(0, 255, 136, 0.08);
-}
-.search-input::placeholder { color: #52525b; }
-.search-clear {
-  position: absolute;
-  right: 10px;
-  background: none;
-  border: none;
-  color: #71717a;
-  font-size: 20px;
-  cursor: pointer;
-  padding: 4px;
-}
-.search-spinner {
-  position: absolute;
-  right: 36px;
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(0, 255, 136, 0.3);
-  border-top-color: #00ff88;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-.search-dropdown {
-  position: absolute;
-  top: calc(100% - 4px);
-  left: 24px;
-  right: 24px;
-  background: rgba(15, 15, 25, 0.98);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 12px;
-  max-height: 280px;
-  overflow-y: auto;
-  z-index: 200;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-}
-.search-result-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  padding: 12px 16px;
-  text-align: left;
-  background: none;
-  border: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  cursor: pointer;
-  color: #e4e4e7;
-  font-family: 'Kanit', sans-serif;
-  transition: background 0.15s;
-}
-.search-result-item:hover { background: rgba(0, 255, 136, 0.08); }
-.search-result-item:last-child { border-bottom: none; }
-.result-icon { font-size: 16px; margin-top: 2px; }
-.result-info { display: flex; flex-direction: column; min-width: 0; }
-.result-name { font-weight: 500; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.result-address { font-size: 11px; color: #71717a; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-
-/* Direct Navigation Bar */
-.direct-nav-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 10px;
-  padding: 10px 14px;
-  background: rgba(0, 255, 136, 0.08);
-  border: 1px solid rgba(0, 255, 136, 0.2);
-  border-radius: 10px;
-}
-.direct-dest-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
-.dest-icon { font-size: 16px; }
-.dest-name { font-size: 13px; font-weight: 500; color: #00ff88; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.btn-navigate-direct {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-  border: none;
-  border-radius: 8px;
-  color: white;
-  font-family: 'Kanit', sans-serif;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.btn-navigate-direct svg { width: 16px; height: 16px; }
-.btn-navigate-direct:hover { transform: translateY(-1px); }
+/* SearchPanel CSS moved to $lib/components/SearchPanel.svelte */
 
 /* Route Preferences */
 .route-preferences {
@@ -11166,152 +10399,7 @@ out center body;`;
   justify-content: center;
 }
 
-/* Turn-by-Turn Panel */
-.turn-by-turn-panel {
-  position: absolute;
-  top: 36px;
-  right: 20px;
-  padding: 14px 20px;
-  pointer-events: auto;
-  min-width: 300px;
-  max-width: 420px;
-  z-index: 1100;
-  transition: all 0.3s;
-}
-.turn-by-turn-panel.off-route {
-  border-color: rgba(255, 107, 107, 0.5);
-  background: rgba(255, 107, 107, 0.1);
-  animation: pulse-offroute 1s infinite;
-}
-@keyframes pulse-offroute {
-  0%, 100% { box-shadow: 0 0 20px rgba(255, 107, 107, 0.3); }
-  50% { box-shadow: 0 0 40px rgba(255, 107, 107, 0.6); }
-}
-.turn-instruction {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.turn-icon-wrap { display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border-radius: 14px; background: rgba(0, 255, 136, 0.1); flex-shrink: 0; transition: all 0.3s; }
-.turn-icon-wrap.pulse-approaching { background: rgba(0, 255, 136, 0.2); animation: turn-pulse 1s ease-in-out infinite; }
-.turn-icon { font-size: 28px; }
-.turn-info { flex: 1; }
-.turn-text { font-size: 16px; font-weight: 600; color: #e4e4e7; }
-.turn-distance { font-size: 13px; color: #71717a; margin-top: 2px; display: flex; align-items: center; gap: 8px; }
-.turn-soon-badge { font-size: 10px; font-weight: 700; color: #fbbf24; background: rgba(251, 191, 36, 0.15); padding: 2px 8px; border-radius: 10px; animation: badge-blink 1.2s ease-in-out infinite; }
-.turn-approaching { border-color: rgba(0, 255, 136, 0.3) !important; box-shadow: 0 0 20px rgba(0, 255, 136, 0.1) !important; }
-
-@keyframes turn-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
-@keyframes badge-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-/* Curve Warning */
-.curve-warning {
-  position: absolute;
-  top: 190px;
-  left: 20px;
-  padding: 12px 16px;
-  z-index: 1090;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 180px;
-  border: 1px solid rgba(251, 191, 36, 0.3);
-  background: rgba(251, 191, 36, 0.1);
-  animation: curveSlideIn 0.3s ease;
-}
-
-@keyframes curveSlideIn {
-  from { opacity: 0; transform: translateX(20px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.curve-warning.sharp {
-  border-color: rgba(249, 115, 22, 0.4);
-  background: rgba(249, 115, 22, 0.15);
-}
-
-.curve-warning.hairpin {
-  border-color: rgba(239, 68, 68, 0.5);
-  background: rgba(239, 68, 68, 0.15);
-  animation: curveSlideIn 0.3s ease, curvePulse 0.8s ease-in-out infinite;
-}
-
-@keyframes curvePulse {
-  0%, 100% { box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
-  50% { box-shadow: 0 0 25px rgba(239, 68, 68, 0.6); }
-}
-
-.curve-icon {
-  font-size: 32px;
-  font-weight: bold;
-  color: #fbbf24;
-}
-
-.curve-warning.sharp .curve-icon { color: #f97316; }
-.curve-warning.hairpin .curve-icon { color: #ef4444; }
-
-.curve-info { flex: 1; }
-
-.curve-text {
-  font-size: 14px;
-  font-weight: 600;
-  color: #fbbf24;
-}
-
-.curve-warning.sharp .curve-text { color: #f97316; }
-.curve-warning.hairpin .curve-text { color: #ef4444; }
-
-.curve-distance {
-  font-size: 12px;
-  color: #a1a1aa;
-  margin-top: 2px;
-}
-
-/* Lane Guidance */
-.lane-guidance {
-  position: absolute;
-  top: 240px;
-  left: 20px;
-  padding: 10px 14px;
-  z-index: 1090;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  background: rgba(59, 130, 246, 0.1);
-}
-
-.lane-visual {
-  display: flex;
-  gap: 4px;
-}
-
-.lane {
-  width: 16px;
-  height: 32px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  transition: all 0.3s ease;
-}
-
-.lane.active {
-  background: #3b82f6;
-  border-color: #3b82f6;
-  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
-  animation: lanePulse 1s ease-in-out infinite;
-}
-
-@keyframes lanePulse {
-  0%, 100% { transform: scaleY(1); }
-  50% { transform: scaleY(1.1); }
-}
-
-.lane-text {
-  font-size: 14px;
-  font-weight: 600;
-  color: #3b82f6;
-}
+/* Turn-by-Turn, Curve Warning, Lane Guidance CSS moved to $lib/components/NavigationOverlay.svelte */
 
 /* Route Progress Strip */
 .nav-route-progress-strip {
@@ -11512,68 +10600,7 @@ out center body;`;
   display: flex; align-items: center; justify-content: center;
 }
 
-/* Undo Delivery Button */
-.undo-delivery-btn {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  width: 100%; padding: 10px; margin-bottom: 12px;
-  background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3);
-  border-radius: 10px; color: #f59e0b;
-  font-family: 'Kanit', sans-serif; font-size: 13px; font-weight: 500;
-  cursor: pointer; transition: all 0.2s; animation: undo-flash 2s ease infinite;
-}
-.undo-delivery-btn:hover { background: rgba(245, 158, 11, 0.2); }
-@keyframes undo-flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
-
-/* Per-Point ETA List */
-.eta-list {
-  position: absolute; top: 120px; right: 20px; z-index: 1030;
-  padding: 10px 12px !important; max-width: 200px; pointer-events: auto;
-}
-.eta-list-title { font-size: 10px; color: #71717a; margin-bottom: 6px; font-weight: 600; }
-.eta-list-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  font-size: 11px;
-}
-.eta-list-item:last-child { border-bottom: none; }
-.eta-list-item.current-target { color: #00ff88; }
-.eta-order {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06); display: flex;
-  align-items: center; justify-content: center;
-  font-size: 9px; font-weight: 700; flex-shrink: 0;
-}
-.current-target .eta-order { background: rgba(0, 255, 136, 0.15); }
-.eta-name { flex: 1; color: #d4d4d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.eta-time { color: #a1a1aa; font-family: 'JetBrains Mono', monospace; font-size: 10px; flex-shrink: 0; }
-.current-target .eta-time { color: #00ff88; }
-
-/* Off-Route Warning */
-.off-route-warning {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.off-route-icon { font-size: 32px; animation: shake 0.5s infinite; }
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-4px); }
-  75% { transform: translateX(4px); }
-}
-.off-route-text { flex: 1; }
-.off-route-title { font-size: 16px; font-weight: 700; color: #ff6b6b; }
-.off-route-detail { font-size: 12px; color: #a1a1aa; }
-.reroute-btn {
-  padding: 8px 16px;
-  background: linear-gradient(135deg, #f59e0b, #d97706);
-  border: none;
-  border-radius: 8px;
-  color: white;
-  font-family: 'Kanit', sans-serif;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
+/* Off-Route Warning CSS moved to $lib/components/NavigationOverlay.svelte */
 
 /* Route Selector Overlay */
 .route-selector-overlay {
@@ -11741,27 +10768,28 @@ out center body;`;
 /* Route Alternative Labels on Map */
 :global(.route-label-marker) { background: none !important; border: none !important; }
 :global(.route-alt-label) {
-  padding: 8px 14px;
-  border-radius: 12px;
+  padding: 10px 16px;
+  border-radius: 14px;
   text-align: center;
   color: white;
   font-family: 'Kanit', sans-serif;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5), 0 0 12px rgba(255,255,255,0.08);
   cursor: pointer;
   transition: all 0.2s;
   pointer-events: auto;
+  border: 1.5px solid rgba(255,255,255,0.15);
 }
-:global(.route-alt-label:hover) { transform: scale(1.05); }
-:global(.alt-label-text) { display: block; font-size: 12px; font-weight: 600; }
-:global(.alt-label-info) { display: block; font-size: 11px; opacity: 0.9; }
-:global(.alt-toll-badge) { display: block; font-size: 10px; margin-top: 4px; padding: 2px 6px; background: rgba(0, 0, 0, 0.3); border-radius: 6px; }
-:global(.alt-no-toll) { display: block; font-size: 10px; margin-top: 4px; }
+:global(.route-alt-label:hover) { transform: scale(1.08); box-shadow: 0 6px 28px rgba(0, 0, 0, 0.6); }
+:global(.alt-label-text) { display: block; font-size: 14px; font-weight: 700; }
+:global(.alt-label-info) { display: block; font-size: 12px; opacity: 0.95; font-weight: 500; }
+:global(.alt-toll-badge) { display: block; font-size: 11px; margin-top: 4px; padding: 3px 8px; background: rgba(0, 0, 0, 0.35); border-radius: 6px; font-weight: 500; }
+:global(.alt-no-toll) { display: block; font-size: 11px; margin-top: 4px; font-weight: 500; }
 
 /* Alternative Route Label (on map after calculation) */
 :global(.gmap-alt-label) {
   display: inline-block;
-  padding: 6px 12px;
-  border-radius: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
   text-align: center;
   font-family: 'Kanit', sans-serif;
   background: rgba(15, 15, 25, 0.95);
@@ -11769,31 +10797,34 @@ out center body;`;
   cursor: pointer;
   pointer-events: auto;
   transition: all 0.15s ease;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-left: 3px solid var(--alt-color, #3b82f6);
 }
 :global(.gmap-alt-label:hover) {
   background: rgba(25, 25, 40, 0.95);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
-  transform: translateY(-1px);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.65);
+  transform: translateY(-2px);
 }
 :global(.gmap-alt-name) {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   color: var(--alt-color, #3b82f6);
   line-height: 1.4;
 }
 :global(.gmap-alt-sub) {
-  font-size: 10px;
-  color: #9ca3af;
+  font-size: 11px;
+  color: #b0b5bf;
   line-height: 1.3;
+  font-weight: 500;
 }
 
 /* Navigation Alternative Labels (during navigation) */
 :global(.nav-alt-label) {
   display: inline-block;
-  padding: 5px 10px;
-  border-radius: 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
   text-align: center;
   font-family: 'Kanit', sans-serif;
   background: rgba(15, 15, 25, 0.95);
@@ -11801,24 +10832,27 @@ out center body;`;
   cursor: pointer;
   pointer-events: auto;
   transition: all 0.15s ease;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
+  border: 1px solid rgba(255,255,255,0.1);
 }
 :global(.nav-alt-label:hover) {
   background: rgba(25, 25, 40, 0.95);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.6);
 }
 :global(.nav-alt-name) {
   display: block;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   line-height: 1.4;
 }
 :global(.nav-alt-info) {
   display: block;
-  font-size: 9px;
-  color: #9ca3af;
+  font-size: 10px;
+  color: #b0b5bf;
   line-height: 1.3;
+  font-weight: 500;
 }
 
 /* Custom Waypoint Markers */
@@ -12113,65 +11147,12 @@ out center body;`;
 
 /* ==================== FLOATING MAP PANELS ==================== */
 
-/* Floating Search Bar - Top Right */
-.map-search-float {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  z-index: 1002;
-  width: 380px;
-  max-width: calc(100% - 32px);
-  padding: 10px 14px;
-  border-radius: 14px;
-  animation: fadeInFloat 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
-}
-.map-search-float .search-input {
-  background: rgba(0, 0, 0, 0.5);
-  border-color: rgba(255, 255, 255, 0.15);
-}
-.map-search-float .search-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  border-radius: 12px;
-}
-.map-search-float .direct-nav-bar {
-  margin-top: 8px;
-}
+/* SearchPanel floating CSS moved to $lib/components/SearchPanel.svelte */
 
-/* Recent Searches */
-.recent-searches {
-  padding: 8px 0;
-}
-.recent-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 12px 8px;
-  font-size: 12px;
-  color: #a1a1aa;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  margin-bottom: 4px;
-}
-.recent-clear-btn {
-  background: none;
-  border: none;
-  color: #ef4444;
-  font-size: 11px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'Kanit', sans-serif;
-}
-.recent-clear-btn:hover {
-  background: rgba(239, 68, 68, 0.15);
-}
-
-/* Floating Route Preferences - Left side below map-stats */
+/* Floating Route Preferences - Left side top */
 .map-prefs-float {
   position: absolute;
-  top: 110px;
+  top: 16px;
   left: 16px;
   z-index: 1000;
   padding: 6px 8px;
@@ -12348,7 +11329,7 @@ out center body;`;
 /* ==================== ALONG-ROUTE POI ==================== */
 .map-poi-float {
   position: absolute;
-  top: 110px;
+  top: 120px;
   right: 16px;
   z-index: 1000;
   padding: 10px;
@@ -12520,8 +11501,20 @@ out center body;`;
   }
   .float-pref-chips { flex-wrap: nowrap; }
   .float-pref-chip { font-size: 10px; padding: 4px 7px; }
-  .map-poi-float { top: 90px; right: 10px; max-width: 300px; }
-  .map-vehicle-float { bottom: 20px; right: 10px; }
+  .map-poi-float { top: 69px; right: 10px; max-width: 220px; padding: 6px; font-size: 11px; border-radius: 10px; }
+  .map-poi-float .poi-header { gap: 4px; }
+  .map-poi-float .poi-search-btn { font-size: 10px; padding: 4px 8px; }
+  .map-poi-float .poi-close-btn { width: 24px; height: 24px; font-size: 11px; border-radius: 6px; }
+  .map-poi-float .poi-filter-section { margin-top: 4px; }
+  .map-poi-float .poi-filter-label { font-size: 9px; }
+  .map-poi-float .poi-filter-chips { gap: 3px; }
+  .map-poi-float .poi-chip { font-size: 9px; padding: 2px 6px; }
+  .map-poi-float .poi-results-summary { font-size: 9px; margin-top: 3px; }
+  .map-poi-float .poi-list-compact { max-height: 120px; }
+  .map-poi-float .poi-item { padding: 4px 6px; }
+  .map-poi-float .poi-name { font-size: 10px; }
+  .map-poi-float .poi-meta { font-size: 8px; }
+  .map-vehicle-float { display: none; }
   .map-saved-float { bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 40px); }
 }
 
@@ -12529,27 +11522,27 @@ out center body;`;
   .map-search-float { left: 8px; right: 8px; width: auto; top: 8px; padding: 6px 8px; }
   .map-search-float .search-input { padding: 8px 32px 8px 30px; font-size: 12px; }
   .map-prefs-float {
-    bottom: 65px;
+    bottom: 28px;
     left: 8px;
     right: 8px;
-    max-width: none;
+    max-width: 370px;
     padding: 4px 6px;
     overflow-x: auto;
   }
   .float-pref-chip { font-size: 9px; padding: 3px 6px; }
   .float-toggle-chip { width: 26px; height: 26px; font-size: 11px; }
-  .map-poi-float { top: 80px; right: 8px; max-width: 280px; padding: 8px; }
+  .map-poi-float { top: 67px; right: 8px; max-width: 200px; padding: 5px; font-size: 10px; border-radius: 8px; }
   .poi-list-compact { display: none; }
   .poi-results-summary { display: none; }
   .poi-chip { font-size: 10px; padding: 3px 8px; }
-  .map-vehicle-float { bottom: 14px; }
+  .map-vehicle-float { display: none; }
   .map-saved-float { bottom: 14px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 30px); }
 }
 
 /* ==================== TRAFFIC LEGEND ==================== */
 .traffic-legend {
   position: absolute;
-  top: 160px;
+  top: 210px;
   left: 16px;
   z-index: 1000;
   padding: 10px 14px;
@@ -13098,13 +12091,13 @@ out center body;`;
 .real-dist-toggle {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   cursor: pointer;
-  padding: 10px 14px;
+  padding: 9px 12px;
   user-select: none;
-  flex: 1 1 calc(50% - 4px);
+  flex: 1 1 calc(50% - 3px);
   background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(109, 40, 217, 0.05) 100%);
-  border-radius: 12px;
+  border-radius: 10px;
   border: 1px solid rgba(139, 92, 246, 0.2);
   transition: all 0.3s ease;
 }
@@ -13123,10 +12116,10 @@ out center body;`;
 }
 .toggle-switch {
   position: relative;
-  width: 44px;
-  height: 24px;
+  width: 36px;
+  height: 20px;
   background: rgba(113, 113, 122, 0.4);
-  border-radius: 12px;
+  border-radius: 10px;
   transition: all 0.3s ease;
   flex-shrink: 0;
 }
@@ -13136,17 +12129,17 @@ out center body;`;
 }
 .toggle-knob {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
   background: white;
   border-radius: 50%;
   transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 .real-dist-toggle input:checked + .toggle-switch .toggle-knob {
-  left: 23px;
+  left: 18px;
 }
 .toggle-label {
   display: flex;
@@ -13155,13 +12148,13 @@ out center body;`;
   min-width: 0;
 }
 .toggle-text {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   color: #e4e4e7;
   white-space: nowrap;
 }
 .toggle-hint {
-  font-size: 10px;
+  font-size: 9px;
   color: #a1a1aa;
   white-space: nowrap;
 }
@@ -13298,11 +12291,7 @@ out center body;`;
 /* Traffic Legend Responsive */
 @media (max-width: 768px) {
   .traffic-legend {
-    top: auto;
-    bottom: 140px;
-    left: 10px;
-    min-width: 120px;
-    padding: 8px 10px;
+    display: none;
   }
   .traffic-legend-header { margin-bottom: 6px; padding-bottom: 6px; }
   .traffic-legend-title { font-size: 11px; }
