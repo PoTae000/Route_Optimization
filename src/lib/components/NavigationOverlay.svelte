@@ -251,7 +251,7 @@
 
   /* Nav Actions */
   .nav-actions { display: flex; gap: 8px; justify-content: center; }
-  .nav-btn { display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.05); color: #e4e4e7; font-family: 'Kanit', sans-serif; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+  .nav-btn { display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.05); color: #e4e4e7; font-family: 'Kanit', sans-serif; font-size: 13px; cursor: pointer; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s; }
   .nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .nav-btn svg { width: 18px; height: 18px; }
   .nav-btn-success { background: rgba(0, 255, 136, 0.15); border-color: rgba(0, 255, 136, 0.3); color: #00ff88; }

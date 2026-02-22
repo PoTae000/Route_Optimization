@@ -119,7 +119,7 @@
     display: flex; align-items: center; gap: 4px; padding: 6px 12px;
     background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px; color: #a1a1aa; font-size: 12px; font-family: 'Kanit';
-    cursor: pointer; transition: all 0.2s;
+    cursor: pointer; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
   }
   .alerts-clear-btn:hover { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; border-color: rgba(255, 107, 107, 0.3); }
   .alerts-clear-btn svg { width: 14px; height: 14px; }
@@ -127,7 +127,7 @@
     width: 32px; height: 32px; border-radius: 8px;
     background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
     color: #71717a; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
   }
   .alerts-close-btn:hover { background: rgba(255,255,255,0.1); color: #e4e4e7; }
   .alerts-close-btn svg { width: 16px; height: 16px; }
@@ -146,7 +146,7 @@
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.04);
     border-radius: 14px; margin-bottom: 8px; align-items: flex-start;
-    transition: all 0.2s; cursor: default;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s; cursor: default;
     animation: alertItemIn 0.35s calc(var(--delay, 0s)) cubic-bezier(0.34, 1.56, 0.64, 1) both;
   }
   @keyframes alertItemIn { from { opacity: 0; transform: translateX(-12px) scale(0.95); } to { opacity: 1; transform: translateX(0) scale(1); } }
@@ -173,7 +173,7 @@
     width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px;
     background: none; border: 1px solid transparent;
     color: #52525b; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
   }
   .alert-dismiss:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); color: #a1a1aa; }
   .alert-dismiss svg { width: 14px; height: 14px; }

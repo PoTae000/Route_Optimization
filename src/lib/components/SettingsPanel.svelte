@@ -375,7 +375,7 @@
     width: 32px; height: 32px; border-radius: 8px;
     background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
     color: #71717a; display: flex; align-items: center; justify-content: center;
-    cursor: pointer; transition: all 0.15s;
+    cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
   }
   .close-btn:hover { background: rgba(255,107,107,0.15); color: #ff6b6b; border-color: rgba(255,107,107,0.2); }
   .close-btn svg { width: 16px; height: 16px; }
@@ -389,7 +389,7 @@
   .tab-btn {
     flex: 1; padding: 8px 4px; border: none; border-radius: 8px;
     background: transparent; color: #52525b; font-size: 12px; font-weight: 500;
-    font-family: 'Kanit', sans-serif; cursor: pointer; transition: all 0.15s;
+    font-family: 'Kanit', sans-serif; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
   }
   .tab-btn:hover { color: #a1a1aa; background: rgba(255,255,255,0.03); }
   .tab-btn.active { color: #e4e4e7; background: rgba(255,255,255,0.08); }
@@ -418,7 +418,7 @@
     padding: 12px; border-radius: 10px;
     background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
     color: #71717a; font-size: 13px; font-weight: 500;
-    font-family: 'Kanit', sans-serif; cursor: pointer; transition: all 0.2s;
+    font-family: 'Kanit', sans-serif; cursor: pointer; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
   }
   .vtype-btn:hover { background: rgba(255,255,255,0.06); }
   .vtype-btn.active {
@@ -513,7 +513,7 @@
   .action-btn {
     padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);
     background: rgba(255,255,255,0.03); color: #a1a1aa; font-size: 12px;
-    font-family: 'Kanit', sans-serif; cursor: pointer; transition: all 0.15s;
+    font-family: 'Kanit', sans-serif; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
     text-align: left;
   }
   .action-btn:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
@@ -527,12 +527,12 @@
   .toggle-switch {
     width: 40px; height: 22px; border-radius: 11px; border: none;
     background: rgba(255,255,255,0.1); cursor: pointer;
-    position: relative; transition: all 0.2s; flex-shrink: 0;
+    position: relative; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s; flex-shrink: 0;
   }
   .toggle-switch.active { background: rgba(0,255,136,0.3); }
   .toggle-dot {
     width: 16px; height: 16px; border-radius: 50%; background: #71717a;
-    position: absolute; top: 3px; left: 3px; transition: all 0.2s;
+    position: absolute; top: 3px; left: 3px; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
   }
   .toggle-switch.active .toggle-dot { background: #00ff88; left: 21px; }
 
@@ -557,7 +557,7 @@
     width: 30px; height: 30px; border-radius: 8px;
     background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.15);
     color: #00ff88; display: flex; align-items: center; justify-content: center;
-    cursor: pointer; font-size: 14px; transition: all 0.15s;
+    cursor: pointer; font-size: 14px; transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
   }
   .icon-btn:hover:not(:disabled) { background: rgba(0,255,136,0.15); }
   .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -569,7 +569,7 @@
     padding: 10px; border-radius: 10px;
     background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.15);
     color: #ff6b6b; font-size: 13px; font-weight: 500;
-    font-family: 'Kanit', sans-serif; cursor: pointer; transition: all 0.15s;
+    font-family: 'Kanit', sans-serif; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
   }
   .logout-btn:hover { background: rgba(255,107,107,0.15); }
   .logout-btn svg { width: 18px; height: 18px; }
