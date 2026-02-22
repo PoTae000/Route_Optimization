@@ -450,6 +450,7 @@
   let showRouteSelector = false;
   let alternativeRouteLayers: any[] = [];
   const routeColors = ['#00ff88', '#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899', '#6366f1', '#84cc16', '#06b6d4', '#e11d48'];
+  const altRouteColors = ['#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899', '#6366f1', '#84cc16', '#06b6d4', '#e11d48'];
   const routeLabels = ['เส้นทางที่เร็วที่สุด', 'เส้นทางทางเลือก', 'เส้นทาง 3', 'เส้นทาง 4', 'เส้นทาง 5', 'เส้นทาง 6', 'เส้นทาง 7', 'เส้นทาง 8', 'เส้นทาง 9', 'เส้นทาง 10', 'เส้นทาง 11', 'เส้นทาง 12'];
 
   // Toll & Expressway Options
@@ -552,10 +553,11 @@
   }
 
   function clearRouteState() {
-    sessionStorage.removeItem(getUserKey('routeState'));
+    if (browser) sessionStorage.removeItem(getUserKey('routeState'));
   }
 
   function restoreRouteState(): boolean {
+    if (!browser) return false;
     try {
       const saved = sessionStorage.getItem(getUserKey('routeState'));
       if (!saved) return false;
@@ -679,7 +681,8 @@
           iconSize: [44, 44],
           iconAnchor: [22, 22]
         }),
-        draggable: isDragMode
+        draggable: isDragMode,
+        bubblingMouseEvents: true
       }).addTo(map);
       marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: ${colors.bg}"></div><div class="popup-header"><div class="popup-badge" style="background: ${colors.bg}">${i + 1}</div><div class="popup-header-text"><h4>${escapeHtml(point.name)}</h4><span class="popup-tag" style="color: ${colors.glow}">P${point.priority}</span></div></div><div class="popup-content"><p>${escapeHtml(point.address)}</p></div></div>`, { className: 'dark-popup', maxWidth: 320 });
       marker.on('dragend', async () => {
@@ -809,11 +812,20 @@
     if (optimizedRoute) optimizeRoute();
   }
 
+  let isAddingPoint = false;
   async function addDeliveryPoint() {
+    if (isAddingPoint) return;
     if (!newPoint.name.trim() || !newPoint.address.trim()) {
       showNotification('กรุณากรอกข้อมูลให้ครบ', 'error');
       return;
     }
+    // Duplicate check: same lat/lng already exists
+    const dup = deliveryPoints.find(p => Math.abs(p.lat - newPoint.lat) < 0.0001 && Math.abs(p.lng - newPoint.lng) < 0.0001);
+    if (dup) {
+      showNotification(`จุด "${dup.name}" อยู่ตำแหน่งเดียวกันแล้ว`, 'warning');
+      return;
+    }
+    isAddingPoint = true;
     try {
       const payload = { ...newPoint, user_id: currentUser?.id || null };
       const res = await fetch(`${API_URL}/points`, {
@@ -837,6 +849,8 @@
       showNotification('เพิ่มจุดแวะสำเร็จ', 'success');
     } catch (err) {
       showNotification('เพิ่มไม่สำเร็จ', 'error');
+    } finally {
+      isAddingPoint = false;
     }
   }
 
@@ -891,7 +905,7 @@
     const seenKeys = new Set<string>();
 
     function addIfUnique(route: any, label: string, color: string, excludeUsed: string[]) {
-      const key = `${Math.round(route.distance / 200)}-${Math.round(route.duration / 30)}`;
+      const key = `${Math.round(route.distance / 100)}-${Math.round(route.duration / 15)}`;
       if (!seenKeys.has(key)) {
         seenKeys.add(key);
         allRoutes.push({ ...route, _label: label, _color: color, _exclude: excludeUsed });
@@ -903,13 +917,17 @@
       { exclude: undefined, label: '' },
       { exclude: ['toll'], label: 'เลี่ยงด่วน' },
       { exclude: ['motorway'], label: 'เลี่ยงมอเตอร์เวย์' },
-      { exclude: ['toll', 'motorway'], label: 'เลี่ยงด่วน+มอเตอร์เวย์' }
+      { exclude: ['toll', 'motorway'], label: 'เลี่ยงด่วน+มอเตอร์เวย์' },
+      { exclude: ['ferry'], label: 'เลี่ยงเรือข้ามฟาก' },
+      { exclude: ['toll', 'ferry'], label: 'เลี่ยงด่วน+เรือข้ามฟาก' },
+      { exclude: ['motorway', 'ferry'], label: 'เลี่ยงมอเตอร์เวย์+เรือข้ามฟาก' },
+      { exclude: ['toll', 'motorway', 'ferry'], label: 'เลี่ยงทั้งหมด' }
     ];
 
     const annot = showTraffic ? 'congestion' : undefined;
 
     if (points.length <= 2) {
-      // === Single segment — 4 calls with alternatives ===
+      // === Single segment — 8 calls with alternatives for maximum route variety ===
       const results = await Promise.allSettled(
         excludeConfigs.map(cfg => callOSRMProxy(waypoints, { steps: true, alternatives: true, exclude: cfg.exclude, annotations: annot }, signal))
       );
@@ -918,7 +936,8 @@
         const suffix = excludeConfigs[ci].label ? ` (${excludeConfigs[ci].label})` : '';
         res.value.routes.forEach((r: any) => {
           const label = allRoutes.length === 0 ? 'เส้นทางเร็วที่สุด' : `เส้นทาง ${allRoutes.length + 1}${suffix}`;
-          addIfUnique(r, label, routeColors[allRoutes.length % routeColors.length], excludeConfigs[ci].exclude || []);
+          const clr = allRoutes.length === 0 ? routeColors[0] : altRouteColors[(allRoutes.length - 1) % altRouteColors.length];
+          addIfUnique(r, label, clr, excludeConfigs[ci].exclude || []);
         });
       });
     } else {
@@ -947,7 +966,7 @@
           const res = results[ri++];
           if (res.status !== 'fulfilled' || !res.value.routes) continue;
           for (const route of res.value.routes) {
-            const key = `${Math.round(route.distance / 500)}-${Math.round(route.duration / 60)}`;
+            const key = `${Math.round(route.distance / 100)}-${Math.round(route.duration / 15)}`;
             if (!segSeen.has(key)) {
               segSeen.add(key);
               segRoutes.push({ ...route, _exclude: excludeConfigs[c].exclude || [] });
@@ -979,13 +998,15 @@
         };
       }
 
-      // Strategy 1-5: fixed strategies (fastest, shortest, avoid-toll, avoid-motorway, avoid-both)
+      // Strategy 1-7: fixed strategies
       const strategies: { name: string; pick: (segs: any[][]) => (any | null)[] }[] = [
         { name: 'เส้นทางเร็วที่สุด', pick: segs => segs.map(s => s[0]) },
         { name: 'เส้นทางสั้นที่สุด', pick: segs => segs.map(s => [...s].sort((a, b) => a.distance - b.distance)[0]) },
         { name: 'เลี่ยงทางด่วน', pick: segs => segs.map(s => s.find(r => r._exclude?.includes('toll')) || s[0]) },
         { name: 'เลี่ยงมอเตอร์เวย์', pick: segs => segs.map(s => s.find(r => r._exclude?.includes('motorway')) || s[0]) },
         { name: 'เลี่ยงด่วน+มอเตอร์เวย์', pick: segs => segs.map(s => s.find(r => r._exclude?.includes('toll') && r._exclude?.includes('motorway')) || s[0]) },
+        { name: 'เลี่ยงเรือข้ามฟาก', pick: segs => segs.map(s => s.find(r => r._exclude?.includes('ferry')) || s[0]) },
+        { name: 'เลี่ยงทั้งหมด', pick: segs => segs.map(s => s.find(r => r._exclude?.includes('toll') && r._exclude?.includes('motorway') && r._exclude?.includes('ferry')) || s[0]) },
       ];
 
       for (const st of strategies) {
@@ -993,20 +1014,22 @@
           const picks = st.pick(segAlts);
           if (picks.every(Boolean)) {
             const stitched = stitchRoutes(picks);
-            addIfUnique(stitched, st.name, routeColors[allRoutes.length % routeColors.length], stitched._exclude);
+            const clr2 = allRoutes.length === 0 ? routeColors[0] : altRouteColors[(allRoutes.length - 1) % altRouteColors.length];
+            addIfUnique(stitched, st.name, clr2, stitched._exclude);
           }
         } catch {}
       }
 
       // Strategy 6+: per-segment variations — swap alt into one segment, keep others fastest
       for (let s = 0; s < segments.length; s++) {
-        const maxAlts = Math.min(segAlts[s].length, 4);
+        const maxAlts = segAlts[s].length;
         for (let a = 1; a < maxAlts; a++) {
           const picks = segAlts.map((seg, idx) => idx === s ? seg[a] : seg[0]);
           if (picks.every(Boolean)) {
             const stitched = stitchRoutes(picks);
             const label = `เส้นทาง ${allRoutes.length + 1} (ช่วง ${s + 1} ทางเลือก)`;
-            addIfUnique(stitched, label, routeColors[allRoutes.length % routeColors.length], stitched._exclude);
+            const clr3 = allRoutes.length === 0 ? routeColors[0] : altRouteColors[(allRoutes.length - 1) % altRouteColors.length];
+            addIfUnique(stitched, label, clr3, stitched._exclude);
           }
         }
       }
@@ -1188,11 +1211,11 @@
 
   // ปรับความหนาเส้นตาม zoom — บางลงเมื่อซูมออก
   function getRouteWeight(zoom: number): { main: number; mainSel: number } {
-    if (zoom >= 16) return { main: 5, mainSel: 6 };
-    if (zoom >= 14) return { main: 4, mainSel: 5 };
-    if (zoom >= 12) return { main: 3, mainSel: 4 };
-    if (zoom >= 10) return { main: 2, mainSel: 3 };
-    return { main: 2, mainSel: 2 };
+    if (zoom >= 16) return { main: 6, mainSel: 7 };
+    if (zoom >= 14) return { main: 5, mainSel: 6 };
+    if (zoom >= 12) return { main: 4, mainSel: 5 };
+    if (zoom >= 10) return { main: 3, mainSel: 4 };
+    return { main: 2, mainSel: 3 };
   }
 
   function updateRouteWeights() {
@@ -1208,15 +1231,23 @@
   function displayAllRouteAlternatives(startPoint: any, sortedPoints: any[]) {
     clearAlternativeRouteLayers();
     const w = getRouteWeight(map?.getZoom?.() || 14);
-    routeAlternatives.forEach((alt, idx) => {
+    // Draw non-selected routes first, then selected route last (on top) so green covers shared sections
+    const drawOrder = routeAlternatives.map((alt, idx) => ({ alt, idx })).sort((a, b) => {
+      if (a.idx === selectedRouteIndex) return 1;
+      if (b.idx === selectedRouteIndex) return -1;
+      return 0;
+    });
+    let altClrIdx = 0;
+    drawOrder.forEach(({ alt, idx }) => {
       if (!alt.geometry?.coordinates) return;
       const coords = alt.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
       const isSelected = idx === selectedRouteIndex;
-      const color = alt.color || routeColors[idx % routeColors.length];
+      const color = isSelected ? '#00ff88' : altRouteColors[altClrIdx++ % altRouteColors.length];
       const mainLine = L.polyline(coords, {
-        color: color, weight: isSelected ? w.mainSel : w.main, opacity: isSelected ? 1 : 0.85,
+        color: color, weight: isSelected ? w.mainSel : w.main, opacity: isSelected ? 1 : 0.45,
         lineCap: 'round', lineJoin: 'round', dashArray: isSelected ? '' : '12 8',
-        smoothFactor: 0, _isSelected: isSelected, _isRoute: true
+        smoothFactor: 0, _isSelected: isSelected, _isRoute: true,
+        className: isSelected ? '' : 'route-glow'
       } as any).addTo(map);
       mainLine.on('click', () => selectRoute(idx, startPoint, sortedPoints));
       const midIdx = Math.floor(coords.length / 2);
@@ -1272,12 +1303,13 @@
     if (!selected?.geometry?.coordinates) return;
     const mainCoords: [number, number][] = selected.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
 
+    let navAltClrIdx = 0;
     routeAlternatives.forEach((alt, idx) => {
       if (idx === selectedRouteIndex) return;
       if (!alt.geometry?.coordinates) return;
 
       const altCoords: [number, number][] = alt.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-      const color = alt.color || routeColors[idx % routeColors.length];
+      const color = altRouteColors[navAltClrIdx++ % altRouteColors.length];
       const divergingSections = getDivergingSections(altCoords, mainCoords);
 
       if (divergingSections.length === 0) return;
@@ -1287,7 +1319,7 @@
       divergingSections.forEach(section => {
         if (section.length < 2) return;
         const line = L.polyline(section, {
-          color: color, weight: dw.main, opacity: 0.8, lineCap: 'round', lineJoin: 'round', smoothFactor: 0
+          color: color, weight: dw.main, opacity: 0.45, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, className: 'route-glow'
         }).addTo(map);
         const hit = L.polyline(section, {
           color: 'transparent', weight: 30, opacity: 0
@@ -1302,21 +1334,26 @@
       const timeDiff = Math.round((alt.duration - selected.duration) / 60);
       const timeLabel = timeDiff > 0 ? `+${timeDiff} น.` : timeDiff < 0 ? `-${Math.abs(timeDiff)} น.` : '=';
 
+      const tollInfo = alt.hasTolls ? `<span class="nav-alt-toll">🚧 ทางด่วน ~฿${alt.tollEstimate}</span>` : `<span class="nav-alt-free">✅ ไม่มีทางด่วน</span>`;
       const labelMarker = L.marker(labelPoint, {
         icon: L.divIcon({
           className: 'route-label-marker',
           html: `<div class="nav-alt-label" style="border-color: ${color}">
             <span class="nav-alt-name" style="color: ${color}">${alt.label}</span>
             <span class="nav-alt-info">${timeLabel} · ${(alt.distance / 1000).toFixed(1)} กม.</span>
+            ${tollInfo}
           </div>`,
-          iconSize: [140, 40], iconAnchor: [70, 20]
+          iconSize: [180, 55], iconAnchor: [90, 28]
         })
       }).addTo(map);
       navAlternativeLayers.push(labelMarker);
       altLabelMarkers.push(labelMarker);
 
+      const allLines = sectionLayers.filter((_, i) => i % 2 === 0);
       const switchHandler = () => switchNavRoute(idx);
-      sectionLayers.filter((_, i) => i % 3 >= 1).forEach(l => l.on('click', switchHandler));
+      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.9 })); };
+      const unhighlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.45 })); };
+      sectionLayers.forEach(l => { l.on('click', switchHandler); l.on('mouseover', highlight); l.on('mouseout', unhighlight); });
       labelMarker.on('click', switchHandler);
     });
 
@@ -1379,15 +1416,20 @@
     remainingTime = alt.duration;
     tollCostEstimate = alt.tollEstimate || 0;
 
-    // Clear and redraw route + alternatives
+    // Clear and redraw only main route (no alternatives after selection)
     clearAllRouteLayers();
     clearNavAlternativeLayers();
     updateRouteDisplayForNavigation();
     updateNavigationMarkers();
-    displayNavAlternatives(); // redraw alternatives (now this route is active, so it won't show)
 
-    showNotification(`เปลี่ยนเส้นทาง: ${alt.label}`, 'success');
-    speak(`เปลี่ยนไป${alt.label}`);
+    // Show detailed route info
+    const distKm = (alt.distance / 1000).toFixed(1);
+    const timeMin = Math.round(alt.duration / 60);
+    let info = `เปลี่ยนเส้นทาง: ${alt.label} · ${distKm} กม. · ${timeMin} นาที`;
+    if (alt.hasTolls) info += ` · ทางด่วน ~฿${alt.tollEstimate}`;
+    else info += ' · ไม่มีทางด่วน';
+    showNotification(info, alt.hasTolls ? 'warning' : 'success');
+    speak(`เปลี่ยนไป${alt.label} ระยะทาง ${distKm} กิโลเมตร ${timeMin} นาที ${alt.hasTolls ? 'มีทางด่วน' : 'ไม่มีทางด่วน'}`);
   }
 
   // ==================== MANUAL WAYPOINT (จุดผ่านทาง) ====================
@@ -1662,13 +1704,14 @@
 
     // First pass: draw lines & collect label info
     const labelInfos: { point: [number, number]; alt: any; idx: number; color: string; sectionLayers: any[]; sections: [number, number][][] }[] = [];
+    let altColorIdx = 0;
 
     routeAlternatives.forEach((alt, idx) => {
       if (idx === selectedRouteIndex) return;
       if (!alt.geometry?.coordinates) return;
 
       const altCoords: [number, number][] = alt.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-      const color = alt.color || routeColors[idx % routeColors.length];
+      const color = altRouteColors[altColorIdx++ % altRouteColors.length];
       const divergingSections = getDivergingSections(altCoords, mainCoords);
       if (divergingSections.length === 0) return;
 
@@ -1676,7 +1719,7 @@
       divergingSections.forEach(section => {
         if (section.length < 2) return;
         const rw = getRouteWeight(map.getZoom());
-        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.75, lineCap: 'round', lineJoin: 'round', smoothFactor: 0 }).addTo(map);
+        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.45, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, className: 'route-glow' }).addTo(map);
         const hit = L.polyline(section, { color: 'transparent', weight: 30, opacity: 0 }).addTo(map);
         sectionLayers.push(line, hit);
         alternativeRouteLayers.push(line, hit);
@@ -1734,8 +1777,8 @@
       const allLines = info.sectionLayers.filter((_, i) => i % 2 === 0);
       const allHits = info.sectionLayers.filter((_, i) => i % 2 === 1);
 
-      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.9, weight: 6 })); };
-      const unhighlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.75, weight: 4 })); };
+      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.9 })); };
+      const unhighlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.45 })); };
       const switchHandler = () => { clearAlternativeRouteLayers(); selectRoute(info.idx, startPoint, sortedPoints); };
 
       [...allHits, ...allLines].forEach(layer => { layer.on('click', switchHandler); layer.on('mouseover', highlight); layer.on('mouseout', unhighlight); });
@@ -2005,18 +2048,21 @@
         ...customWaypoints.map(w => `${w.lng},${w.lat}`),
         ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
       ].join(';');
-      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: getExcludeOptions() });
-      if (!data.routes?.[0]?.geometry?.coordinates) {
+      // Single fastest route - no alternatives, just go
+      const exclude = getExcludeOptions();
+      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
+      const mainRoute = data.routes[0];
+      if (!mainRoute?.geometry?.coordinates) {
         showNotification('ข้อมูลเส้นทางไม่ถูกต้อง', 'error');
         return false;
       }
       optimizedRoute = {
-        route: { geometry: data.routes[0].geometry },
-        total_distance: data.routes[0].distance,
-        total_time: data.routes[0].duration,
+        route: { geometry: mainRoute.geometry },
+        total_distance: mainRoute.distance,
+        total_time: mainRoute.duration,
         optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints]
       };
-      turnInstructions = extractTurnInstructions(data.routes[0]);
+      turnInstructions = extractTurnInstructions(mainRoute);
       currentStepIndex = 0;
       lastSpokenStepIndex = -1;
       lastSpokenThreshold = '';
@@ -2024,22 +2070,25 @@
       arrivalProximityAnnounced = false;
       lastArrivalDist = Infinity;
       updateNextTurnInfo();
-      remainingDistance = data.routes[0].distance;
-      remainingTime = data.routes[0].duration;
+      remainingDistance = mainRoute.distance;
+      remainingTime = mainRoute.duration;
       currentTargetIndex = 1;
       arrivedPoints = [0];
       // Re-cache route coordinates after reroute
-      cachedRouteCoords = data.routes[0].geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
+      cachedRouteCoords = mainRoute.geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
       lastRouteIndex = 0;
       lastDrawnRouteIndex = -1;
-      // Reset alternatives to current single route to prevent stale data
+      // Update single route (no alternatives)
+      const hasTolls = detectTollRoad(mainRoute);
+      const tollEstimate = estimateTollCost(mainRoute);
       routeAlternatives = [{
-        index: 0, geometry: data.routes[0].geometry, distance: data.routes[0].distance, duration: data.routes[0].duration,
-        legs: data.routes[0].legs || [], hasTolls: detectTollRoad(data.routes[0]), tollEstimate: estimateTollCost(data.routes[0]),
-        label: 'เส้นทางปัจจุบัน', color: routeColors[0], excludeUsed: getExcludeOptions()
+        index: 0, geometry: mainRoute.geometry, distance: mainRoute.distance, duration: mainRoute.duration,
+        legs: mainRoute.legs || [], hasTolls, tollEstimate,
+        label: 'เส้นทางใหม่', color: routeColors[0], excludeUsed: exclude
       }];
       selectedRouteIndex = 0;
       clearAllRouteLayers();
+      clearNavAlternativeLayers();
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
       isOffRoute = false;
@@ -2050,7 +2099,21 @@
       if (map) {
         map.getContainer().style.transform = 'rotate(0deg)';
       }
-      showNotification('✅ คำนวณเส้นทางใหม่สำเร็จ', 'success');
+      // Build route info notification with toll & incident warnings
+      const distKm = (mainRoute.distance / 1000).toFixed(1);
+      const timeMin = Math.round(mainRoute.duration / 60);
+      let routeInfo = `เส้นทางใหม่: ${distKm} กม. · ${timeMin} นาที`;
+      if (hasTolls) routeInfo += ` · 🚧 ทางด่วน ~฿${tollEstimate}`;
+      else routeInfo += ' · ✅ ไม่มีทางด่วน';
+      // Check for incidents on new route
+      if (incidentsOnRoute.length > 0) {
+        routeInfo += ` · ⚠️ ${incidentsOnRoute.length} เหตุการณ์บนเส้นทาง`;
+      }
+      showNotification(routeInfo, hasTolls || incidentsOnRoute.length > 0 ? 'warning' : 'success');
+      let speakText = `คำนวณเส้นทางใหม่ ระยะทาง ${distKm} กิโลเมตร ${timeMin} นาที`;
+      speakText += hasTolls ? ' มีทางด่วน' : ' ไม่มีทางด่วน';
+      if (incidentsOnRoute.length > 0) speakText += ` มี ${incidentsOnRoute.length} เหตุการณ์บนเส้นทาง`;
+      speak(speakText);
       return true;
     } catch (err) {
       console.error('Auto reroute error:', err);
@@ -2879,8 +2942,6 @@
       speak(`มุ่งหน้าไปยัง ${firstTarget.name}`);
     }
 
-    // Show faded alternative routes on the map (clickable to switch)
-    displayNavAlternatives();
     lastDeliveryUndo = null;
 
     setTimeout(() => { map.invalidateSize(); }, 100);
@@ -2958,20 +3019,33 @@
 
     isMapFollowing = true;
 
-    // คำนวณเส้นทางใหม่จากตำแหน่งปัจจุบันหลังหยุดนำทาง
-    if (allDeliveryPoints.length > 0) {
-      showNotification('กำลังคำนวณเส้นทางใหม่...', 'success');
-      try {
-        await optimizeRoute();
-      } catch (err) {
-        console.error('Recalculate after stop failed:', err);
-        if (optimizedRoute) displayOptimizedRoute();
-        showNotification('หยุดนำทางแล้ว (คำนวณใหม่ไม่สำเร็จ)', 'warning');
-      }
-    } else {
-      if (optimizedRoute) displayOptimizedRoute();
-      showNotification('หยุดนำทางแล้ว', 'success');
+    clearRoute();
+    clearAlternativeRouteLayers();
+    routeAlternatives = [];
+    showRouteSelector = false;
+    showRouteComparison = false;
+
+    // Show current location blue dot after stopping
+    if (currentLocation && map) {
+      currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
+        icon: L.divIcon({
+          className: '',
+          html: `
+            <div class="my-loc-wrapper">
+              <div class="loc-pulse-ring"></div>
+              <div class="loc-pulse-ring loc-pulse-ring-2"></div>
+              <div class="my-loc-dot"></div>
+            </div>
+          `,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        }),
+        zIndexOffset: 1000,
+        interactive: false
+      }).addTo(map);
+      map.setView([currentLocation.lat, currentLocation.lng], 16);
     }
+    showNotification('หยุดนำทางแล้ว', 'success');
   }
 
   // ===== Smooth 60fps interpolation + route prediction (better than Google Maps) =====
@@ -3914,23 +3988,28 @@
         ...sortedPoints.map((p: any) => `${p.lng},${p.lat}`)
       ].join(';');
 
-      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: getExcludeOptions() });
+      // Single fastest route - no alternatives
+      const exclude = getExcludeOptions();
+      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
+      const mainRoute = data.routes[0];
+      if (!mainRoute?.geometry?.coordinates) throw new Error('No route');
 
       optimizedRoute = {
-        route: { geometry: data.routes[0].geometry },
-        total_distance: data.routes[0].distance,
-        total_time: data.routes[0].duration,
+        route: { geometry: mainRoute.geometry },
+        total_distance: mainRoute.distance,
+        total_time: mainRoute.duration,
         optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints]
       };
-      // Reset alternatives to current single route
+      const hasTolls = detectTollRoad(mainRoute);
+      const tollEstimate = estimateTollCost(mainRoute);
       routeAlternatives = [{
-        index: 0, geometry: data.routes[0].geometry, distance: data.routes[0].distance, duration: data.routes[0].duration,
-        legs: data.routes[0].legs || [], hasTolls: detectTollRoad(data.routes[0]), tollEstimate: estimateTollCost(data.routes[0]),
-        label: 'เส้นทางปัจจุบัน', color: routeColors[0], excludeUsed: getExcludeOptions()
+        index: 0, geometry: mainRoute.geometry, distance: mainRoute.distance, duration: mainRoute.duration,
+        legs: mainRoute.legs || [], hasTolls, tollEstimate,
+        label: 'เส้นทางใหม่', color: routeColors[0], excludeUsed: exclude
       }];
       selectedRouteIndex = 0;
       // อัพเดท turn-by-turn instructions จากเส้นทางใหม่
-      turnInstructions = extractTurnInstructions(data.routes[0]);
+      turnInstructions = extractTurnInstructions(mainRoute);
       currentStepIndex = 0;
       lastSpokenStepIndex = -1;
       lastSpokenThreshold = '';
@@ -3939,17 +4018,18 @@
       lastArrivalDist = Infinity;
       updateNextTurnInfo();
 
-      remainingDistance = data.routes[0].distance;
-      remainingTime = data.routes[0].duration;
+      remainingDistance = mainRoute.distance;
+      remainingTime = mainRoute.duration;
       currentTargetIndex = 1;
       arrivedPoints = [0];
 
       // Re-cache route coordinates for the new route
-      cachedRouteCoords = data.routes[0].geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
+      cachedRouteCoords = mainRoute.geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
       lastRouteIndex = 0;
       lastDrawnRouteIndex = -1;
 
       clearAllRouteLayers();
+      clearNavAlternativeLayers();
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
       // Stay centered on user (don't jump to target)
@@ -3961,9 +4041,6 @@
       if (nextTarget) {
         speak(`มุ่งหน้าไปยัง ${nextTarget.name}`);
       }
-      // Redraw nav alternatives
-      clearNavAlternativeLayers();
-      displayNavAlternatives();
     } catch (err) {
       console.error('Error recalculating route:', err);
       currentTargetIndex = 1;
@@ -5207,9 +5284,17 @@ out center body;`;
     return null;
   }
 
+  let isQuickAdding = false;
   async function confirmQuickAdd() {
-    if (!quickAddResult || !currentUser?.id) return;
-
+    if (isQuickAdding || !quickAddResult || !currentUser?.id) return;
+    // Duplicate check
+    const dup = deliveryPoints.find(p => Math.abs(p.lat - quickAddResult.lat) < 0.0001 && Math.abs(p.lng - quickAddResult.lng) < 0.0001);
+    if (dup) {
+      showNotification(`จุด "${dup.name}" อยู่ตำแหน่งเดียวกันแล้ว`, 'warning');
+      closeQuickAdd();
+      return;
+    }
+    isQuickAdding = true;
     try {
       const payload = {
         user_id: currentUser.id,
@@ -5238,6 +5323,7 @@ out center body;`;
     } catch (err) {
       showNotification('เพิ่มจุดไม่สำเร็จ', 'error');
     } finally {
+      isQuickAdding = false;
       closeQuickAdd();
     }
   }
@@ -5673,10 +5759,11 @@ out center body;`;
       map.on('click', (e: any) => {
         if (isNavigating) return;
         if (!addPointMode) return;
-        if (clickMarker) clickMarker.remove();
-        newPoint.lat = parseFloat(e.latlng.lat.toFixed(6));
-        newPoint.lng = parseFloat(e.latlng.lng.toFixed(6));
-        clickMarker = L.marker([e.latlng.lat, e.latlng.lng], {
+        if (clickMarker) { try { clickMarker.remove(); } catch(_){} clickMarker = null; }
+        const lat = parseFloat(e.latlng.lat.toFixed(6));
+        const lng = parseFloat(e.latlng.lng.toFixed(6));
+        newPoint = { ...newPoint, lat, lng };
+        clickMarker = L.marker([lat, lng], {
           icon: L.divIcon({ className: 'click-marker', html: `<div class="pulse-marker"></div>`, iconSize: [48, 48], iconAnchor: [24, 24] })
         }).addTo(map);
         showAddForm = true;
@@ -6003,7 +6090,7 @@ out center body;`;
             <span>ยกเลิก</span>
             <kbd>Esc</kbd>
           </button>
-          <button class="btn btn-primary" on:click={confirmQuickAdd} disabled={!quickAddResult || quickAddLoading}>
+          <button class="btn btn-primary" on:click={confirmQuickAdd} disabled={!quickAddResult || quickAddLoading || isQuickAdding}>
             <span>เพิ่มจุดนี้</span>
             <kbd>Enter</kbd>
           </button>
@@ -6441,7 +6528,7 @@ out center body;`;
             <div class="coord-input"><label>Longitude</label><input type="text" value={newPoint.lng} readonly /></div>
           </div>
           <div class="form-actions">
-            <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>บันทึก</button>
+            <button type="submit" class="btn btn-primary" disabled={isAddingPoint}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>{isAddingPoint ? 'กำลังเพิ่ม...' : 'บันทึก'}</button>
             <button type="button" class="btn btn-ghost" on:click={cancelAddForm}>ยกเลิก</button>
           </div>
         </form>
@@ -8617,7 +8704,7 @@ out center body;`;
   
   /* Add Point Toggle - Top Left below stats */
   .add-point-toggle {
-    position: absolute; top: 70px; left: 16px; z-index: 1001;
+    position: absolute; top: 120px; left: 16px; z-index: 1001;
     display: flex; align-items: center; gap: 6px;
     padding: 8px 14px; border-radius: 10px;
     border: 1px solid rgba(255,255,255,0.08);
@@ -8845,26 +8932,17 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 120px;
-    height: 120px;
-    top: 50%;
-    left: 50%;
-    margin-top: -60px;
-    margin-left: -60px;
-    transform-origin: center center;
-    background: conic-gradient(
-      from 150deg at 50% 50%,
-      transparent 0deg,
-      rgba(0, 255, 136, 0.04) 10deg,
-      rgba(0, 255, 136, 0.12) 25deg,
-      rgba(0, 255, 136, 0.2) 30deg,
-      rgba(0, 255, 136, 0.12) 35deg,
-      rgba(0, 255, 136, 0.04) 50deg,
-      transparent 60deg
-    );
-    -webkit-mask: radial-gradient(circle at 50% 50%, transparent 10%, black 16%, black 55%, transparent 70%);
-    mask: radial-gradient(circle at 50% 50%, transparent 10%, black 16%, black 55%, transparent 70%);
-    border-radius: 50%;
+    width: 0; height: 0;
+    top: 50%; left: 50%;
+    transform-origin: 0 0;
+    border-left: 28px solid transparent;
+    border-right: 28px solid transparent;
+    border-bottom: 80px solid rgba(0, 255, 136, 0.25);
+    margin-left: -28px;
+    margin-top: -80px;
+    filter: blur(6px);
+    -webkit-mask: linear-gradient(to top, transparent 0%, black 30%, black 100%);
+    mask: linear-gradient(to top, transparent 0%, black 30%, black 100%);
     pointer-events: none;
     transition: transform 0.3s ease, opacity 0.3s;
     z-index: 5;
@@ -10371,6 +10449,9 @@ out center body;`;
 :global(.route-flow-line) { animation: route-flow 1.5s linear infinite; }
 @keyframes route-flow { to { stroke-dashoffset: -32; } }
 
+/* Alt Route Glow */
+:global(.route-glow) { filter: drop-shadow(0 0 6px currentColor) drop-shadow(0 0 2px currentColor); }
+
 /* Route Selector Overlay */
 .route-selector-overlay {
   position: fixed;
@@ -10639,6 +10720,20 @@ out center body;`;
   color: #b0b5bf;
   line-height: 1.3;
   font-weight: 500;
+}
+:global(.nav-alt-toll) {
+  display: block;
+  font-size: 9px;
+  color: #ffa502;
+  font-weight: 600;
+  margin-top: 2px;
+}
+:global(.nav-alt-free) {
+  display: block;
+  font-size: 9px;
+  color: #00ff88;
+  font-weight: 500;
+  margin-top: 2px;
 }
 
 /* Custom Waypoint Markers */
