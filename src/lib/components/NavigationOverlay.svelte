@@ -155,7 +155,7 @@
       <div class="nav-actions">
         <button class="nav-btn nav-btn-success" on:click={onMarkDeliverySuccess} disabled={isProcessingDelivery}>
           {#if isProcessingDelivery}<div class="spinner-small"></div>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>{/if}
-          ถึงแล้ว
+          ถึงจุดหมาย
         </button>
         <button class="nav-btn nav-btn-skip" on:click={onSkipToNextPoint} disabled={isProcessingDelivery}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>

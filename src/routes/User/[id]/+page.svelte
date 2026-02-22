@@ -320,21 +320,6 @@
       .sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
   }
 
-  function getCheapestStation(): { label: string; price: string } | null {
-    const prices = getAllStationPrices();
-    return prices.length > 0 ? prices[0] : null;
-  }
-
-  function getSelectedFuelName(): string {
-    const fuel = fuelTypeOptions.find(f => f.value === selectedFuelType);
-    return fuel?.label || 'แก๊สโซฮอล์ 95';
-  }
-
-  function getSelectedStationName(): string {
-    const station = stationOptions.find(s => s.value === selectedStation);
-    return station?.label || 'ปตท.';
-  }
-
   // Fuel estimation
   let fuelConsumption = 0;
   let fuelCostEstimate = 0;
@@ -906,7 +891,7 @@
     const seenKeys = new Set<string>();
 
     function addIfUnique(route: any, label: string, color: string, excludeUsed: string[]) {
-      const key = `${Math.round(route.distance / 500)}-${Math.round(route.duration / 60)}`;
+      const key = `${Math.round(route.distance / 200)}-${Math.round(route.duration / 30)}`;
       if (!seenKeys.has(key)) {
         seenKeys.add(key);
         allRoutes.push({ ...route, _label: label, _color: color, _exclude: excludeUsed });
@@ -1407,18 +1392,6 @@
 
   // ==================== MANUAL WAYPOINT (จุดผ่านทาง) ====================
 
-  function toggleWaypointMode() {
-    isAddingWaypoint = !isAddingWaypoint;
-    if (isAddingWaypoint) {
-      showNotification('แตะบนแผนที่เพื่อเพิ่มจุดผ่านทาง', 'success');
-      map.getContainer().style.cursor = 'crosshair';
-      map.on('click', onMapClickWaypoint);
-    } else {
-      map.getContainer().style.cursor = '';
-      map.off('click', onMapClickWaypoint);
-    }
-  }
-
   function onMapClickWaypoint(e: any) {
     const { lat, lng } = e.latlng;
     addCustomWaypoint(lat, lng);
@@ -1491,22 +1464,6 @@
     });
   }
 
-  function clearAllCustomWaypoints() {
-    customWaypointMarkers.forEach(entry => {
-      try { map.removeLayer(entry.marker); } catch (e) {}
-    });
-    customWaypoints = [];
-    customWaypointMarkers = [];
-    nextWaypointId = 1;
-    if (isAddingWaypoint) {
-      isAddingWaypoint = false;
-      map.getContainer().style.cursor = '';
-      map.off('click', onMapClickWaypoint);
-    }
-    recalculateRouteFromCurrentPosition();
-    showNotification('ล้างจุดผ่านทางทั้งหมดแล้ว', 'success');
-  }
-
   async function recalculateWithWaypoints() {
     if (!currentLocation || !optimizedRoute || isRecalculatingRoute) return;
     isRecalculatingRoute = true;
@@ -1539,6 +1496,13 @@
           ...remainingDeliveryPoints
         ]
       };
+      // Reset alternatives to current single route
+      routeAlternatives = [{
+        index: 0, geometry: data.routes[0].geometry, distance: data.routes[0].distance, duration: data.routes[0].duration,
+        legs: data.routes[0].legs || [], hasTolls: detectTollRoad(data.routes[0]), tollEstimate: estimateTollCost(data.routes[0]),
+        label: 'เส้นทางปัจจุบัน', color: routeColors[0], excludeUsed: getExcludeOptions()
+      }];
+      selectedRouteIndex = 0;
 
       turnInstructions = extractTurnInstructions(data.routes[0]);
       currentStepIndex = 0;
@@ -2068,6 +2032,13 @@
       cachedRouteCoords = data.routes[0].geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
       lastRouteIndex = 0;
       lastDrawnRouteIndex = -1;
+      // Reset alternatives to current single route to prevent stale data
+      routeAlternatives = [{
+        index: 0, geometry: data.routes[0].geometry, distance: data.routes[0].distance, duration: data.routes[0].duration,
+        legs: data.routes[0].legs || [], hasTolls: detectTollRoad(data.routes[0]), tollEstimate: estimateTollCost(data.routes[0]),
+        label: 'เส้นทางปัจจุบัน', color: routeColors[0], excludeUsed: getExcludeOptions()
+      }];
+      selectedRouteIndex = 0;
       clearAllRouteLayers();
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
@@ -2380,8 +2351,8 @@
       }
       selectRoute(bestIdx, _lastStartPoint, _lastSortedPoints);
     }
-    // If we have delivery points but no route yet, calculate
-    else if (allDeliveryPoints.length > 0 && !optimizedRoute) {
+    // If we have delivery points, recalculate route with new preferences
+    else if (allDeliveryPoints.length > 0) {
       optimizeRoute();
     }
   }
@@ -3280,18 +3251,6 @@
     return 18;                       // walking/stopped
   }
 
-  // Toggle map follow mode
-  function toggleMapFollow() {
-    isMapFollowing = !isMapFollowing;
-    if (isMapFollowing && map) {
-      if (isNavigating && animReady) {
-        map.panTo([animCurrentLat, animCurrentLng], { animate: true, duration: 0.3 });
-      } else if (currentLocation) {
-        map.panTo([currentLocation.lat, currentLocation.lng], { animate: true, duration: 0.5 });
-      }
-    }
-  }
-
   function handleGeoError(error: GeolocationPositionError) {
     console.error('GPS Error:', error);
     let msg = 'ไม่สามารถระบุตำแหน่งได้';
@@ -3534,28 +3493,6 @@
     }
   }
 
-  function getArrivalClockTime(): string {
-    if (!remainingTime || remainingTime <= 0) return '--:--';
-    const arrival = new Date(Date.now() + remainingTime * 1000);
-    return arrival.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-  }
-
-  // --- Current Road Name ---
-  function updateCurrentRoadName() {
-    if (!turnInstructions.length || currentStepIndex >= turnInstructions.length) { currentRoadName = ''; return; }
-    const step = turnInstructions[currentStepIndex];
-    currentRoadName = step?.name || '';
-  }
-
-  // --- Compass ---
-  function updateCompass() {
-    if (currentHeading !== null && currentHeading !== undefined && !isNaN(currentHeading)) {
-      compassHeading = currentHeading;
-      const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-      compassDir = dirs[Math.round(compassHeading / 45) % 8];
-    }
-  }
-
   // Progressive search: only search near last known index (O(1) amortized instead of O(n))
   // Forward-biased: route index only moves forward unless GPS jumps significantly backward
   function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
@@ -3647,6 +3584,7 @@
         `;
         const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: `data=${encodeURIComponent(overpassQuery)}`
         });
         if (overpassRes.ok) {
@@ -3901,19 +3839,6 @@
     incidentMarkers = [];
   }
 
-  function checkIncidentsOnRoute() {
-    // All fetched incidents are already on route, just update the count
-    incidentsOnRoute = trafficIncidents;
-
-    if (incidentsOnRoute.length > 0 && isNavigating) {
-      const criticalCount = incidentsOnRoute.filter(i => i.severity === 'critical' || i.severity === 'major').length;
-      if (criticalCount > 0) {
-        speak(`แจ้งเตือน: มี ${criticalCount} เหตุการณ์สำคัญบนเส้นทาง`);
-        showNotification(`⚠️ มี ${criticalCount} เหตุการณ์สำคัญบนเส้นทาง!`, 'warning');
-      }
-    }
-  }
-
   function toggleIncidentsPanel() {
     showIncidentsPanel = !showIncidentsPanel;
     if (showIncidentsPanel && (!lastIncidentFetch || Date.now() - lastIncidentFetch.getTime() > 300000)) {
@@ -3997,6 +3922,13 @@
         total_time: data.routes[0].duration,
         optimized_order: [{ ...currentLocation, name: 'ตำแหน่งปัจจุบัน', address: 'ตำแหน่งของคุณ', id: -1 }, ...sortedPoints]
       };
+      // Reset alternatives to current single route
+      routeAlternatives = [{
+        index: 0, geometry: data.routes[0].geometry, distance: data.routes[0].distance, duration: data.routes[0].duration,
+        legs: data.routes[0].legs || [], hasTolls: detectTollRoad(data.routes[0]), tollEstimate: estimateTollCost(data.routes[0]),
+        label: 'เส้นทางปัจจุบัน', color: routeColors[0], excludeUsed: getExcludeOptions()
+      }];
+      selectedRouteIndex = 0;
       // อัพเดท turn-by-turn instructions จากเส้นทางใหม่
       turnInstructions = extractTurnInstructions(data.routes[0]);
       currentStepIndex = 0;
@@ -4084,14 +4016,6 @@
       const energyUsedPercent = ((evTripEnergyUsed + evEnergyConsumption) / evBatteryCapacity) * 100;
       evBatteryAfterTrip = Math.max(0, evCurrentCharge - energyUsedPercent);
     }
-  }
-
-  function getCostEstimate(): number {
-    return vehicleType === 'fuel' ? fuelCostEstimate : evCostEstimate;
-  }
-
-  function getCostLabel(): string {
-    return vehicleType === 'fuel' ? 'ค่าน้ำมัน' : 'ค่าไฟฟ้า';
   }
 
   function getCostIcon(): string {
@@ -4287,14 +4211,6 @@
     displayChargingStationMarkers();
   }
 
-  async function smartOptimizeRoute() {
-    if (vehicleType === 'ev') {
-      await optimizeEVRoute();
-    } else {
-      await optimizeRoute();
-    }
-  }
-
   // Speed-dependent EV consumption model (physics-based)
   function getEVConsumptionAtSpeed(speedKmh: number): number {
     return _getEVConsumptionAtSpeed(speedKmh, KWH_PER_100KM);
@@ -4308,10 +4224,6 @@
     if (evCurrentCharge > 50) return '#00ff88';
     if (evCurrentCharge > 20) return '#ffa502';
     return '#ff6b6b';
-  }
-
-  function isEVRangeSufficient(): boolean {
-    return evRemainingRange >= (remainingDistance / 1000);
   }
 
   function saveVehicleSettings() {
@@ -4590,6 +4502,7 @@ out center body;`;
 
       const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `data=${encodeURIComponent(query)}`,
         signal, timeout: 30000
       });
@@ -4684,6 +4597,7 @@ out center body;`;
       const query = `[out:json][timeout:15];node["amenity"="charging_station"](${minLat},${minLng},${maxLat},${maxLng});out body;`;
       const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `data=${encodeURIComponent(query)}`,
         signal, timeout: 20000
       });
@@ -5690,6 +5604,7 @@ out center body;`;
 
       map = L.map('map', {
         zoomControl: false,
+        attributionControl: false,
         preferCanvas: true,
         zoomSnap: 1,
         wheelDebounceTime: 80
@@ -6253,11 +6168,21 @@ out center body;`;
           <div class="collapsed-summary">
             <div class="cs-stat"><span class="cs-val">{(optimizedRoute.total_distance/1000).toFixed(1)}</span><span class="cs-unit">กม.</span></div>
             <div class="cs-divider"></div>
-            <div class="cs-stat"><span class="cs-val">{Math.round(optimizedRoute.total_time/60)}</span><span class="cs-unit">นาที</span></div>
+            <div class="cs-stat">
+              {#if optimizedRoute.total_time >= 3600}
+                <span class="cs-val">{Math.floor(optimizedRoute.total_time / 3600)}:{String(Math.round((optimizedRoute.total_time % 3600) / 60)).padStart(2, '0')}</span><span class="cs-unit">ชม.</span>
+              {:else}
+                <span class="cs-val">{Math.round(optimizedRoute.total_time/60)}</span><span class="cs-unit">นาที</span>
+              {/if}
+            </div>
             <div class="cs-divider"></div>
-            <div class="cs-stat"><span class="cs-val">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length}</span><span class="cs-unit">จุดแวะ</span></div>
+            <div class="cs-stat"><span class="cs-val">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length}</span><span class="cs-unit">จุด</span></div>
             <div class="cs-divider"></div>
-            <div class="cs-stat">{#if vehicleType === 'fuel'}<span class="cs-val cs-cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span>{:else}<span class="cs-val cs-cost">฿{Math.round(evCostEstimate)}</span>{/if}<span class="cs-unit">ค่าใช้จ่าย</span></div>
+            <div class="cs-stat">{#if vehicleType === 'fuel'}<span class="cs-val cs-cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span><span class="cs-unit">น้ำมัน</span>{:else}<span class="cs-val cs-cost">฿{Math.round(evCostEstimate)}</span><span class="cs-unit">ค่าไฟ</span>{/if}</div>
+            {#if tollCostEstimate > 0}
+              <div class="cs-divider"></div>
+              <div class="cs-stat"><span class="cs-val cs-cost">฿{Math.round(tollCostEstimate)}</span><span class="cs-unit">ค่าผ่านทาง</span></div>
+            {/if}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cs-arrow"><path d="M6 9l6 6 6-6"/></svg>
           </div>
         {:else}
@@ -6668,7 +6593,7 @@ out center body;`;
     <div id="map"></div>
 
     {#if !isNavigating && !isSearchFocused && !directDestination}
-      <div class="map-stats glass-card">
+      <div class="map-stats glass-card" class:route-active={optimizedRoute}>
         <div class="map-stat"><span class="map-stat-value">{deliveryPoints.length}</span><span class="map-stat-label">จุดแวะ</span></div>
         <div class="map-stat"><span class="map-stat-value">{getSuccessCount()}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
         <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
@@ -6687,56 +6612,12 @@ out center body;`;
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
     {/if}
 
-    <!-- Floating Route Summary (mobile) -->
+    <!-- Floating Navigate Button (mobile) -->
     {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination && !showIncidentsPanel}
-      <div class="map-route-summary glass-card">
-        <div class="mrs-stats">
-          <div class="mrs-stat">
-            <span class="mrs-value">{(optimizedRoute.total_distance / 1000).toFixed(1)}</span>
-            <span class="mrs-unit">กม.</span>
-          </div>
-          <div class="mrs-divider"></div>
-          <div class="mrs-stat">
-            {#if optimizedRoute.total_time >= 3600}
-              <span class="mrs-value">{Math.floor(optimizedRoute.total_time / 3600)}:{String(Math.round((optimizedRoute.total_time % 3600) / 60)).padStart(2, '0')}</span>
-              <span class="mrs-unit">ชม.</span>
-            {:else}
-              <span class="mrs-value">{Math.round(optimizedRoute.total_time / 60)}</span>
-              <span class="mrs-unit">นาที</span>
-            {/if}
-          </div>
-          <div class="mrs-divider"></div>
-          <div class="mrs-stat">
-            <span class="mrs-value">{optimizedRoute.optimized_order.filter((p) => p.id !== -1).length}</span>
-            <span class="mrs-unit">จุด</span>
-          </div>
-          <div class="mrs-divider"></div>
-          <div class="mrs-stat">
-            {#if vehicleType === 'fuel'}
-              <span class="mrs-value cost">฿{Math.round((optimizedRoute.total_distance / 1000) / KM_PER_LITER * currentFuelPrice)}</span>
-              <span class="mrs-unit">น้ำมัน</span>
-            {:else}
-              <span class="mrs-value cost">฿{Math.round(evCostEstimate)}</span>
-              <span class="mrs-unit">ค่าไฟ</span>
-            {/if}
-          </div>
-          {#if tollCostEstimate > 0}
-            <div class="mrs-divider"></div>
-            <div class="mrs-stat">
-              <span class="mrs-value cost">฿{Math.round(tollCostEstimate)}</span>
-              <span class="mrs-unit">ค่าผ่านทาง</span>
-            </div>
-          {/if}
-        </div>
-        <div class="mrs-actions">
-          <button class="mrs-btn start" on:click={() => { if (allDeliveryPoints.length > 0) startNavigation(); }} title="เริ่มนำทาง">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
-          </button>
-          <button class="mrs-btn clear" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }} title="ล้างเส้นทาง">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
-        </div>
-      </div>
+      <button class="map-nav-btn glass-card" on:click={() => { if (allDeliveryPoints.length > 0) startNavigation(); }} title="เริ่มนำทาง">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
+        <span>นำทาง</span>
+      </button>
     {/if}
 
     <!-- ==================== FLOATING PANELS ON MAP ==================== -->
@@ -9131,6 +9012,7 @@ out center body;`;
       transition: all 0.15s;
     }
     .sidebar-header .icon-btn:active { background: rgba(0,255,136,0.15); transform: scale(0.9); }
+    .sidebar-header .keyboard-help-btn { display: none; }
 
     .sidebar-scroll {
       flex: 1; overflow-y: auto; overflow-x: hidden;
@@ -9330,95 +9212,42 @@ out center body;`;
     /* Map overlays */
     .add-point-toggle { top: 80px; left: 8px; padding: 6px 10px; font-size: 11px; border-radius: 8px; }
     .add-point-toggle svg { width: 14px; height: 14px; }
-    .map-stats { position: absolute; top: 118px; bottom: auto; left: 8px; right: auto; width: auto; flex-wrap: nowrap; gap: 0; padding: 2px 4px; z-index: 1000; border-radius: 6px; }
+    .map-stats { position: absolute; top: 118px; bottom: auto; left: 8px; right: auto; width: auto; flex-wrap: nowrap; gap: 0; padding: 2px 4px; z-index: 1000; border-radius: 6px; transition: top 0.3s ease; }
+    .map-stats.route-active { top: 68px; }
     .map-stat { padding: 1px 4px; }
     .map-stat-value { font-size: 10px; font-weight: 600; }
     .map-stat-label { font-size: 6px; letter-spacing: 0; }
     .map-stat.weather .map-stat-value { font-size: 10px; }
     .map-info { display: none; }
 
-    /* Floating Route Summary - mobile */
-    .map-route-summary {
-      display: flex;
+    /* Floating Navigate Button - mobile */
+    .map-nav-btn {
       position: absolute;
-      bottom: 70px;
+      bottom: 50px;
       left: 10px;
-      right: 52px;
       z-index: 1002;
-      padding: 4px 22px;
-      border-radius: 9999px;
+      display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 4px;
+      gap: 6px;
+      padding: 10px 18px;
+      border-radius: 9999px;
+      border: none;
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8) !important;
+      color: white;
+      font-family: 'Kanit', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.4);
+      transition: all 0.2s ease;
       animation: mrsSlideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1);
     }
+    .map-nav-btn:active { transform: scale(0.95); }
+    .map-nav-btn svg { width: 16px; height: 16px; }
     @keyframes mrsSlideUp {
       from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
     }
-    .mrs-stats {
-      display: flex;
-      align-items: center;
-      gap: 0;
-      flex: 1;
-      min-width: 0;
-    }
-    .mrs-stat {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      flex: 1;
-      min-width: 0;
-    }
-    .mrs-value {
-      font-size: 11px;
-      font-weight: 700;
-      color: #00ff88;
-      font-family: 'JetBrains Mono', monospace;
-      line-height: 1;
-      letter-spacing: -0.3px;
-    }
-    .mrs-value.cost { color: #fbbf24; }
-    .mrs-unit {
-      font-size: 7px;
-      color: #71717a;
-      margin-top: 1px;
-      letter-spacing: 0.2px;
-    }
-    .mrs-divider {
-      width: 1px;
-      height: 16px;
-      background: rgba(255,255,255,0.06);
-      flex-shrink: 0;
-    }
-    .mrs-actions {
-      display: flex;
-      gap: 4px;
-      flex-shrink: 0;
-    }
-    .mrs-btn {
-      width: 24px;
-      height: 24px;
-      border-radius: 9999px;
-      border: none;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .mrs-btn svg { width: 13px; height: 13px; }
-    .mrs-btn.start {
-      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-      color: white;
-    }
-    .mrs-btn.start:hover { transform: scale(1.08); }
-    .mrs-btn.clear {
-      background: rgba(255,255,255,0.06);
-      color: #71717a;
-    }
-    .mrs-btn.clear:hover { background: rgba(239,68,68,0.15); color: #f87171; }
-
     /* ===== Navigation Mode Mobile ===== */
     .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
 
@@ -10545,179 +10374,6 @@ out center body;`;
 :global(.route-flow-line) { animation: route-flow 1.5s linear infinite; }
 @keyframes route-flow { to { stroke-dashoffset: -32; } }
 
-/* Celebration Overlay */
-.celebration-overlay {
-  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  z-index: 10000; pointer-events: none;
-  display: flex; align-items: center; justify-content: center;
-  animation: celebration-fade 3s ease forwards;
-}
-.celebration-content { text-align: center; position: relative; }
-.celebration-confetti { position: absolute; top: 50%; left: 50%; width: 0; height: 0; }
-.confetti-piece {
-  position: absolute; width: 8px; height: 8px; border-radius: 2px;
-  background: var(--color); opacity: 0;
-  animation: confetti-burst 2s ease-out calc(var(--i) * 0.05s) forwards;
-}
-.celebration-check {
-  width: 80px; height: 80px; margin: 0 auto 16px;
-  background: rgba(0, 255, 136, 0.15); border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  animation: check-pop 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-}
-.celebration-check svg { width: 44px; height: 44px; }
-.check-path { stroke-dasharray: 30; stroke-dashoffset: 30; animation: check-draw 0.6s ease 0.3s forwards; }
-.celebration-text { font-family: 'Kanit', sans-serif; font-size: 24px; font-weight: 700; color: #00ff88; text-shadow: 0 2px 20px rgba(0, 255, 136, 0.4); }
-.celebration-name { font-family: 'Kanit', sans-serif; font-size: 14px; color: #a1a1aa; margin-top: 4px; }
-
-@keyframes celebration-fade { 0% { opacity: 0; } 10% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }
-@keyframes check-pop { 0% { transform: scale(0); } 100% { transform: scale(1); } }
-@keyframes check-draw { to { stroke-dashoffset: 0; } }
-@keyframes confetti-burst {
-  0% { transform: translate(0, 0) rotate(0deg); opacity: 1; }
-  100% {
-    transform: translate(
-      calc(cos(calc(var(--i) * 18deg)) * 150px),
-      calc(sin(calc(var(--i) * 18deg)) * 150px - 50px)
-    ) rotate(calc(var(--i) * 90deg));
-    opacity: 0;
-  }
-}
-
-/* Driving Score Card */
-.driving-score-card {
-  position: relative; width: 64px; height: 64px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-}
-.score-ring { width: 60px; height: 60px; position: absolute; }
-.score-text { text-align: center; z-index: 1; }
-.score-number { font-size: 18px; font-weight: 800; font-family: 'JetBrains Mono', monospace; line-height: 1; }
-.score-label { font-size: 8px; color: #a1a1aa; margin-top: 1px; }
-
-/* Break Reminder */
-.break-reminder-overlay {
-  position: fixed; inset: 0; z-index: 3000;
-  background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px);
-  display: flex; align-items: center; justify-content: center;
-}
-.break-reminder { padding: 30px; text-align: center; max-width: 340px; }
-.break-icon { font-size: 48px; margin-bottom: 12px; }
-.break-title { font-size: 20px; font-weight: 700; color: #e4e4e7; margin-bottom: 6px; }
-.break-subtitle { font-size: 13px; color: #a1a1aa; margin-bottom: 20px; line-height: 1.5; }
-.break-actions { display: flex; gap: 10px; }
-.break-btn { flex: 1; padding: 12px; border: none; border-radius: 12px; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 600; cursor: pointer; }
-.break-btn-rest { background: #00ff88; color: #0a0a0a; }
-.break-btn-dismiss { background: rgba(255, 255, 255, 0.1); color: #a1a1aa; }
-
-/* Hazard Menu */
-.hazard-menu {
-  position: absolute; bottom: 220px; right: 20px;
-  padding: 16px; z-index: 1100; width: 200px;
-}
-.hazard-menu-title { font-size: 13px; font-weight: 600; color: #e4e4e7; margin-bottom: 10px; text-align: center; }
-.hazard-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
-.hazard-option {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 10px 4px; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03); cursor: pointer; color: #e4e4e7;
-  font-family: 'Kanit', sans-serif; font-size: 10px; transition: all 0.15s;
-}
-.hazard-option:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.15); }
-.hazard-close { width: 100%; padding: 8px; border: none; border-radius: 8px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-family: 'Kanit', sans-serif; font-size: 12px; cursor: pointer; }
-:global(.hazard-marker-container) { background: none !important; border: none !important; }
-:global(.hazard-marker) {
-  width: 34px; height: 34px; border-radius: 50%;
-  background: rgba(245, 158, 11, 0.9); display: flex; align-items: center; justify-content: center;
-  font-size: 16px; box-shadow: 0 2px 10px rgba(245, 158, 11, 0.5);
-  animation: hazard-pulse 2s ease-in-out infinite;
-}
-@keyframes hazard-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
-
-/* Nav button hazard */
-.nav-btn-hazard { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-.nav-btn-hazard:hover { background: rgba(245, 158, 11, 0.25); }
-
-/* Trip Summary Modal */
-.trip-summary-overlay {
-  position: fixed; inset: 0; z-index: 5000;
-  background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(6px);
-  display: flex; align-items: center; justify-content: center;
-  animation: fade-in 0.3s ease;
-}
-.trip-summary-card {
-  background: rgba(20, 20, 32, 0.98); border-radius: 20px;
-  padding: 28px; width: 90%; max-width: 380px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  animation: slide-up 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-}
-.trip-summary-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
-.trip-score-circle { position: relative; width: 70px; height: 70px; flex-shrink: 0; }
-.trip-score-circle svg { width: 100%; height: 100%; }
-.trip-score-num {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 24px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
-  color: var(--score-color, #00ff88);
-}
-.trip-header-title { font-size: 18px; font-weight: 700; color: #e4e4e7; }
-.trip-header-label { font-size: 13px; font-weight: 600; margin-top: 2px; }
-.trip-stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
-.trip-stat { text-align: center; padding: 12px 6px; background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.06); }
-.trip-stat-val { font-size: 22px; font-weight: 800; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; }
-.trip-stat-lbl { font-size: 10px; color: #71717a; margin-top: 2px; }
-.trip-details { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
-.trip-detail-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 8px;
-  font-size: 13px; color: #a1a1aa;
-}
-.trip-detail-val { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
-.trip-close-btn {
-  width: 100%; padding: 14px; border: none; border-radius: 14px;
-  background: linear-gradient(135deg, #00ff88, #00cc6a); color: #0a0a0a;
-  font-family: 'Kanit', sans-serif; font-size: 15px; font-weight: 700;
-  cursor: pointer; transition: all 0.2s;
-}
-.trip-close-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0, 255, 136, 0.3); }
-
-@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slide-up { from { opacity: 0; transform: translateY(30px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
-
-/* Current Road Name */
-.current-road-bar {
-  position: absolute; top: 90px; left: 50%; transform: translateX(-50%);
-  padding: 4px 16px; z-index: 1040;
-  background: rgba(0, 0, 0, 0.75);
-  border-radius: 20px; pointer-events: none;
-}
-.road-name {
-  font-size: 12px; font-weight: 500; color: #d4d4d8;
-  font-family: 'Kanit', sans-serif; white-space: nowrap;
-}
-
-/* Compass */
-.compass-card {
-  display: flex; align-items: center; gap: 4px; padding: 6px 10px !important;
-}
-.compass-arrow { transition: transform 0.3s ease; line-height: 0; }
-.compass-label { font-size: 12px; font-weight: 700; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; min-width: 20px; text-align: center; }
-
-/* Speed Sparkline */
-.speed-chart { padding: 4px 6px !important; width: 64px; height: 32px; }
-.speed-chart svg { width: 100%; height: 100%; }
-
-/* Km Distance Markers */
-:global(.km-marker-container) { background: none !important; border: none !important; }
-:global(.km-marker) {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6); border: 1.5px solid rgba(0, 255, 136, 0.4);
-  color: #00ff88; font-size: 9px; font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
-  display: flex; align-items: center; justify-content: center;
-}
-
-/* Off-Route Warning CSS moved to $lib/components/NavigationOverlay.svelte */
-
 /* Route Selector Overlay */
 .route-selector-overlay {
   position: fixed;
@@ -11282,8 +10938,9 @@ out center body;`;
 /* Floating Route Preferences - Left side top */
 .map-prefs-float {
   position: absolute;
-  top: 16px;
+  bottom: 16px;
   left: 16px;
+  top: auto;
   z-index: 1000;
   padding: 6px 8px;
   border-radius: 24px;
@@ -11613,7 +11270,7 @@ out center body;`;
 /* ==================== RESPONSIVE - FLOATING PANELS ==================== */
 @media (max-width: 1024px) {
   .map-search-float { width: 340px; top: 12px; right: 12px; }
-  .map-prefs-float { top: 68px; left: 12px; padding: 6px; }
+  .map-prefs-float { top: auto; bottom: 14px; left: 12px; padding: 6px; }
   .float-pref-chip { font-size: 10px; padding: 4px 8px; }
   .float-toggle-chip { width: 28px; height: 28px; font-size: 12px; }
 }
@@ -11622,7 +11279,7 @@ out center body;`;
   .map-search-float { left: 10px; right: 10px; width: auto; top: 10px; padding: 8px 10px; }
   .map-prefs-float {
     top: auto;
-    bottom: 80px;
+    bottom: 10px;
     left: 10px;
     right: auto;
     max-width: calc(100% - 90px);
@@ -11652,7 +11309,7 @@ out center body;`;
   .map-search-float { left: 8px; right: 8px; width: auto; top: 8px; padding: 6px 8px; }
   .map-search-float .search-input { padding: 8px 32px 8px 30px; font-size: 12px; }
   .map-prefs-float {
-    bottom: 28px;
+    bottom: 8px;
     left: 8px;
     right: 8px;
     max-width: 370px;
