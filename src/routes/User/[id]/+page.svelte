@@ -139,6 +139,7 @@
   let activePointId: number | null = null;
   let isNavigating = false;
   let mobileSidebarOpen = false;
+  let mobileContentExpanded = false;
   let desktopSidebarCollapsed = false;
   let isDragMode = false;
   let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
@@ -157,6 +158,7 @@
   let watchId: number | null = null;
   let continuousWatchId: number | null = null; // Always-on GPS tracking for marker
   let isMapFollowing = true; // auto-follow mode like Google Maps
+  let _programmaticZoom = false; // flag to distinguish user zoom from code zoom
   let currentHeading: number | null = null; // GPS heading in degrees
   let currentTargetIndex = 0;
   let remainingDistance = 0;
@@ -1194,6 +1196,8 @@
       optimizeRoute();
     } else {
       clearTrafficLayers();
+      // Redraw main route at full opacity (was 0.3 when traffic was on)
+      if (optimizedRoute) displayOptimizedRoute();
     }
   }
 
@@ -2448,7 +2452,8 @@
       } else {
         showNotification('คำนวณเส้นทางสำเร็จ', 'success');
       }
-      // Hide sidebar after successful route calculation
+      // Reset add point mode and hide sidebar after successful route calculation
+      if (addPointMode) { addPointMode = false; if (map) map.getContainer().style.cursor = ''; if (clickMarker) { clickMarker.remove(); clickMarker = null; } }
       if (typeof window !== 'undefined' && window.innerWidth <= 1024) {
         mobileSidebarOpen = false;
       } else {
@@ -2869,9 +2874,11 @@
     lastSpokenThreshold = '';
     updateNextTurnInfo();
 
-    // Detect manual map drag to disable auto-follow (Google Maps behavior)
+    // Detect manual map drag/zoom to disable auto-follow (Google Maps behavior)
     map.off('dragstart'); // prevent duplicate handlers on re-entry
+    map.off('zoomstart');
     map.on('dragstart', () => { isMapFollowing = false; });
+    map.on('zoomstart', () => { if (!_programmaticZoom) isMapFollowing = false; });
 
     if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
     // perf: stagger functions - not everything needs 2s frequency
@@ -2908,7 +2915,7 @@
     setTimeout(() => { map.invalidateSize(); }, 100);
   }
 
-  function stopNavigation() {
+  async function stopNavigation() {
     isNavigating = false;
     if (watchId !== null) {
       navigator.geolocation.clearWatch(watchId);
@@ -2939,6 +2946,7 @@
     stopSmoothLoop();
     if (map) {
       map.off('dragstart');
+      map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
       map.getContainer().style.transition = 'transform 0.5s ease-out';
@@ -2978,10 +2986,21 @@
     arrivedPoints = [];
 
     isMapFollowing = true;
-    if (optimizedRoute) {
-      displayOptimizedRoute();
+
+    // คำนวณเส้นทางใหม่จากตำแหน่งปัจจุบันหลังหยุดนำทาง
+    if (allDeliveryPoints.length > 0) {
+      showNotification('กำลังคำนวณเส้นทางใหม่...', 'success');
+      try {
+        await optimizeRoute();
+      } catch (err) {
+        console.error('Recalculate after stop failed:', err);
+        if (optimizedRoute) displayOptimizedRoute();
+        showNotification('หยุดนำทางแล้ว (คำนวณใหม่ไม่สำเร็จ)', 'warning');
+      }
+    } else {
+      if (optimizedRoute) displayOptimizedRoute();
+      showNotification('หยุดนำทางแล้ว', 'success');
     }
-    showNotification('หยุดนำทางแล้ว', 'success');
   }
 
   // ===== Smooth 60fps interpolation + route prediction (better than Google Maps) =====
@@ -3039,12 +3058,12 @@
       if (accuracyCircle) {
         accuracyCircle.setLatLng([animCurrentLat, animCurrentLng]);
       }
-      // Rotate heading arrow smoothly
+      // Rotate heading beam smoothly
       if (headingMarkerElement) {
-        const arrow = headingMarkerElement.querySelector('.heading-arrow') as HTMLElement;
-        if (arrow) {
-          arrow.style.transform = `rotate(${animCurrentHeading}deg)`;
-          arrow.style.opacity = currentSpeed > 3 ? '1' : '0';
+        const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
+        if (beam) {
+          beam.style.transform = `rotate(${animCurrentHeading}deg)`;
+          beam.style.opacity = currentSpeed > 1 ? '1' : '0';
         }
       }
       // Update route line start to follow blue dot in real-time (every 4th frame ~15fps)
@@ -3061,13 +3080,13 @@
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
       // Rotate map to face heading direction (perf: 2-degree threshold)
-      // Freeze rotation when off-route to prevent wild spinning from unreliable GPS heading
+      // Freeze rotation when off-route or slow to prevent wild spinning from unreliable GPS heading
       if (map) {
         const mapEl = map.getContainer();
-        if (isOffRoute) {
-          // Off-route: smoothly return to north-up to avoid disorientation
+        if (isOffRoute || currentSpeed < 10) {
+          // Off-route or slow/stationary: smoothly return to north-up
           if (_lastAppliedRotation !== 0) {
-            const dampedRot = _lastAppliedRotation * 0.9;
+            const dampedRot = _lastAppliedRotation * 0.85;
             if (Math.abs(dampedRot) < 1) {
               mapEl.style.transform = 'rotate(0deg)';
               _lastAppliedRotation = 0;
@@ -3076,7 +3095,7 @@
               _lastAppliedRotation = dampedRot;
             }
           }
-        } else if (currentSpeed > 5) {
+        } else {
           const rotDeg = -animCurrentHeading;
           // Extra stability: reject sudden large heading jumps (> 60deg per frame)
           if (Math.abs(rotDeg - _lastAppliedRotation) > 60) {
@@ -3088,9 +3107,6 @@
             mapEl.style.transform = `rotate(${rotDeg}deg)`;
             _lastAppliedRotation = rotDeg;
           }
-        } else if (_lastAppliedRotation !== 0) {
-          mapEl.style.transform = 'rotate(0deg)';
-          _lastAppliedRotation = 0;
         }
       }
     }
@@ -3242,11 +3258,15 @@
       animStartTime = performance.now();
       animReady = true;
 
-      // Auto-zoom (independent of smooth pan)
-      const targetZoom = getAutoZoom(currentSpeed);
-      const cZoom = map.getZoom();
-      if (Math.abs(cZoom - targetZoom) > 0.5) {
-        map.setZoom(targetZoom, { animate: true });
+      // Auto-zoom (only when following)
+      if (isMapFollowing) {
+        const targetZoom = getAutoZoom(currentSpeed);
+        const cZoom = map.getZoom();
+        if (Math.abs(cZoom - targetZoom) > 0.5) {
+          _programmaticZoom = true;
+          map.setZoom(targetZoom, { animate: true });
+          _programmaticZoom = false;
+        }
       }
     }
   }
@@ -3293,7 +3313,7 @@
   function updateCurrentLocationMarker() {
     if (!L || !map || !currentLocation) return;
     const headingDeg = currentHeading !== null ? currentHeading : 0;
-    const showHeading = currentHeading !== null && currentSpeed > 3;
+    const showHeading = currentHeading !== null && currentSpeed > 1;
 
     // Update or create accuracy circle
     if (accuracy > 0) {
@@ -3316,10 +3336,10 @@
     if (currentLocationMarker) {
       currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
       if (headingMarkerElement) {
-        const arrow = headingMarkerElement.querySelector('.heading-arrow') as HTMLElement;
-        if (arrow) {
-          arrow.style.transform = `rotate(${headingDeg}deg)`;
-          arrow.style.opacity = showHeading ? '1' : '0';
+        const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
+        if (beam) {
+          beam.style.transform = `rotate(${headingDeg}deg)`;
+          beam.style.opacity = showHeading ? '1' : '0';
         }
       }
     } else {
@@ -3330,7 +3350,7 @@
             <div class="my-loc-wrapper">
               <div class="loc-pulse-ring"></div>
               <div class="loc-pulse-ring loc-pulse-ring-2"></div>
-              <div class="heading-arrow" style="transform: rotate(${headingDeg}deg); opacity: ${showHeading ? 1 : 0};"></div>
+              <div class="heading-beam" style="transform: rotate(${headingDeg}deg); opacity: ${showHeading ? 1 : 0};"></div>
               <div class="my-loc-dot"></div>
             </div>
           `,
@@ -6225,7 +6245,7 @@ out center body;`;
   {#if !isNavigating}
     <aside class="sidebar" class:collapsed={!mobileSidebarOpen || showSettings || showAddForm} class:desktop-collapsed={desktopSidebarCollapsed || showSettings || showAddForm}>
       <!-- Mobile toggle handle -->
-      <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; smoothMapResize(); }}>
+      <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; if (!mobileSidebarOpen) mobileContentExpanded = false; smoothMapResize(); }}>
         {#if mobileSidebarOpen}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flipped"><path d="M6 9l6 6 6-6"/></svg>
           <span class="toggle-text">ซ่อนเมนู</span>
@@ -6247,8 +6267,8 @@ out center body;`;
       </button>
       <div class="sidebar-header">
         <div class="logo">
-          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg></div>
-          <div class="logo-text"><h1>Route Planning </h1><span>ระบบวางแผนเส้นทาง</span></div>
+          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/><path d="M8.5 17l1.5 2M15.5 17l-1.5 2M10 19h4" stroke-linecap="round" opacity="0.5"/></svg></div>
+          <div class="logo-text"><h1>Route Planing</h1><span>วางแผนเส้นทาง</span></div>
         </div>
         <div class="header-actions">
           <button class="icon-btn keyboard-help-btn" on:click={() => showKeyboardHelp = true} title="คีย์ลัด [?]">⌨️</button>
@@ -6293,7 +6313,7 @@ out center body;`;
         {#if optimizedRoute}
           <button class="btn btn-navigate" on:click={startNavigation} title="เริ่มนำทาง [N]"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
           {#if routeAlternatives.length > 1}
-            <button class="btn btn-alt-routes" on:click={() => showRouteSelector = !showRouteSelector} title="เลือกเส้นทาง">
+            <button class="btn btn-alt-routes" on:click={() => { showRouteSelector = !showRouteSelector; if (showRouteSelector) mobileSidebarOpen = false; }} title="เลือกเส้นทาง">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
               <span>เลือกเส้นทาง ({routeAlternatives.length})</span>
             </button>
@@ -6344,11 +6364,11 @@ out center body;`;
       </div>
 
       <div class="tabs">
-        <button class="tab" class:active={activeTab === 'points'} on:click={() => activeTab = 'points'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดแวะ ({deliveryPoints.length})</button>
-        <button class="tab" class:active={activeTab === 'route'} on:click={() => activeTab = 'route'} disabled={!optimizedRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>เส้นทาง</button>
+        <button class="tab" class:active={activeTab === 'points' && mobileContentExpanded} on:click={() => { if (activeTab === 'points' && mobileContentExpanded) { mobileContentExpanded = false; } else { activeTab = 'points'; mobileContentExpanded = true; } }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดแวะ ({deliveryPoints.length})<svg class="tab-chevron" class:tab-chevron-up={activeTab === 'points' && mobileContentExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button class="tab" class:active={activeTab === 'route' && mobileContentExpanded} on:click={() => { if (activeTab === 'route' && mobileContentExpanded) { mobileContentExpanded = false; } else { activeTab = 'route'; mobileContentExpanded = true; } }} disabled={!optimizedRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>เส้นทาง<svg class="tab-chevron" class:tab-chevron-up={activeTab === 'route' && mobileContentExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>
       </div>
 
-      <div class="content-area">
+      <div class="content-area" class:content-collapsed={!mobileContentExpanded}>
         {#if activeTab === 'points'}
           <div class="points-list">
             {#if filteredPoints.length === 0}
@@ -6655,8 +6675,8 @@ out center body;`;
       </div>
     {/if}
 
-    <!-- Add Point Mode Toggle -->
-    {#if !isNavigating && !isSearchFocused && !directDestination}
+    <!-- Add Point Mode Toggle (hidden when route is calculated) -->
+    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute}
       <button class="add-point-toggle glass-card" class:active={addPointMode} on:click={() => { addPointMode = !addPointMode; if (map) map.getContainer().style.cursor = addPointMode ? 'crosshair' : ''; if (!addPointMode && clickMarker) { clickMarker.remove(); clickMarker = null; } }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         <span>{addPointMode ? 'ปักหมุดอยู่...' : 'เพิ่มจุด'}</span>
@@ -7978,6 +7998,8 @@ out center body;`;
     cursor: not-allowed;
   }
 
+  .tab-chevron { display: none; }
+  .content-area.content-collapsed { max-height: none; opacity: 1; padding: 0 14px; overflow: visible; }
   .content-area { flex: 1; overflow-y: auto; padding: 0 14px; }
   .content-area::-webkit-scrollbar { width: 5px; }
   .content-area::-webkit-scrollbar-track { background: transparent; }
@@ -8751,7 +8773,7 @@ out center body;`;
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
   .nav-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 1000; }
-  .nav-top-bar { position: absolute; top: 120px; right: 20px; display: flex; align-items: center; gap: 20px; padding: 16px 24px; pointer-events: auto; z-index: 1050; max-width: calc(100% - 40px); }
+  .nav-top-bar { position: absolute; top: 150px; right: 20px; display: flex; align-items: center; gap: 20px; padding: 16px 24px; pointer-events: auto; z-index: 1050; max-width: calc(100% - 40px); }
   .nav-target-info { flex: 1; min-width: 0; }
   .nav-target-label { font-size: 11px; color: #00ff88; font-weight: 500; letter-spacing: 0.5px; }
   .nav-target-name { font-size: 18px; font-weight: 600; color: #e4e4e7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -8868,9 +8890,9 @@ out center body;`;
   :global(.leaflet-control-zoom-out) { border-radius: 0 0 10px 10px !important; }
 
   :global(.marker-pin) {
-    width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
-    font-size: 14px; font-weight: 800; color: white; font-family: 'Kanit', sans-serif;
-    border: 2.5px solid rgba(255, 255, 255, 0.5); position: relative;
+    width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; font-weight: 800; color: white; font-family: 'Kanit', sans-serif;
+    border: 3px solid rgba(255, 255, 255, 0.5); position: relative;
     transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
     text-shadow: 0 1px 3px rgba(0,0,0,0.5);
     transform: scale(var(--marker-scale, 1));
@@ -8881,7 +8903,7 @@ out center body;`;
   :global(.marker-pin.draggable:active) { cursor: grabbing; }
   :global(.drag-hint) { position: absolute; top: -8px; right: -8px; width: 16px; height: 16px; background: #fb923c; border-radius: 50%; font-size: 9px; display: flex; align-items: center; justify-content: center; color: white; border: 2px solid rgba(0,0,0,0.3); }
   @keyframes drag-pulse { 0%, 100% { border-color: #fb923c; } 50% { border-color: #fdba74; } }
-  :global(.route-pin) { width: 40px; height: 40px; font-size: 15px; border-width: 3px; }
+  :global(.route-pin) { width: 48px; height: 48px; font-size: 17px; border-width: 3px; }
   :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
   @keyframes pulse-label { 0%, 100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.1); } }
@@ -8943,16 +8965,29 @@ out center body;`;
     box-shadow: 0 0 10px rgba(0,255,136,0.8), 0 0 24px rgba(0,255,136,0.35);
     z-index: 10;
   }
-  :global(.heading-arrow) {
+  :global(.heading-beam) {
     position: absolute;
-    top: 0; left: 50%;
-    transform-origin: center 20px;
-    width: 0; height: 0;
-    border-left: 7px solid transparent;
-    border-right: 7px solid transparent;
-    border-bottom: 14px solid #00ff88;
-    margin-left: -7px;
-    filter: drop-shadow(0 0 4px rgba(0,255,136,0.7));
+    width: 120px;
+    height: 120px;
+    top: 50%;
+    left: 50%;
+    margin-top: -60px;
+    margin-left: -60px;
+    transform-origin: center center;
+    background: conic-gradient(
+      from 150deg at 50% 50%,
+      transparent 0deg,
+      rgba(0, 255, 136, 0.04) 10deg,
+      rgba(0, 255, 136, 0.12) 25deg,
+      rgba(0, 255, 136, 0.2) 30deg,
+      rgba(0, 255, 136, 0.12) 35deg,
+      rgba(0, 255, 136, 0.04) 50deg,
+      transparent 60deg
+    );
+    -webkit-mask: radial-gradient(circle at 50% 50%, transparent 10%, black 16%, black 55%, transparent 70%);
+    mask: radial-gradient(circle at 50% 50%, transparent 10%, black 16%, black 55%, transparent 70%);
+    border-radius: 50%;
+    pointer-events: none;
     transition: transform 0.3s ease, opacity 0.3s;
     z-index: 5;
   }
@@ -9001,7 +9036,7 @@ out center body;`;
     .nav-stat-value { font-size: 16px; }
     .nav-stat-icon { width: 40px; height: 40px; }
     .map-stats { flex-wrap: wrap; gap: 8px; padding: 10px; }
-    .nav-top-bar { top: 110px; right: 15px; padding: 14px 20px; min-width: auto; }
+    .nav-top-bar { top: 140px; right: 15px; padding: 14px 20px; min-width: auto; }
     .nav-target-name { font-size: 16px; max-width: 240px; }
     .nav-right-cluster { right: 15px; bottom: 250px; }
     .speed-display { width: 85px; height: 85px; }
@@ -9016,195 +9051,278 @@ out center body;`;
   @media (max-width: 768px) {
     .app-container { flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
 
-    /* Sidebar: collapsible on mobile */
+    /* ========== MOBILE SIDEBAR ========== */
     .sidebar {
-      width: 100%;
-      height: auto;
-      max-height: 50vh;
-      border-right: none;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-      overflow: hidden;
-      flex-shrink: 0;
-      transition: max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1),
-                  border-bottom 0.2s ease;
+      width: 100%; height: auto; max-height: 55vh; border-right: none; overflow: hidden; flex-shrink: 0;
+      background: #0a0a16;
+      border-bottom: none;
+      border-radius: 0 0 20px 20px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+      transition: max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1);
       will-change: max-height;
+      position: relative;
+      z-index: 10;
     }
-    .sidebar.collapsed {
-      max-height: 46px !important;
-      overflow: hidden !important;
-      min-height: 0 !important;
-    }
-    .sidebar.collapsed > *:not(.sidebar-toggle) {
-      display: none !important;
-    }
-    /* Keyboard M ซ่อน sidebar สมบูรณ์บนมือถือ */
+    .sidebar.collapsed { max-height: 52px !important; overflow: hidden !important; min-height: 0 !important; border-radius: 0 0 16px 16px; }
+    .sidebar.collapsed > *:not(.sidebar-toggle) { display: none !important; }
     .sidebar.desktop-collapsed {
-      width: 100% !important;
-      margin-left: 0 !important;
-      max-height: 0 !important;
-      min-height: 0 !important;
-      border-bottom: none !important;
-      overflow: hidden !important;
+      width: 100% !important; margin-left: 0 !important; max-height: 0 !important;
+      min-height: 0 !important; border-bottom: none !important; overflow: hidden !important;
     }
     .desktop-sidebar-toggle { display: none !important; }
-    .sidebar-toggle {
-      display: flex; align-items: center; justify-content: center; gap: 5px;
-      width: 100%; padding: 0 12px; border: none; background: rgba(15, 15, 25, 0.98);
-      color: #a1a1aa; font-size: 12px; font-family: 'Kanit', sans-serif; cursor: pointer;
-      border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
-      transition: background 0.2s ease, color 0.2s ease; height: 44px;
-    }
-    .sidebar-toggle:active { background: rgba(0, 255, 136, 0.1); }
-    .sidebar-toggle svg {
-      width: 14px; height: 14px; flex-shrink: 0;
-      transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
-    }
-    .sidebar-toggle svg.flipped { transform: rotate(180deg); }
-    .sidebar-toggle span { white-space: nowrap; }
-    .sidebar-toggle .toggle-text { font-weight: 500; color: #d4d4d8; }
 
-    /* Collapsed summary bar */
+    /* --- Toggle Handle --- */
+    .sidebar-toggle {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 14px 16px 8px; border: none;
+      background: transparent; color: #71717a; font-size: 12px;
+      font-family: 'Kanit', sans-serif; cursor: pointer; flex-shrink: 0;
+      height: auto; position: relative;
+    }
+    .sidebar-toggle::before {
+      content: ''; position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+      width: 32px; height: 4px; border-radius: 99px;
+      background: rgba(255,255,255,0.15);
+      transition: background 0.2s;
+    }
+    .sidebar-toggle:active::before { background: #00ff88; }
+    .sidebar-toggle svg { width: 0; height: 0; overflow: hidden; }
+    .sidebar-toggle svg.flipped { width: 0; height: 0; }
+    .sidebar-toggle > span { font-size: 11px; color: #52525b; font-weight: 500; }
+    .sidebar-toggle .toggle-text { font-weight: 500; color: #52525b; font-size: 11px; }
+
+    /* --- Collapsed Summary --- */
     .collapsed-summary {
       display: flex; align-items: center; justify-content: center;
-      gap: 8px; width: 100%;
+      gap: 14px; width: 100%; padding: 2px 8px;
     }
-    .cs-stat { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    .cs-stat { display: flex; align-items: baseline; gap: 3px; padding: 0; }
     .cs-val {
-      font-size: 14px; font-weight: 700; color: #e4e4e7;
-      font-family: 'JetBrains Mono', monospace; line-height: 1.1;
+      font-size: 15px; font-weight: 700; color: #f4f4f5;
+      font-family: 'JetBrains Mono', monospace; line-height: 1;
     }
     .cs-val.cs-cost { color: #00ff88; }
-    .cs-unit { font-size: 7px; color: #71717a; text-transform: uppercase; letter-spacing: 0.3px; }
-    .cs-divider { width: 1px; height: 22px; background: rgba(255,255,255,0.1); flex-shrink: 0; }
-    .cs-arrow { width: 12px; height: 12px; color: #71717a; margin-left: 4px; flex-shrink: 0; }
-    .sidebar-header { padding: 6px 10px; flex-shrink: 0; }
-    .sidebar-header .logo-text h1 { font-size: 14px; }
-    .sidebar-header .logo-text span { font-size: 8px; }
-    .sidebar-header .logo-icon { width: 28px; height: 28px; }
-    .sidebar-header .logo-icon svg { width: 16px; height: 16px; }
-    .sidebar-header .icon-btn { width: 30px; height: 30px; font-size: 12px; }
+    .cs-unit { font-size: 9px; color: #71717a; text-transform: none; letter-spacing: 0; margin-top: 0; font-weight: 400; }
+    .cs-divider { width: 3px; height: 3px; border-radius: 50%; background: rgba(255,255,255,0.2); flex-shrink: 0; }
+    .cs-arrow { display: none; }
+
+    /* --- Header --- */
+    .sidebar-header {
+      padding: 0 12px 8px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: none; background: transparent;
+    }
+    .sidebar-header .logo {
+      display: flex; align-items: center; gap: 7px;
+    }
+    .sidebar-header .logo .logo-icon {
+      width: 28px; height: 28px; border-radius: 8px;
+      background: linear-gradient(135deg, #00ff88, #00cc6a);
+    }
+    .sidebar-header .logo .logo-icon svg { width: 16px; height: 16px; stroke: #0a0a14; }
+    .sidebar-header .logo .logo-text h1 { font-size: 13px; font-weight: 700; color: #00ff88; }
+    .sidebar-header .logo .logo-text span { font-size: 8px; color: #52525b; }
+    .sidebar-header .header-actions {
+      display: flex; gap: 5px;
+    }
+    .sidebar-header .icon-btn {
+      width: 34px; height: 34px; font-size: 14px; border-radius: 10px;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07);
+      transition: all 0.15s;
+    }
+    .sidebar-header .icon-btn:active { background: rgba(0,255,136,0.15); transform: scale(0.9); }
+
     .sidebar-scroll {
       flex: 1; overflow-y: auto; overflow-x: hidden;
       -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
       min-height: 0; display: flex; flex-direction: column;
     }
-    /* Tabs */
-    .tabs { margin: 0; padding: 4px 8px; gap: 4px; flex-shrink: 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
-    .tab { padding: 7px 12px; font-size: 11px; }
-    .tab svg { width: 13px; height: 13px; }
-    /* Content area */
-    .content-area { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 10px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-height: 0; }
-    /* Add form modal overlay */
-    .add-form { max-width: 400px; padding: 16px; border-radius: 14px; }
 
+    /* --- Action Buttons: horizontal scroll --- */
+    .action-buttons {
+      display: flex; flex-direction: row; flex-wrap: nowrap; gap: 7px;
+      padding: 2px 12px 12px; flex-shrink: 0;
+      overflow-x: auto; overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none; -ms-overflow-style: none;
+    }
+    .action-buttons::-webkit-scrollbar { display: none; }
+    .action-buttons .btn {
+      flex: 0 0 auto; min-width: 120px; justify-content: center;
+      padding: 9px 14px; font-size: 12px; gap: 6px; border-radius: 12px;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07);
+      white-space: nowrap; transition: all 0.15s ease;
+      font-weight: 500;
+    }
+    .action-buttons .btn:active { transform: scale(0.94); }
+    .action-buttons .btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+    .action-buttons .btn span { white-space: nowrap; }
+    .action-buttons .btn.btn-primary {
+      background: linear-gradient(135deg, #00ff88, #00cc6a);
+      border-color: transparent; color: #0a0a14;
+      font-weight: 700; box-shadow: 0 3px 12px rgba(0,255,136,0.25);
+    }
+    .action-buttons .btn.btn-primary:active { box-shadow: 0 1px 6px rgba(0,255,136,0.3); }
+    .action-buttons .btn.btn-navigate {
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      border-color: transparent; color: #fff;
+      font-weight: 700; box-shadow: 0 3px 12px rgba(59,130,246,0.25);
+    }
+    .action-buttons .btn.btn-navigate:active { box-shadow: 0 1px 6px rgba(59,130,246,0.3); }
+    .action-buttons .btn.btn-secondary { color: #c084fc; border-color: rgba(168,85,247,0.2); }
+    .action-buttons .btn.btn-ghost { color: #a1a1aa; border-color: rgba(255,255,255,0.05); }
+    .action-buttons .btn.btn-save-route { color: #fbbf24; border-color: rgba(251,191,36,0.15); }
+    .action-buttons .btn.btn-share { color: #818cf8; border-color: rgba(129,140,248,0.15); }
+    .action-buttons .btn.btn-alt-routes { color: #38bdf8; border-color: rgba(56,189,248,0.15); }
+
+    /* --- Tabs --- */
+    .tabs {
+      display: flex; gap: 0; margin: 0 12px 6px; padding: 3px;
+      background: rgba(255,255,255,0.04); border-radius: 12px; flex-shrink: 0;
+      border: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .tab {
+      padding: 8px 0; font-size: 12px; white-space: nowrap; flex: 1; text-align: center;
+      border-radius: 9px; border: none; border-bottom: none;
+      background: transparent !important; color: #71717a; font-weight: 500;
+      transition: all 0.2s;
+    }
+    .tab.active {
+      background: rgba(0,255,136,0.1) !important; color: #00ff88 !important;
+      border-bottom: none; font-weight: 600;
+    }
+    .tab svg { width: 13px; height: 13px; }
+    .tab-chevron {
+      width: 12px; height: 12px; margin-left: 2px;
+      transition: transform 0.25s ease; flex-shrink: 0;
+    }
+    .tab-chevron-up { transform: rotate(180deg); }
+
+    /* --- Content --- */
+    .content-area {
+      flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2px 12px 16px;
+      -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-height: 0;
+      transition: max-height 0.3s ease, opacity 0.2s ease, padding 0.3s ease;
+      max-height: 50vh;
+    }
+    .content-area.content-collapsed {
+      max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; overflow: hidden;
+    }
+
+    .add-form { max-width: 400px; padding: 16px; border-radius: 20px; }
     .map-container { flex: 1; width: 100%; position: relative; overflow: hidden; min-height: 0; }
     #map { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
 
-    /* Header compact */
-    .sidebar-header .logo h1 { font-size: 16px; }
-    .sidebar-header .logo span { font-size: 9px; }
-    .logo-icon { width: 32px; height: 32px; }
-    .logo-icon svg { width: 18px; height: 18px; }
-    .logo { gap: 10px; }
-    .icon-btn { width: 34px; height: 34px; font-size: 14px; }
+    .sidebar-header .logo h1 { font-size: 14px; }
+    .sidebar-header .logo span { font-size: 8px; }
+    .logo-icon { width: 28px; height: 28px; }
+    .logo-icon svg { width: 16px; height: 16px; }
+    .logo { gap: 8px; }
+    .icon-btn { width: 36px; height: 36px; font-size: 14px; }
 
-    /* Action buttons: 2-column grid */
-    .action-buttons {
-      display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+    /* --- Point Cards --- */
+    .point-card {
+      padding: 11px 12px; margin-bottom: 5px; border-radius: 14px; gap: 10px; width: 100%;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      transition: all 0.15s ease;
+      position: relative;
+      overflow: hidden;
     }
-    .action-buttons .btn {
-      flex: 1 1 calc(50% - 3px); min-width: 0; justify-content: center;
-      padding: 10px 8px; font-size: 12px; gap: 5px; border-radius: 10px;
-      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    .point-card::before {
+      content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      border-radius: 0; background: transparent;
+      transition: background 0.15s;
     }
-    .action-buttons .btn:active { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.25); }
-    .action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
-    .action-buttons .btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .action-buttons .btn.btn-primary { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.2); color: #00ff88; }
-    .action-buttons .btn.btn-navigate { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.2); color: #60a5fa; }
-    .action-buttons .btn.btn-secondary { background: rgba(168,85,247,0.1); border-color: rgba(168,85,247,0.2); color: #c084fc; }
-
-    /* Tabs compact */
-    .tabs { gap: 4px; margin: 0 10px 12px; padding: 4px; }
-    .tab { padding: 10px 14px; font-size: 12px; white-space: nowrap; flex-shrink: 0; border-radius: 10px; }
-    .tab svg { width: 16px; height: 16px; }
-
-    /* Cards compact - wide but thin */
-    .point-card { padding: 6px 8px; margin-bottom: 2px; border-radius: 6px; gap: 6px; width: 100%; }
-    .point-card::before { width: 2px; }
+    .point-card.active {
+      border-color: rgba(0,255,136,0.2);
+      background: rgba(0,255,136,0.04);
+    }
+    .point-card.active::before { background: #00ff88; }
     .point-card:hover { transform: none; }
-    .point-card:active { transform: none; }
-    .point-number { width: 22px; height: 22px; font-size: 10px; border-radius: 6px; flex-shrink: 0; }
+    .point-card:active { transform: scale(0.98); background: rgba(255,255,255,0.05); }
+    .point-number {
+      width: 30px; height: 30px; font-size: 12px; border-radius: 9px; flex-shrink: 0;
+      font-weight: 700;
+    }
     .point-info p { display: none; }
-    .point-info h4 { font-size: 11px; margin-bottom: 0; }
-    .stat-card { padding: 14px 10px; border-radius: 12px; }
-    .stat-icon { width: 36px; height: 36px; margin-bottom: 8px; }
-    .stat-value { font-size: 22px; }
-    .point-meta { gap: 4px; }
-    .point-meta .priority-tag { font-size: 9px; padding: 2px 6px; }
-    .point-meta .distance-tag { font-size: 9px; }
-    .point-actions { gap: 3px; }
-    .point-actions .action-btn { width: 22px; height: 22px; border-radius: 5px; }
-    .point-actions .action-btn svg { width: 10px; height: 10px; }
-    .delete-btn { width: 20px; height: 20px; top: 3px; right: 3px; }
-    .delete-btn svg { width: 10px; height: 10px; }
-    /* Route Summary - hidden on mobile (floating panel replaces it) */
-    .route-summary { display: none !important; }
+    .point-info h4 { font-size: 13px; margin-bottom: 0; font-weight: 500; color: #e4e4e7; line-height: 1.3; }
+    .point-meta { gap: 5px; }
+    .point-meta .priority-tag { font-size: 9px; padding: 3px 8px; border-radius: 99px; font-weight: 600; }
+    .point-meta .distance-tag { font-size: 9px; padding: 3px 8px; border-radius: 99px; background: rgba(255,255,255,0.05); color: #a1a1aa; }
+    .point-actions { gap: 4px; }
+    .point-actions .action-btn { width: 26px; height: 26px; border-radius: 8px; }
+    .point-actions .action-btn svg { width: 12px; height: 12px; }
+    .delete-btn { width: 24px; height: 24px; top: 6px; right: 6px; border-radius: 8px; }
+    .delete-btn svg { width: 12px; height: 12px; }
+
+    /* --- Route Summary: mobile-enabled --- */
+    .route-summary { display: block !important; }
+    .route-detail-card {
+      margin-bottom: 8px; padding: 10px 12px; border-radius: 12px;
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    }
+    .rd-header { font-size: 10px; margin-bottom: 5px; }
+    .rd-row { padding: 2px 0; gap: 6px; }
+    .rd-row.sub { padding-left: 20px; }
+    .rd-icon { font-size: 10px; width: 14px; }
+    .rd-label { font-size: 11px; }
+    .rd-value { font-size: 11px; }
+    .rd-value.total { font-size: 13px; }
+    .rd-divider { margin: 6px 0; }
+    .rd-total { padding: 5px 0 2px; }
     .summary-header { margin-bottom: 6px; flex-wrap: wrap; gap: 4px; }
     .summary-header h3 { font-size: 13px; }
-    .route-badge { font-size: 9px; padding: 3px 8px; }
-    .summary-stats { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; }
-    .stat-card { padding: 6px 4px; border-radius: 8px; background: rgba(0,255,136,0.04); border: 1px solid rgba(0,255,136,0.1); }
-    .stat-icon { width: 22px; height: 22px; margin-bottom: 2px; border-radius: 6px; }
+    .route-badge { font-size: 9px; padding: 3px 10px; border-radius: 99px; }
+    .summary-stats { grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 8px; }
+    .stat-card { padding: 8px 4px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); }
+    .stat-icon { width: 22px; height: 22px; margin-bottom: 2px; border-radius: 8px; }
     .stat-icon svg { width: 12px; height: 12px; }
     .stat-value { font-size: 16px; font-weight: 800; color: #00ff88; }
-    .stat-label { font-size: 8px; color: #a1a1aa; }
+    .stat-label { font-size: 8px; color: #71717a; }
     .stat-card.fuel .stat-value, .stat-card.ev .stat-value { color: #f59e0b; }
-    /* Fuel/EV info compact */
-    .fuel-route-info, .ev-route-info { padding: 8px; border-radius: 8px; margin-bottom: 8px; }
-    .fuel-info-row, .ev-info-row { padding: 4px 0; font-size: 11px; }
-    .fuel-info-row span, .ev-info-row span { font-size: 11px; }
-    .fuel-info-row strong, .ev-info-row strong { font-size: 11px; }
-    .cheapest-tip { font-size: 10px; padding: 6px; margin-top: 4px; }
-    .ev-warning-banner { font-size: 10px; padding: 6px; }
-    /* Trip cost compact */
-    .trip-cost-card { padding: 8px; margin-top: 6px; border-radius: 8px; }
-    .trip-cost-card h4 { font-size: 12px; margin-bottom: 6px; }
-    .cost-label { font-size: 11px; }
-    .cost-value { font-size: 12px; }
-    .cost-row.sub span { font-size: 9px; }
-    .cost-row.total .cost-label { font-size: 12px; }
-    .cost-row.total .cost-value { font-size: 14px; }
-    /* Timeline compact */
-    .timeline-item { padding: 6px 8px; gap: 8px; margin-bottom: 4px; }
-    .timeline-marker { width: 26px; height: 26px; font-size: 11px; border-radius: 6px; }
-    .timeline-name { font-size: 12px; }
-    .timeline-label { font-size: 9px; margin-bottom: 1px; }
-    .route-timeline h4 { font-size: 10px; margin-bottom: 6px; }
+    .fuel-route-info, .ev-route-info { padding: 10px; border-radius: 12px; margin-bottom: 8px; }
+    .fuel-info-row, .ev-info-row { padding: 4px 0; font-size: 12px; }
+    .fuel-info-row span, .ev-info-row span { font-size: 12px; }
+    .fuel-info-row strong, .ev-info-row strong { font-size: 12px; }
+    .cheapest-tip { font-size: 11px; padding: 8px; margin-top: 4px; border-radius: 10px; }
+    .ev-warning-banner { font-size: 11px; padding: 8px; border-radius: 10px; }
+    .trip-cost-card { padding: 10px; margin-top: 6px; border-radius: 12px; }
+    .trip-cost-card h4 { font-size: 13px; margin-bottom: 6px; }
+    .cost-label { font-size: 12px; }
+    .cost-value { font-size: 13px; }
+    .cost-row.sub span { font-size: 10px; }
+    .cost-row.total .cost-label { font-size: 13px; }
+    .cost-row.total .cost-value { font-size: 15px; }
+    .timeline-item { padding: 9px 10px; gap: 8px; margin-bottom: 4px; border-radius: 10px; background: rgba(255,255,255,0.03); }
+    .timeline-marker { width: 28px; height: 28px; font-size: 12px; border-radius: 8px; }
+    .timeline-name { font-size: 12px; font-weight: 500; }
+    .timeline-label { font-size: 9px; margin-bottom: 1px; color: #52525b; }
+    .route-timeline h4 { font-size: 11px; margin-bottom: 6px; }
+    .sidebar-footer { display: none; }
 
     /* Add Form Mobile */
-    .add-form-overlay { z-index: 2100; padding: 12px; }
-    .add-form { max-width: 400px; max-height: 80vh; padding: 16px !important; border-radius: 14px !important; }
-    .add-form .form-header { margin-bottom: 10px; }
-    .add-form .form-header h3 { font-size: 16px; }
-    .add-form .close-btn { width: 32px; height: 32px; }
-    .add-form .form-hint { font-size: 11px; padding: 8px 10px; margin-bottom: 10px; }
-    .add-form .form-group { margin-bottom: 10px; }
-    .add-form .form-group label { font-size: 12px; margin-bottom: 4px; }
-    .add-form .form-group input, .add-form .form-group textarea { padding: 10px 12px; font-size: 14px; }
+    .add-form-overlay { z-index: 2100; padding: 16px; }
+    .add-form { max-width: 400px; max-height: 80vh; padding: 20px !important; border-radius: 20px !important; }
+    .add-form .form-header { margin-bottom: 12px; }
+    .add-form .form-header h3 { font-size: 17px; }
+    .add-form .close-btn { width: 34px; height: 34px; border-radius: 10px; }
+    .add-form .form-hint { font-size: 12px; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px; }
+    .add-form .form-group { margin-bottom: 12px; }
+    .add-form .form-group label { font-size: 12px; margin-bottom: 5px; }
+    .add-form .form-group input, .add-form .form-group textarea { padding: 12px 14px; font-size: 15px; border-radius: 12px; }
     .add-form .form-group textarea { min-height: 50px; }
-    .add-form .coords-group { grid-template-columns: 1fr 1fr; gap: 8px; }
-    .add-form .priority-selector { gap: 4px; justify-content: center; }
-    .add-form .priority-btn { min-width: 50px; max-width: 60px; padding: 8px 4px; }
-    .add-form .priority-num { font-size: 14px; }
+    .add-form .coords-group { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .add-form .priority-selector { gap: 6px; justify-content: center; }
+    .add-form .priority-btn { min-width: 52px; max-width: 62px; padding: 10px 4px; border-radius: 12px; }
+    .add-form .priority-num { font-size: 15px; }
     .add-form .priority-label { font-size: 8px; }
-    .add-form .form-actions { flex-direction: row; gap: 8px; margin-top: 12px; }
-    .add-form .form-actions .btn { flex: 1; padding: 12px; font-size: 14px; }
+    .add-form .form-actions { flex-direction: row; gap: 10px; margin-top: 14px; }
+    .add-form .form-actions .btn { flex: 1; padding: 14px; font-size: 15px; border-radius: 14px; }
 
     /* Marker pins on mobile */
-    :global(.marker-pin) { width: 34px; height: 34px; font-size: 13px; border-width: 2px; }
-    :global(.route-pin) { width: 38px; height: 38px; font-size: 14px; }
+    :global(.marker-pin) { width: 40px; height: 40px; font-size: 14px; border-width: 2.5px; }
+    :global(.route-pin) { width: 44px; height: 44px; font-size: 16px; }
     :global(.marker-label) { font-size: 9px; bottom: -20px; padding: 2px 7px; }
     :global(.start-loc-marker) { width: 34px; height: 34px; }
     :global(.start-loc-core) { width: 18px; height: 18px; border-width: 2px; }
@@ -9305,14 +9423,14 @@ out center body;`;
     .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
 
     /* Turn instruction - top right, compact */
-    .turn-by-turn-panel { right: 6px; left: auto; min-width: auto; max-width: calc(100% - 12px); top: 6px; padding: 6px 10px; border-radius: 10px; }
+    .turn-by-turn-panel { right: 6px; left: auto; min-width: auto; max-width: calc(100% - 12px); top: 6px; padding: 6px 10px 22px; border-radius: 10px; }
     .turn-icon-wrap { width: 28px; height: 28px; }
     .turn-icon { font-size: 16px; }
     .turn-text { font-size: 11px; }
     .turn-distance { font-size: 9px; }
 
     /* Target bar - below turn */
-    .nav-top-bar { position: absolute; top: 60px; right: 6px; left: auto; width: auto; max-width: calc(100% - 12px); padding: 6px 10px; min-width: auto; gap: 8px; border-radius: 10px; }
+    .nav-top-bar { position: absolute; top: 140px; right: 6px; left: auto; width: auto; max-width: calc(100% - 12px); padding: 6px 10px; min-width: auto; gap: 8px; border-radius: 10px; }
     .nav-target-label { font-size: 8px; }
     .nav-target-name { font-size: 12px; max-width: 160px; }
     .nav-eta { font-size: 10px; }
@@ -9368,37 +9486,35 @@ out center body;`;
   /* Small Mobile */
   @media (max-width: 480px) {
     .app-container { height: 100vh; height: 100dvh; }
-    .sidebar { max-height: 48vh; min-height: 80px; }
-    .sidebar.collapsed { max-height: 46px !important; }
+    .sidebar { max-height: 50vh; min-height: 70px; border-radius: 0 0 14px 14px; }
+    .sidebar.collapsed { max-height: 44px !important; border-radius: 0 0 12px 12px; }
+    .sidebar-toggle { height: auto; padding: 12px 12px 6px; }
+    .sidebar-toggle::before { width: 26px; height: 3px; }
     .cs-val { font-size: 13px; }
-    .cs-unit { font-size: 6px; }
-    .collapsed-summary { gap: 6px; }
-    .cs-divider { height: 18px; }
+    .cs-unit { font-size: 7px; }
+    .cs-stat { padding: 0; }
+    .collapsed-summary { gap: 10px; }
+    .cs-divider { width: 2px; height: 2px; }
     .map-container { flex: 1; min-height: 0; }
-    .sidebar-header { padding: 5px 8px; }
-    .sidebar-header .logo-text h1 { font-size: 12px; }
-    .sidebar-header .logo-text span { font-size: 7px; }
-    .sidebar-header .logo-icon { width: 24px; height: 24px; }
-    .sidebar-header .icon-btn { width: 26px; height: 26px; font-size: 11px; }
-    .header-actions { gap: 3px; }
-    .action-buttons { padding: 6px 8px !important; gap: 5px !important; }
-    .action-buttons .btn { padding: 8px 6px !important; font-size: 10px !important; border-radius: 10px !important; }
+    .sidebar-header { padding: 0 10px 6px; }
+    .sidebar-header .header-actions { gap: 3px; }
+    .sidebar-header .icon-btn { width: 30px; height: 30px; font-size: 12px; border-radius: 8px; }
+    .action-buttons { padding: 0 10px 6px !important; gap: 5px !important; }
+    .action-buttons .btn { padding: 8px 12px !important; font-size: 11px !important; border-radius: 10px !important; }
     .action-buttons .btn svg { width: 13px; height: 13px; }
-    .action-buttons .btn span { font-size: 10px; }
-    .tabs { padding: 2px 6px; gap: 3px; }
-    .tab { padding: 5px 8px; font-size: 9px; gap: 3px; }
-    .tab svg { width: 11px; height: 11px; }
-    .point-card { padding: 6px 8px; margin-bottom: 3px; border-radius: 6px; gap: 6px; }
-    .point-card:hover { transform: none; }
-    .point-card:active { transform: none; }
-    .point-number { width: 22px; height: 22px; font-size: 10px; border-radius: 6px; }
-    .point-name { font-size: 11px; }
-    .point-address { font-size: 9px; }
-    .point-actions { gap: 2px; }
-    .point-actions .action-btn { width: 20px; height: 20px; border-radius: 4px; }
-    .point-actions .action-btn svg { width: 9px; height: 9px; }
-    .delete-btn { width: 18px; height: 18px; top: 2px; right: 2px; }
-    .delete-btn svg { width: 9px; height: 9px; }
+    .tabs { margin: 0 10px 4px; padding: 2px; border-radius: 10px; }
+    .tab { padding: 7px 0; font-size: 11px; border-radius: 8px; }
+    .tab svg { width: 12px; height: 12px; }
+    .content-area { padding: 2px 10px 12px; }
+    .point-card { padding: 9px 10px; margin-bottom: 4px; border-radius: 12px; gap: 8px; }
+    .point-card:active { transform: scale(0.98); }
+    .point-number { width: 26px; height: 26px; font-size: 11px; border-radius: 8px; }
+    .point-info h4 { font-size: 12px; }
+    .point-actions { gap: 3px; }
+    .point-actions .action-btn { width: 24px; height: 24px; border-radius: 6px; }
+    .point-actions .action-btn svg { width: 11px; height: 11px; }
+    .delete-btn { width: 22px; height: 22px; top: 4px; right: 5px; border-radius: 6px; }
+    .delete-btn svg { width: 11px; height: 11px; }
 
     /* Add Form Small Mobile - modal stays same, just tighter padding */
     .add-form-overlay { padding: 12px; }
@@ -9449,7 +9565,7 @@ out center body;`;
     
 
     /* Nav top bar small */
-    .nav-top-bar { top: 52px; right: 4px; padding: 5px 8px; min-width: auto; border-radius: 8px; }
+    .nav-top-bar { top: 132px; right: 4px; padding: 5px 8px; min-width: auto; border-radius: 8px; }
     .nav-target-name { font-size: 11px; max-width: 140px; }
     .nav-target-label { font-size: 7px; }
     .nav-eta { font-size: 9px; }
@@ -9461,7 +9577,7 @@ out center body;`;
     .lock-btn svg { width: 12px; height: 12px; }
 
     /* Turn-by-turn small */
-    .turn-by-turn-panel { right: 4px; max-width: calc(100% - 8px); padding: 5px 8px; border-radius: 8px; }
+    .turn-by-turn-panel { right: 4px; max-width: calc(100% - 8px); padding: 5px 8px 20px; border-radius: 8px; }
     .turn-text { font-size: 10px; }
     .turn-distance { font-size: 8px; }
     .turn-icon-wrap { width: 24px; height: 24px; }
@@ -9497,8 +9613,8 @@ out center body;`;
     .nav-actions { gap: 6px; }
     .nav-btn { padding: 8px; }
     .lock-btn { width: 34px; height: 34px; }
-    .turn-by-turn-panel { right: 10px; min-width: auto; max-width: 300px; padding: 8px 12px; }
-    .nav-top-bar { top: 90px; right: 10px; padding: 10px; min-width: auto; }
+    .turn-by-turn-panel { right: 10px; min-width: auto; max-width: 300px; padding: 8px 12px 20px; }
+    .nav-top-bar { top: 140px; right: 10px; padding: 10px; min-width: auto; }
     .nav-target-name { font-size: 13px; max-width: 180px; }
     .alerts-panel { width: calc(100% - 40px); max-width: 360px; }
   }
@@ -10605,92 +10721,109 @@ out center body;`;
 /* Route Selector Overlay */
 .route-selector-overlay {
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 400px;
-  z-index: 1500;
-  padding: 20px;
+  inset: 0;
+  z-index: 2100;
+  background: rgba(0,0,0,0.6);
   display: flex;
-  align-items: flex-start;
-  padding-top: 60px;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
 }
 .route-selector-panel {
   width: 100%;
-  max-height: calc(100vh - 100px);
+  max-width: 440px;
+  max-height: 85vh;
   overflow-y: auto;
   padding: 20px;
-  margin-top: 120px;
-  background: rgba(15, 15, 25, 0.98) !important;
+  background: rgba(12, 12, 22, 0.98) !important;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  scrollbar-width: thin;
+  animation: slideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .route-selector-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
-.route-selector-header h3 { font-size: 16px; font-weight: 600; color: #e4e4e7; }
-.route-selector-list { display: flex; flex-direction: column; gap: 10px; }
+.route-selector-header h3 { font-size: 13px; font-weight: 600; color: #a1a1aa; }
+.route-selector-header .close-btn { width: 28px; height: 28px; }
+.route-selector-list { display: flex; flex-direction: column; gap: 6px; }
 .route-option-card {
   width: 100%;
-  padding: 14px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
+  padding: 8px 10px 8px 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-left: 3px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
   text-align: left;
   font-family: 'Kanit', sans-serif;
   color: #e4e4e7;
+  position: relative;
 }
-.route-option-card:hover { background: rgba(255, 255, 255, 0.06); }
+.route-option-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-left-color: rgba(0, 255, 136, 0.4);
+  transform: translateY(-1px);
+}
+.route-option-card:active { transform: scale(0.98); }
 .route-option-card.selected {
-  background: rgba(0, 255, 136, 0.08);
-  border-color: rgba(0, 255, 136, 0.3);
+  background: rgba(0, 255, 136, 0.05);
+  border-color: rgba(0, 255, 136, 0.15);
+  border-left-color: #00ff88;
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.06);
 }
 .route-option-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
-.route-option-label { font-size: 14px; font-weight: 600; }
+.route-option-label { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: #a1a1aa; }
+.route-option-card.selected .route-option-label { color: #00ff88; }
 .recommended-badge {
-  padding: 2px 8px;
+  padding: 1px 5px;
   background: linear-gradient(135deg, #00ff88, #00cc6a);
-  border-radius: 10px;
-  font-size: 10px;
+  border-radius: 4px;
+  font-size: 8px;
   font-weight: 700;
   color: #000;
+  letter-spacing: 0.03em;
 }
 .route-option-stats {
   display: flex;
-  gap: 16px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 3px;
 }
 .route-stat-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 13px;
+  gap: 3px;
+  font-size: 10px;
+  color: #a1a1aa;
 }
-.route-stat-icon { font-size: 14px; }
-.route-stat-val { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+.route-stat-icon { font-size: 10px; opacity: 0.7; }
+.route-stat-val { font-weight: 600; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #e4e4e7; }
 .route-option-tags {
   display: flex;
-  gap: 6px;
+  gap: 3px;
   flex-wrap: wrap;
 }
 .route-tag {
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
   font-weight: 500;
+  letter-spacing: 0.01em;
 }
-.route-tag.toll { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
-.route-tag.no-toll { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
-.route-tag.slower { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }
-.route-tag.faster { background: rgba(0, 255, 136, 0.15); color: #00ff88; }
+.route-tag.toll { background: rgba(255, 165, 2, 0.12); color: #ffa502; }
+.route-tag.no-toll { background: rgba(0, 255, 136, 0.08); color: #00ff88; }
+.route-tag.slower { background: rgba(255, 107, 107, 0.08); color: #ff6b6b; }
+.route-tag.faster { background: rgba(0, 255, 136, 0.08); color: #00ff88; }
 
 /* Route Comparison Overlay */
 .route-comparison-overlay {
@@ -11089,7 +11222,7 @@ out center body;`;
 /* ==================== RESPONSIVE - ADVANCED FEATURES ==================== */
 
 @media (max-width: 1024px) {
-  .route-selector-overlay { width: 350px; padding-top: 40px; }
+  .route-selector-panel { max-width: 400px; }
 }
 
 @media (max-width: 768px) {
@@ -11100,14 +11233,11 @@ out center body;`;
   .pref-chip { font-size: 11px; padding: 5px 8px; }
   .pref-toggles { gap: 4px; }
   .pref-toggle-item { font-size: 11px; }
-  .route-selector-overlay {
-    width: 100%;
-    padding: 10px;
-    padding-top: 30px;
-    background: rgba(0, 0, 0, 0.7);
-  }
-  .route-selector-panel { padding: 14px; }
-  .route-option-stats { gap: 10px; flex-wrap: wrap; }
+  .route-selector-overlay { padding: 16px; }
+  .route-selector-panel { max-width: 100%; max-height: 80vh; padding: 16px; border-radius: 20px; }
+  .route-selector-header h3 { font-size: 13px; }
+  .route-option-card { padding: 7px 10px 7px 11px; }
+  .route-option-stats { flex-wrap: wrap; }
   .turn-by-turn-panel {
     min-width: auto;
     max-width: calc(100% - 30px);
@@ -11137,7 +11267,7 @@ out center body;`;
   .pref-chips { flex-direction: column; }
   .pref-chip { width: 100%; justify-content: center; }
   .route-option-stats { flex-direction: column; gap: 4px; }
-  .turn-by-turn-panel { top: 30px; padding: 8px 12px; }
+  .turn-by-turn-panel { top: 30px; padding: 8px 12px; bottom: 20px; }
   .turn-icon { font-size: 20px; }
   .turn-text { font-size: 12px; }
   .turn-distance { font-size: 11px; }
