@@ -606,22 +606,17 @@
     });
   }
 
-  function setMapRotation(deg: number) {
-    const el = document.getElementById('map');
-    if (el) el.style.transform = `rotate(${deg}deg)`;
-  }
-
   function applyUserMapRotation() {
     if (!map) return;
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    setMapRotation(_userMapRotation);
+    map.setBearing(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    setMapRotation(0);
+    if (map) map.setBearing(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2286,7 +2281,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        setMapRotation(0);
+        map.setBearing(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3285,7 +3280,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      setMapRotation(0);
+      map.setBearing(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3431,13 +3426,13 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth map rotation following heading (CSS rotation + lerp)
+      // Smooth map rotation following heading (leaflet-rotate bearing + lerp)
       if (map) {
         if (isOffRoute || currentSpeed < 10) {
           if (Math.abs(_lastAppliedRotation) > 0.3) {
             _lastAppliedRotation *= 0.92;
             if (Math.abs(_lastAppliedRotation) < 0.3) _lastAppliedRotation = 0;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         } else {
           const target = -animCurrentHeading;
@@ -3447,7 +3442,7 @@
           if (Math.abs(diff) > 0.3) {
             const lerp = Math.abs(diff) > 60 ? 0.06 : 0.12;
             _lastAppliedRotation += diff * lerp;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         }
       }
@@ -6005,6 +6000,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
+      (window as any).L = L;
+      // @ts-ignore
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6014,7 +6012,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        preferCanvas: true,
+        preferCanvas: false,       // ใช้ SVG renderer — leaflet-rotate รองรับ SVG เต็มที่
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
@@ -6023,8 +6021,12 @@ out center body;`;
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: true,
-        markerZoomAnimation: true
+        zoomAnimation: false,      // ปิด zoom animation — ป้องกันเส้นลอยตอนซูม
+        markerZoomAnimation: false,
+        rotate: true,
+        bearing: 0,
+        touchRotate: true,
+        rotateControl: false
       }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
@@ -6604,7 +6606,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; setMapRotation(0); } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
@@ -9257,7 +9259,7 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; will-change: transform; transform-origin: center center; background: #1d1f20 !important; }
+  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; }
   :global(.leaflet-container) { background: #1d1f20 !important; }
   :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1d1f20; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
