@@ -524,7 +524,7 @@
     events.forEach(evt => window.removeEventListener(evt, resetSessionTimer));
   }
 
-  // Map Rotation Gesture
+  // Map Rotation Gesture (touch 2-finger + shift+drag)
   function setupMapRotation() {
     if (!map) return;
     const el = map.getContainer();
@@ -538,7 +538,6 @@
       return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
     }
 
-    // Two-finger: detect rotation vs zoom
     el.addEventListener('touchstart', (e: TouchEvent) => {
       if (e.touches.length === 2) {
         touchStartAngle = getTouchAngle(e.touches[0], e.touches[1]);
@@ -553,8 +552,6 @@
         const angleDelta = currentAngle - touchStartAngle;
         const currentDist = getTouchDist(e.touches[0], e.touches[1]);
         const distRatio = initialPinchDist > 0 ? currentDist / initialPinchDist : 1;
-
-        // ถ้าหมุนมากกว่า zoom → เป็น rotation gesture
         const isRotating = Math.abs(angleDelta) > 8 || (Math.abs(angleDelta) > 3 && Math.abs(distRatio - 1) < 0.15);
         if (isRotating) {
           if (!_isGestureRotating) {
@@ -577,7 +574,7 @@
       touchStartAngle = null;
     }, { passive: true });
 
-    // Desktop: Shift+drag or Ctrl+drag
+    // Desktop: Shift+drag
     let shiftDragStart: { x: number; y: number } | null = null;
     el.addEventListener('mousedown', (e: MouseEvent) => {
       if (e.shiftKey || e.ctrlKey) {
@@ -588,7 +585,6 @@
         e.preventDefault();
       }
     });
-
     window.addEventListener('mousemove', (e: MouseEvent) => {
       if (shiftDragStart && _isGestureRotating) {
         const dx = e.clientX - shiftDragStart.x;
@@ -596,7 +592,6 @@
         applyUserMapRotation();
       }
     });
-
     window.addEventListener('mouseup', () => {
       if (shiftDragStart) {
         shiftDragStart = null;
@@ -3427,11 +3422,12 @@
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
       // Smooth map rotation following heading (leaflet-rotate bearing + lerp)
-      if (map) {
+      if (map && _animFrameCount % 2 === 0) { // ทุก 2 frame (~30fps) เพื่อลด overhead
         if (isOffRoute || currentSpeed < 10) {
-          if (Math.abs(_lastAppliedRotation) > 0.3) {
-            _lastAppliedRotation *= 0.92;
-            if (Math.abs(_lastAppliedRotation) < 0.3) _lastAppliedRotation = 0;
+          // ค่อยๆ กลับ 0 เมื่อหยุด/หลงทาง
+          if (Math.abs(_lastAppliedRotation) > 0.5) {
+            _lastAppliedRotation *= 0.9;
+            if (Math.abs(_lastAppliedRotation) < 0.5) _lastAppliedRotation = 0;
             map.setBearing(_lastAppliedRotation);
           }
         } else {
@@ -3439,9 +3435,10 @@
           let diff = target - _lastAppliedRotation;
           if (diff > 180) diff -= 360;
           if (diff < -180) diff += 360;
-          if (Math.abs(diff) > 0.3) {
-            const lerp = Math.abs(diff) > 60 ? 0.06 : 0.12;
-            _lastAppliedRotation += diff * lerp;
+          if (Math.abs(diff) > 0.5) {
+            // Smooth lerp: ค่ายิ่งสูง ยิ่งหมุนเร็ว แต่ไม่กระตุก
+            const lerpFactor = Math.abs(diff) > 90 ? 0.08 : Math.abs(diff) > 30 ? 0.15 : 0.2;
+            _lastAppliedRotation += diff * lerpFactor;
             map.setBearing(_lastAppliedRotation);
           }
         }
@@ -6012,7 +6009,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        preferCanvas: false,       // ใช้ SVG renderer — leaflet-rotate รองรับ SVG เต็มที่
+        renderer: L.svg({ padding: 3.0 }),  // SVG padding ใหญ่ → ไม่ต้อง reposition ตอนหมุน → เส้นไม่ลอย
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
@@ -6021,13 +6018,13 @@ out center body;`;
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: false,      // ปิด zoom animation — ป้องกันเส้นลอยตอนซูม
+        zoomAnimation: false,
         markerZoomAnimation: false,
         rotate: true,
         bearing: 0,
         touchRotate: true,
         rotateControl: false
-      }).setView([initLat, initLng], initZoom);
+      } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
