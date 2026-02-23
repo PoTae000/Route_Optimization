@@ -6020,6 +6020,9 @@ out center body;`;
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
+        fadeAnimation: false,     // ปิด fade — tile ขึ้นทันทีไม่มีขาว
+        zoomAnimation: true,
+        markerZoomAnimation: true,
         rotate: true,
         bearing: 0,
         touchRotate: true,
@@ -6027,16 +6030,42 @@ out center body;`;
       } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // CartoDB Dark Matter — dark theme base (keepBuffer สูงเพื่อโหลด tile ล่วงหน้ารอบ viewport)
-      const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
+      //
+      // Layer 1 (ล่าง): "Safety net" — โหลด tile zoom 11 แล้วยืดขยาย
+      //   → ที่ zoom 16 ต้องการแค่ ~4 tiles ครอบคลุมทั้งจอ → โหลดทันที
+      //   → ภาพอาจเบลอนิดหน่อย แต่เป็นสีเข้มของแผนที่ ไม่ใช่ขาว
+      //
+      // Layer 2 (บน): tile คมชัดตาม zoom จริง
+      //   → โหลดทับ layer 1 เมื่อพร้อม → เห็นภาพคม
+      //
+      // ผลลัพธ์: ขยับ/หมุนเร็วแค่ไหน ก็เห็นแผนที่เสมอ (อาจเบลอชั่วครู่แล้วคมขึ้น)
+
+      // Layer 1: Safety net — tile zoom ต่ำยืดขยาย (โหลดไวมาก น้อย tiles)
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
+        subdomains: 'abcd',
+        maxNativeZoom: 11,   // โหลดแค่ tile zoom 11 (แต่ละ tile ครอบคลุมพื้นที่ใหญ่มาก)
+        maxZoom: 20,         // ยืดให้แสดงได้ทุก zoom level
+        keepBuffer: 6,
+        updateWhenZooming: true,
+        updateWhenIdle: false,
+        updateInterval: 50,
+        noWrap: false,
+        className: 'dark-tiles-safety'
+      }).addTo(map);
+
+      // Layer 2: Main crisp tiles — ภาพคมชัดจริงตาม zoom
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-        subdomains: 'abcd', maxZoom: 20, keepBuffer: 25,
-        updateWhenZooming: true, updateWhenIdle: false,
-        updateInterval: 100,
+        subdomains: 'abcd',
+        maxZoom: 20,
+        keepBuffer: 8,
+        updateWhenZooming: true,
+        updateWhenIdle: false,
+        updateInterval: 50,
         noWrap: false,
         className: 'dark-tiles'
       }).addTo(map);
-
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -9230,15 +9259,19 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; will-change: transform; transform-origin: center center; }
-  :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
+  #map { width: 100%; height: 100%; overflow: hidden; will-change: transform; transform-origin: center center; background: #1d1f20 !important; }
+  :global(.leaflet-container) { background: #1d1f20 !important; }
+  :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1d1f20; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.dark-tiles) { transition: opacity 0.5s ease; }
-  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; background: #1d1f20; }
+  :global(.dark-tiles-safety) { image-rendering: auto; }
+  :global(.dark-tiles) { transition: none; }
+  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; background: #1d1f20 !important; transition: none !important; }
+  :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
-  :global(.leaflet-fade-anim .leaflet-tile) { will-change: opacity; }
+  :global(.leaflet-fade-anim .leaflet-tile) { will-change: auto; transition: none !important; }
+  :global(.leaflet-fade-anim .leaflet-popup) { transition: none !important; }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 

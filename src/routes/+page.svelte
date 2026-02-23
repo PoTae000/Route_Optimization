@@ -112,7 +112,66 @@
     }
   }
 
-  onMount(initPage);
+  // ─── Preload Map Tiles ในพื้นหลังตั้งแต่หน้า Login ─────────────────────
+  // โหลด tile ของ CartoDB Dark Matter ไว้ใน browser cache ล่วงหน้า
+  // เพื่อว่าเวลาเปิดหน้า Map จะโหลดได้ทันทีไม่ขาวๆ
+  function preloadMapTiles() {
+    const TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png';
+    const SUBDOMAINS = ['a', 'b', 'c', 'd'];
+
+    // แปลง lat/lng → tile x,y ที่ zoom level z
+    function latLngToTile(lat: number, lng: number, z: number): { x: number; y: number } {
+      const n = Math.pow(2, z);
+      const x = Math.floor((lng + 180) / 360 * n);
+      const latRad = lat * Math.PI / 180;
+      const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+      return { x, y };
+    }
+
+    function fetchTile(s: string, z: number, x: number, y: number) {
+      const url = TILE_URL.replace('{s}', s).replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y));
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = url;
+    }
+
+    // โหลด tiles รอบจุดศูนย์กลาง ที่หลาย zoom levels
+    function preloadAround(lat: number, lng: number, zoomLevels: number[], radius: number) {
+      let count = 0;
+      for (const z of zoomLevels) {
+        const center = latLngToTile(lat, lng, z);
+        for (let dx = -radius; dx <= radius; dx++) {
+          for (let dy = -radius; dy <= radius; dy++) {
+            const s = SUBDOMAINS[(count++) % 4];
+            fetchTile(s, z, center.x + dx, center.y + dy);
+          }
+        }
+      }
+    }
+
+    // 1) โหลด tiles กรุงเทพ (default center) ทันที
+    preloadAround(13.7465, 100.5348, [10, 11, 12, 13, 14], 3);
+
+    // 2) ถ้ามี GPS → โหลด tiles รอบตำแหน่งผู้ใช้ด้วย (zoom ใกล้ๆ)
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude: lat, longitude: lng } = pos.coords;
+          // บันทึกตำแหน่งล่าสุดไว้ให้หน้า User ใช้
+          localStorage.setItem('_preloadPos', JSON.stringify({ lat, lng }));
+          preloadAround(lat, lng, [14, 15, 16, 17, 18], 4);
+        },
+        () => {},
+        { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+      );
+    }
+  }
+
+  onMount(() => {
+    initPage();
+    // เริ่มโหลด map tiles ในพื้นหลังทันที
+    setTimeout(preloadMapTiles, 500);
+  });
   afterNavigate(initPage);
 </script>
 
