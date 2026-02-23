@@ -6012,7 +6012,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        preferCanvas: true,
+        preferCanvas: false,
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
