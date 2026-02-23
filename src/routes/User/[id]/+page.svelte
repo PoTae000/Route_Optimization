@@ -609,14 +609,14 @@
   function applyUserMapRotation() {
     if (!map) return;
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    map.getContainer().style.transform = `rotate(${_userMapRotation}deg)`;
+    map.setBearing(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.getContainer().style.transform = 'rotate(0deg)';
+    if (map) map.setBearing(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2285,7 +2285,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        map.getContainer().style.transform = 'rotate(0deg)';
+        map.setBearing(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3284,7 +3284,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      map.getContainer().style.transform = 'rotate(0deg)';
+      map.setBearing(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3431,30 +3431,28 @@
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
       // Rotate map to face heading direction (perf: 2-degree threshold)
-      // Smooth map rotation following heading (CSS transform + lerp)
+      // Map bearing rotation following heading (leaflet-rotate)
       if (map) {
-        const mapEl = map.getContainer();
         if (isOffRoute || currentSpeed < 10) {
           if (_lastAppliedRotation !== 0) {
-            const dampedRot = _lastAppliedRotation * 0.92;
-            if (Math.abs(dampedRot) < 0.5) {
+            const dampedRot = _lastAppliedRotation * 0.85;
+            if (Math.abs(dampedRot) < 1) {
+              map.setBearing(0);
               _lastAppliedRotation = 0;
             } else {
+              map.setBearing(dampedRot);
               _lastAppliedRotation = dampedRot;
             }
-            mapEl.style.transform = `rotate(${_lastAppliedRotation}deg)`;
           }
         } else {
-          const targetRot = -animCurrentHeading;
-          // Shortest path rotation (-180 to 180)
-          let diff = targetRot - _lastAppliedRotation;
-          if (diff > 180) diff -= 360;
-          if (diff < -180) diff += 360;
-          // Smooth lerp (0.08 = very smooth, no jumps)
-          const lerpFactor = Math.abs(diff) > 60 ? 0.06 : 0.12;
-          if (Math.abs(diff) > 0.5) {
-            _lastAppliedRotation += diff * lerpFactor;
-            mapEl.style.transform = `rotate(${_lastAppliedRotation}deg)`;
+          const rotDeg = -animCurrentHeading;
+          if (Math.abs(rotDeg - _lastAppliedRotation) > 60) {
+            const dampedRot = _lastAppliedRotation + (rotDeg - _lastAppliedRotation) * 0.15;
+            map.setBearing(dampedRot);
+            _lastAppliedRotation = dampedRot;
+          } else if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
+            map.setBearing(rotDeg);
+            _lastAppliedRotation = rotDeg;
           }
         }
       }
@@ -6012,6 +6010,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
+      (window as any).L = L;
+      // @ts-ignore
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6028,17 +6029,13 @@ out center body;`;
         maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
-        maxBoundsViscosity: 1.0
-      }).setView([initLat, initLng], initZoom);
+        maxBoundsViscosity: 1.0,
+        rotate: true,
+        bearing: 0,
+        touchRotate: true,
+        rotateControl: false
+      } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-      // Satellite layer สำหรับ zoom ต่ำ (globe-like effect)
-      const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-        maxZoom: 19, keepBuffer: 4,
-        updateWhenZooming: true, updateWhenIdle: false,
-        noWrap: false,
-        className: 'satellite-tiles'
-      }).addTo(map);
 
       // CartoDB Dark Matter — dark theme base
       const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
@@ -6049,16 +6046,6 @@ out center body;`;
         className: 'dark-tiles'
       }).addTo(map);
 
-      // Zoom-based layer blending: satellite visible at low zoom, fades out at high zoom
-      const updateTileBlending = () => {
-        const z = map.getZoom();
-        const satEl = document.querySelector('.satellite-tiles') as HTMLElement;
-        const darkEl = document.querySelector('.dark-tiles') as HTMLElement;
-        if (satEl) satEl.style.opacity = z <= 6 ? '1' : z <= 9 ? String(1 - (z - 6) / 3) : '0';
-        if (darkEl) darkEl.style.opacity = z <= 6 ? '0.3' : z <= 9 ? String(0.3 + (z - 6) / 3 * 0.7) : '1';
-      };
-      map.on('zoomend', updateTileBlending);
-      updateTileBlending();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -6599,7 +6586,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.getContainer().style.transform = 'rotate(0deg)'; } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
@@ -9256,7 +9243,7 @@ out center body;`;
   :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.satellite-tiles), :global(.dark-tiles) { transition: opacity 0.5s ease; }
+  :global(.dark-tiles) { transition: opacity 0.5s ease; }
   :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; background: #1d1f20; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
