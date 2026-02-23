@@ -608,17 +608,15 @@
 
   function applyUserMapRotation() {
     if (!map) return;
-    const el = map.getContainer();
-    // Normalize to -180..180
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    el.style.transform = `rotate(${_userMapRotation}deg)`;
+    map.setBearing(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.getContainer().style.transform = 'rotate(0deg)';
+    if (map) map.setBearing(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2287,7 +2285,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        map.getContainer().style.transform = 'rotate(0deg)';
+        map.setBearing(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3286,8 +3284,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      map.getContainer().style.transition = 'transform 0.5s ease-out';
-      map.getContainer().style.transform = 'rotate(0deg)';
+      map.setBearing(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3436,16 +3433,15 @@
       // Rotate map to face heading direction (perf: 2-degree threshold)
       // Freeze rotation when off-route or slow to prevent wild spinning from unreliable GPS heading
       if (map) {
-        const mapEl = map.getContainer();
         if (isOffRoute || currentSpeed < 10) {
           // Off-route or slow/stationary: smoothly return to north-up
           if (_lastAppliedRotation !== 0) {
             const dampedRot = _lastAppliedRotation * 0.85;
             if (Math.abs(dampedRot) < 1) {
-              mapEl.style.transform = 'rotate(0deg)';
+              map.setBearing(0);
               _lastAppliedRotation = 0;
             } else {
-              mapEl.style.transform = `rotate(${dampedRot}deg)`;
+              map.setBearing(dampedRot);
               _lastAppliedRotation = dampedRot;
             }
           }
@@ -3453,12 +3449,11 @@
           const rotDeg = -animCurrentHeading;
           // Extra stability: reject sudden large heading jumps (> 60deg per frame)
           if (Math.abs(rotDeg - _lastAppliedRotation) > 60) {
-            // Dampen large jumps instead of applying directly
             const dampedRot = _lastAppliedRotation + (rotDeg - _lastAppliedRotation) * 0.15;
-            mapEl.style.transform = `rotate(${dampedRot}deg)`;
+            map.setBearing(dampedRot);
             _lastAppliedRotation = dampedRot;
           } else if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
-            mapEl.style.transform = `rotate(${rotDeg}deg)`;
+            map.setBearing(rotDeg);
             _lastAppliedRotation = rotDeg;
           }
         }
@@ -6017,6 +6012,10 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
+      // leaflet-rotate ต้องการ L บน window
+      (window as any).L = L;
+      // @ts-ignore — side-effect plugin, not a module
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6033,8 +6032,12 @@ out center body;`;
         maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
-        maxBoundsViscosity: 1.0
-      }).setView([initLat, initLng], initZoom);
+        maxBoundsViscosity: 1.0,
+        rotate: true,
+        bearing: 0,
+        touchRotate: true,
+        rotateControl: false
+      } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // Satellite layer สำหรับ zoom ต่ำ (globe-like effect)
@@ -6604,7 +6607,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.getContainer().style.transform = 'rotate(0deg)'; } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
@@ -9257,7 +9260,7 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; will-change: transform; overflow: hidden; transform-origin: center center; }
+  #map { width: 100%; height: 100%; overflow: hidden; }
   :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }

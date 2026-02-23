@@ -19,7 +19,9 @@
       "Bash(del \"C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\test_encode.mjs\")",
       "Bash(python3:*)",
       "Bash(ls:*)",
-      "Bash(git show:*)"
+      "Bash(git show:*)",
+      "Bash(npm search:*)",
+      "Bash(npm install:*)"
     ]
   }
 }
