@@ -478,6 +478,10 @@
   let isSearchingStartPoint = false;
   let isDataLoaded = false;
 
+  // Globe Mode (3D Earth view when zoomed out)
+  let globeMode = false;
+  let _globeStarsUrl = '';
+
   // Traffic
   let showTraffic = false;
   let trafficLayers: any[] = [];
@@ -524,24 +528,32 @@
     events.forEach(evt => window.removeEventListener(evt, resetSessionTimer));
   }
 
-  // ═══ Map Bearing Rotation (leaflet-rotate + renderer fix) ════════
-  // หมุนมุมกล้อง 360° ผ่าน map.setBearing()
-  // Fix: ปิด renderer rotate listener ที่ทำให้เส้นลอย
-  function setupMapRotation() {
-    if (!map) return;
-    // ── Fix: ปิด renderer rotate handler ที่ reposition canvas → เส้นลอย ──
-    // rotatePane CSS หมุน tiles+overlay พร้อมกันอยู่แล้ว
-    // renderer ไม่ต้อง _update ตอนหมุน (padding 2.0 ครอบคลุมพื้นที่ทั้งหมด)
-    const renderer = (map as any)._renderer;
-    if (renderer && renderer._update) {
-      map.off('rotate', renderer._update, renderer);
-    }
-  }
-
+  function setupMapRotation() {}
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.setBearing(0);
+  }
+
+  // ═══ Globe Mode: 3D Earth Effect ═══
+  function initGlobeStars() {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1200;
+      canvas.height = 1200;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      for (let i = 0; i < 500; i++) {
+        const x = Math.random() * 1200;
+        const y = Math.random() * 1200;
+        const r = Math.random() > 0.95 ? 1.8 : Math.random() > 0.8 ? 1.2 : 0.6;
+        const a = Math.random() * 0.7 + 0.15;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+        ctx.fill();
+      }
+      _globeStarsUrl = canvas.toDataURL('image/png');
+    } catch(e) {}
   }
 
   // Turn-by-Turn Navigation
@@ -3351,26 +3363,7 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth bearing rotation (leaflet-rotate, renderer listener disabled = ไม่ลอย)
-      if (isMapFollowing && map && _animFrameCount % 3 === 0) {
-        if (isOffRoute || currentSpeed < 10) {
-          if (Math.abs(_lastAppliedRotation) > 0.5) {
-            _lastAppliedRotation *= 0.92;
-            if (Math.abs(_lastAppliedRotation) < 0.5) _lastAppliedRotation = 0;
-            map.setBearing(_lastAppliedRotation);
-          }
-        } else {
-          const target = -animCurrentHeading;
-          let diff = target - _lastAppliedRotation;
-          if (diff > 180) diff -= 360;
-          if (diff < -180) diff += 360;
-          if (Math.abs(diff) > 0.5) {
-            const lerpFactor = Math.abs(diff) > 90 ? 0.08 : Math.abs(diff) > 30 ? 0.15 : 0.2;
-            _lastAppliedRotation += diff * lerpFactor;
-            map.setBearing(_lastAppliedRotation);
-          }
-        }
-      }
+      // Map rotation disabled — แผนที่เหนืออยู่ข้างบนเสมอ
     }
     tick();
   }
@@ -5925,9 +5918,6 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      (window as any).L = L;
-      // @ts-ignore
-      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -5937,22 +5927,18 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.canvas({ padding: 2.0 }),  // padding ใหญ่ → เส้นไม่ขาดตอนเลื่อน/หมุน
+        renderer: L.svg({ padding: 5.0 }),  // SVG renderer — ไม่มี memory limit, เส้นไม่ขาดตอนเลื่อน
         zoomSnap: 1,
         wheelDebounceTime: 80,
-        minZoom: 3,
+        minZoom: 2,  // Allow zoom out for globe view
         maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: false,      // ปิด zoom animation ป้องกัน shift ตอนซูม
-        markerZoomAnimation: false,
-        rotate: true,
-        bearing: 0,
-        touchRotate: true,
-        rotateControl: false
-      } as any).setView([initLat, initLng], initZoom);
+        zoomAnimation: true,
+        markerZoomAnimation: true
+      }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
@@ -5991,6 +5977,9 @@ out center body;`;
         noWrap: false,
         className: 'dark-tiles'
       }).addTo(map);
+
+      // Generate star field for globe mode
+      initGlobeStars();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -6043,6 +6032,9 @@ out center body;`;
         document.getElementById('map')?.style.setProperty('--marker-scale', String(scale));
         const labelScale = z >= 16 ? 1 : z >= 14 ? 0.85 : z >= 12 ? 0.7 : z >= 10 ? 0.55 : 0.4;
         document.getElementById('map')?.style.setProperty('--start-label-scale', String(labelScale));
+        // Globe mode — 3D Earth effect when zoomed out
+        const shouldGlobe = z <= 3;
+        if (shouldGlobe !== globeMode) globeMode = shouldGlobe;
       };
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
@@ -7019,8 +7011,13 @@ out center body;`;
     </button>
   {/if}
 
-  <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm}>
-    <div id="map"></div>
+  <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm} class:globe-mode={globeMode}>
+    <!-- Globe: Space Background + Stars -->
+    <div class="globe-space-bg" class:active={globeMode} style={_globeStarsUrl ? `background-image: url(${_globeStarsUrl})` : ''}></div>
+    <div id="map" class:globe-active={globeMode}></div>
+    <!-- Globe: Atmosphere Glow + Sphere Shading -->
+    <div class="globe-atmosphere-ring" class:active={globeMode}></div>
+    <div class="globe-shading-overlay" class:active={globeMode}></div>
 
     {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker}
       <div class="map-stats glass-card" class:route-active={optimizedRoute}>
@@ -7085,9 +7082,6 @@ out center body;`;
           <button class="float-toggle-chip" class:active={showIncidentsPanel} on:click={toggleIncidentsPanel} title="เหตุการณ์จราจร">🚨</button>
           <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
           <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
-          {#if Math.abs(_userMapRotation) > 1}
-            <button class="float-toggle-chip compass-reset-btn" on:click={resetMapRotation} title="หันเหนือ (รีเซ็ตการหมุน)" style="transform: rotate({_userMapRotation}deg);">🧭</button>
-          {/if}
         </div>
       </div>
 
@@ -9154,7 +9148,76 @@ out center body;`;
   .map-container.fullscreen { width: 100vw; }
   .map-container.settings-open > *:not(#map) { display: none !important; }
   .map-container.addform-open > *:not(#map) { display: none !important; }
-  
+
+  /* ═══ Globe Mode: 3D Earth View ═══ */
+  .map-container.globe-mode { background: #000005 !important; }
+
+  .globe-space-bg {
+    position: absolute; inset: 0; z-index: 0;
+    background-color: #000005;
+    background-size: 1200px 1200px;
+    background-repeat: repeat;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+    pointer-events: none;
+  }
+  .globe-space-bg.active { opacity: 1; }
+
+  #map {
+    clip-path: circle(150vmax at 50% 50%);
+    transition: clip-path 1s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative; z-index: 1;
+  }
+  :global(#map.globe-active) {
+    clip-path: circle(42vmin at 50% 50%);
+  }
+
+  .globe-atmosphere-ring {
+    position: absolute;
+    width: 86vmin; height: 86vmin;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    box-shadow:
+      0 0 60px 15px rgba(70, 150, 255, 0.08),
+      0 0 120px 30px rgba(70, 150, 255, 0.04),
+      inset 0 0 40px 10px rgba(70, 150, 255, 0.05);
+    border: 1px solid rgba(100, 180, 255, 0.08);
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.8s ease 0.4s;
+  }
+  .globe-atmosphere-ring.active { opacity: 1; }
+
+  .globe-shading-overlay {
+    position: absolute;
+    width: 84vmin; height: 84vmin;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 32% 30%,
+      transparent 15%,
+      rgba(0, 0, 0, 0.08) 35%,
+      rgba(0, 0, 0, 0.35) 60%,
+      rgba(0, 0, 0, 0.7) 85%,
+      rgba(0, 0, 0, 0.9) 100%
+    );
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.6s ease 0.3s;
+  }
+  .globe-shading-overlay.active { opacity: 1; }
+
+  /* Hide UI overlays in globe mode */
+  .map-container.globe-mode .map-stats,
+  .map-container.globe-mode .add-point-toggle,
+  .map-container.globe-mode .map-info,
+  .map-container.globe-mode .map-search-float,
+  .map-container.globe-mode .route-prefs-float { opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+
   /* Add Point Toggle - Top Left below stats */
   .add-point-toggle {
     position: absolute; top: 120px; left: 16px; z-index: 1001;
