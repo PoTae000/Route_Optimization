@@ -606,17 +606,22 @@
     });
   }
 
+  function setMapRotation(deg: number) {
+    if (!map) return;
+    map.getContainer().style.transform = `rotate(${deg}deg)`;
+  }
+
   function applyUserMapRotation() {
     if (!map) return;
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    map.setBearing(_userMapRotation);
+    setMapRotation(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.setBearing(0);
+    if (map) setMapRotation(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2285,7 +2290,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        map.setBearing(0);
+        setMapRotation(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3284,7 +3289,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      map.setBearing(0);
+      setMapRotation(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3430,29 +3435,23 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Rotate map to face heading direction (perf: 2-degree threshold)
-      // Map bearing rotation following heading (leaflet-rotate)
+      // Smooth map rotation following heading (CSS + lerp)
       if (map) {
         if (isOffRoute || currentSpeed < 10) {
-          if (_lastAppliedRotation !== 0) {
-            const dampedRot = _lastAppliedRotation * 0.85;
-            if (Math.abs(dampedRot) < 1) {
-              map.setBearing(0);
-              _lastAppliedRotation = 0;
-            } else {
-              map.setBearing(dampedRot);
-              _lastAppliedRotation = dampedRot;
-            }
+          if (Math.abs(_lastAppliedRotation) > 0.3) {
+            _lastAppliedRotation *= 0.92;
+            if (Math.abs(_lastAppliedRotation) < 0.3) _lastAppliedRotation = 0;
+            setMapRotation(_lastAppliedRotation);
           }
         } else {
-          const rotDeg = -animCurrentHeading;
-          if (Math.abs(rotDeg - _lastAppliedRotation) > 60) {
-            const dampedRot = _lastAppliedRotation + (rotDeg - _lastAppliedRotation) * 0.15;
-            map.setBearing(dampedRot);
-            _lastAppliedRotation = dampedRot;
-          } else if (Math.abs(rotDeg - _lastAppliedRotation) > 2) {
-            map.setBearing(rotDeg);
-            _lastAppliedRotation = rotDeg;
+          const target = -animCurrentHeading;
+          let diff = target - _lastAppliedRotation;
+          if (diff > 180) diff -= 360;
+          if (diff < -180) diff += 360;
+          if (Math.abs(diff) > 0.3) {
+            const lerp = Math.abs(diff) > 60 ? 0.06 : 0.12;
+            _lastAppliedRotation += diff * lerp;
+            setMapRotation(_lastAppliedRotation);
           }
         }
       }
@@ -6010,9 +6009,6 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      (window as any).L = L;
-      // @ts-ignore
-      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6029,12 +6025,8 @@ out center body;`;
         maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
-        maxBoundsViscosity: 1.0,
-        rotate: true,
-        bearing: 0,
-        touchRotate: true,
-        rotateControl: false
-      } as any).setView([initLat, initLng], initZoom);
+        maxBoundsViscosity: 1.0
+      }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // CartoDB Dark Matter — dark theme base
@@ -6586,7 +6578,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; setMapRotation(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
