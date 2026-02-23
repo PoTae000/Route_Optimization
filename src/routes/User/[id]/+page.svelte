@@ -524,94 +524,38 @@
     events.forEach(evt => window.removeEventListener(evt, resetSessionTimer));
   }
 
-  // Map Rotation Gesture (touch 2-finger + shift+drag)
-  function setupMapRotation() {
-    if (!map) return;
-    const el = map.getContainer();
-    let touchStartAngle: number | null = null;
-    let initialPinchDist = 0;
-
-    function getTouchAngle(t1: Touch, t2: Touch): number {
-      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * (180 / Math.PI);
+  // ═══ CSS Map Rotation (Google Maps style) ═══════════════════════
+  // หมุนทั้ง #map container → ทุกอย่าง (tiles + เส้นทาง + markers) หมุนพร้อมกัน
+  // ไม่มี recalculation → ไม่หน่วง, ไม่ลอย
+  // พอผู้ใช้แตะจอ/ลาก → reset rotation ทันที (เหมือน Google Maps)
+  function setMapRotation(deg: number) {
+    const el = document.getElementById('map');
+    if (!el) return;
+    if (Math.abs(deg) < 0.3) {
+      el.style.transform = '';
+      return;
     }
-    function getTouchDist(t1: Touch, t2: Touch): number {
-      return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-    }
-
-    el.addEventListener('touchstart', (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        touchStartAngle = getTouchAngle(e.touches[0], e.touches[1]);
-        initialPinchDist = getTouchDist(e.touches[0], e.touches[1]);
-        _gestureBaseRotation = _userMapRotation;
-      }
-    }, { passive: true });
-
-    el.addEventListener('touchmove', (e: TouchEvent) => {
-      if (e.touches.length === 2 && touchStartAngle !== null) {
-        const currentAngle = getTouchAngle(e.touches[0], e.touches[1]);
-        const angleDelta = currentAngle - touchStartAngle;
-        const currentDist = getTouchDist(e.touches[0], e.touches[1]);
-        const distRatio = initialPinchDist > 0 ? currentDist / initialPinchDist : 1;
-        const isRotating = Math.abs(angleDelta) > 8 || (Math.abs(angleDelta) > 3 && Math.abs(distRatio - 1) < 0.15);
-        if (isRotating) {
-          if (!_isGestureRotating) {
-            _isGestureRotating = true;
-            map.touchZoom?.disable();
-            map.dragging?.disable();
-          }
-          _userMapRotation = _gestureBaseRotation + angleDelta;
-          applyUserMapRotation();
-        }
-      }
-    }, { passive: true });
-
-    el.addEventListener('touchend', () => {
-      if (_isGestureRotating) {
-        _isGestureRotating = false;
-        map.touchZoom?.enable();
-        map.dragging?.enable();
-      }
-      touchStartAngle = null;
-    }, { passive: true });
-
-    // Desktop: Shift+drag
-    let shiftDragStart: { x: number; y: number } | null = null;
-    el.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.shiftKey || e.ctrlKey) {
-        shiftDragStart = { x: e.clientX, y: e.clientY };
-        _gestureBaseRotation = _userMapRotation;
-        _isGestureRotating = true;
-        map.dragging.disable();
-        e.preventDefault();
-      }
-    });
-    window.addEventListener('mousemove', (e: MouseEvent) => {
-      if (shiftDragStart && _isGestureRotating) {
-        const dx = e.clientX - shiftDragStart.x;
-        _userMapRotation = _gestureBaseRotation + dx * 0.5;
-        applyUserMapRotation();
-      }
-    });
-    window.addEventListener('mouseup', () => {
-      if (shiftDragStart) {
-        shiftDragStart = null;
-        _isGestureRotating = false;
-        if (map) map.dragging.enable();
-      }
-    });
+    el.style.transform = `rotate(${deg}deg)`;
   }
 
-  function applyUserMapRotation() {
+  function setupMapRotation() {
     if (!map) return;
-    _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    map.setBearing(_userMapRotation);
-    _lastAppliedRotation = _userMapRotation;
+    // เมื่อผู้ใช้ลากแผนที่ → reset rotation ทันที + หยุด follow
+    // เหมือน Google Maps: แตะจอ = หยุดหมุน, กด recenter = หมุนต่อ
+    map.on('dragstart', () => {
+      if (Math.abs(_lastAppliedRotation) > 0.5) {
+        _lastAppliedRotation = 0;
+        _userMapRotation = 0;
+        setMapRotation(0);
+      }
+      isMapFollowing = false;
+    });
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.setBearing(0);
+    setMapRotation(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2276,7 +2220,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        map.setBearing(0);
+        resetMapRotation();
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3275,7 +3219,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      map.setBearing(0);
+      resetMapRotation();
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3421,25 +3365,23 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth map rotation following heading (leaflet-rotate bearing + lerp)
-      if (map && _animFrameCount % 2 === 0) { // ทุก 2 frame (~30fps) เพื่อลด overhead
+      // Smooth CSS rotation following heading (GPU-accelerated, ไม่ recalculate overlay)
+      if (isMapFollowing) {
         if (isOffRoute || currentSpeed < 10) {
-          // ค่อยๆ กลับ 0 เมื่อหยุด/หลงทาง
           if (Math.abs(_lastAppliedRotation) > 0.5) {
-            _lastAppliedRotation *= 0.9;
+            _lastAppliedRotation *= 0.92;
             if (Math.abs(_lastAppliedRotation) < 0.5) _lastAppliedRotation = 0;
-            map.setBearing(_lastAppliedRotation);
+            setMapRotation(_lastAppliedRotation);
           }
         } else {
           const target = -animCurrentHeading;
           let diff = target - _lastAppliedRotation;
           if (diff > 180) diff -= 360;
           if (diff < -180) diff += 360;
-          if (Math.abs(diff) > 0.5) {
-            // Smooth lerp: ค่ายิ่งสูง ยิ่งหมุนเร็ว แต่ไม่กระตุก
+          if (Math.abs(diff) > 0.3) {
             const lerpFactor = Math.abs(diff) > 90 ? 0.08 : Math.abs(diff) > 30 ? 0.15 : 0.2;
             _lastAppliedRotation += diff * lerpFactor;
-            map.setBearing(_lastAppliedRotation);
+            setMapRotation(_lastAppliedRotation);
           }
         }
       }
@@ -5997,9 +5939,6 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      (window as any).L = L;
-      // @ts-ignore
-      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6009,7 +5948,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.svg({ padding: 3.0 }),  // SVG padding ใหญ่ → ไม่ต้อง reposition ตอนหมุน → เส้นไม่ลอย
+        preferCanvas: true,
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
@@ -6018,13 +5957,9 @@ out center body;`;
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: false,
-        markerZoomAnimation: false,
-        rotate: true,
-        bearing: 0,
-        touchRotate: true,
-        rotateControl: false
-      } as any).setView([initLat, initLng], initZoom);
+        zoomAnimation: true,
+        markerZoomAnimation: true
+      }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
@@ -6603,7 +6538,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; resetMapRotation(); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
@@ -9256,7 +9191,7 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; }
+  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; will-change: transform; transform-origin: center center; }
   :global(.leaflet-container) { background: #1d1f20 !important; }
   :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1d1f20; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
