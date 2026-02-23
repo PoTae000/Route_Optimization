@@ -524,38 +524,24 @@
     events.forEach(evt => window.removeEventListener(evt, resetSessionTimer));
   }
 
-  // ═══ CSS Map Rotation (Google Maps style) ═══════════════════════
-  // หมุนทั้ง #map container → ทุกอย่าง (tiles + เส้นทาง + markers) หมุนพร้อมกัน
-  // ไม่มี recalculation → ไม่หน่วง, ไม่ลอย
-  // พอผู้ใช้แตะจอ/ลาก → reset rotation ทันที (เหมือน Google Maps)
-  function setMapRotation(deg: number) {
-    const el = document.getElementById('map');
-    if (!el) return;
-    if (Math.abs(deg) < 0.3) {
-      el.style.transform = '';
-      return;
-    }
-    el.style.transform = `rotate(${deg}deg)`;
-  }
-
+  // ═══ Map Bearing Rotation (leaflet-rotate + renderer fix) ════════
+  // หมุนมุมกล้อง 360° ผ่าน map.setBearing()
+  // Fix: ปิด renderer rotate listener ที่ทำให้เส้นลอย
   function setupMapRotation() {
     if (!map) return;
-    // เมื่อผู้ใช้ลากแผนที่ → reset rotation ทันที + หยุด follow
-    // เหมือน Google Maps: แตะจอ = หยุดหมุน, กด recenter = หมุนต่อ
-    map.on('dragstart', () => {
-      if (Math.abs(_lastAppliedRotation) > 0.5) {
-        _lastAppliedRotation = 0;
-        _userMapRotation = 0;
-        setMapRotation(0);
-      }
-      isMapFollowing = false;
-    });
+    // ── Fix: ปิด renderer rotate handler ที่ reposition canvas → เส้นลอย ──
+    // rotatePane CSS หมุน tiles+overlay พร้อมกันอยู่แล้ว
+    // renderer ไม่ต้อง _update ตอนหมุน (padding 2.0 ครอบคลุมพื้นที่ทั้งหมด)
+    const renderer = (map as any)._renderer;
+    if (renderer && renderer._update) {
+      map.off('rotate', renderer._update, renderer);
+    }
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    setMapRotation(0);
+    if (map) map.setBearing(0);
   }
 
   // Turn-by-Turn Navigation
@@ -3365,23 +3351,23 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth CSS rotation following heading (GPU-accelerated, ไม่ recalculate overlay)
-      if (isMapFollowing) {
+      // Smooth bearing rotation (leaflet-rotate, renderer listener disabled = ไม่ลอย)
+      if (isMapFollowing && map && _animFrameCount % 3 === 0) {
         if (isOffRoute || currentSpeed < 10) {
           if (Math.abs(_lastAppliedRotation) > 0.5) {
             _lastAppliedRotation *= 0.92;
             if (Math.abs(_lastAppliedRotation) < 0.5) _lastAppliedRotation = 0;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         } else {
           const target = -animCurrentHeading;
           let diff = target - _lastAppliedRotation;
           if (diff > 180) diff -= 360;
           if (diff < -180) diff += 360;
-          if (Math.abs(diff) > 0.3) {
+          if (Math.abs(diff) > 0.5) {
             const lerpFactor = Math.abs(diff) > 90 ? 0.08 : Math.abs(diff) > 30 ? 0.15 : 0.2;
             _lastAppliedRotation += diff * lerpFactor;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         }
       }
@@ -5939,6 +5925,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
+      (window as any).L = L;
+      // @ts-ignore
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -5948,7 +5937,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        preferCanvas: true,
+        renderer: L.canvas({ padding: 2.0 }),  // padding ใหญ่ → เส้นไม่ขาดตอนเลื่อน/หมุน
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
@@ -5957,9 +5946,13 @@ out center body;`;
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: true,
-        markerZoomAnimation: true
-      }).setView([initLat, initLng], initZoom);
+        zoomAnimation: false,      // ปิด zoom animation ป้องกัน shift ตอนซูม
+        markerZoomAnimation: false,
+        rotate: true,
+        bearing: 0,
+        touchRotate: true,
+        rotateControl: false
+      } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
@@ -9191,7 +9184,7 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; will-change: transform; transform-origin: center center; }
+  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; }
   :global(.leaflet-container) { background: #1d1f20 !important; }
   :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1d1f20; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
