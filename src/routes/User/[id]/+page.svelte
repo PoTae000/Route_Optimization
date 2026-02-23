@@ -603,11 +603,14 @@
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting
-      scene.add(new THREE.AmbientLight(0x445566, 3.5));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 1.5);
+      // Lighting — bright enough to see map details
+      scene.add(new THREE.AmbientLight(0x8899bb, 5.0));
+      const sun: any = new THREE.DirectionalLight(0xffffff, 2.5);
       sun.position.set(5, 3, 5);
       scene.add(sun);
+      const fill: any = new THREE.DirectionalLight(0x6688cc, 1.2);
+      fill.position.set(-4, -2, -3);
+      scene.add(fill);
 
       // Stars background
       const starsGeo = new THREE.BufferGeometry();
@@ -8160,266 +8163,271 @@ out center body;`;
 
 /* ==================== DAY MODE OVERRIDES ==================== */
 /* โทนครีมอุ่น — สบายตา + contrast ชัด */
+/* ═══════════════════════════════════════════════════════════════
+   DAY MODE — White/Blue Theme (ธีมขาว-น้ำเงิน)
+   Dark mode = black/green | Light mode = white/blue
+   ═══════════════════════════════════════════════════════════════ */
 .app-container.day-mode {
-  background: linear-gradient(135deg, #d9d4cd, #d4cfc7, #cec9c1) !important;
+  background: linear-gradient(135deg, #edf2f7, #e2e8f0, #dbeafe) !important;
   transition: background 0.3s ease;
 }
 
 .day-mode .sidebar {
-  background: rgba(235, 230, 222, 0.97) !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
-  box-shadow: 2px 0 16px rgba(60, 45, 30, 0.1) !important;
+  background: rgba(255, 255, 255, 0.97) !important;
+  border-color: rgba(59, 130, 246, 0.1) !important;
+  box-shadow: 2px 0 20px rgba(30, 64, 175, 0.08) !important;
 }
 
 .day-mode :global(.leaflet-tile-pane) {
-  filter: brightness(1.1) saturate(1.2) !important;
+  filter: brightness(1.15) saturate(1.15) !important;
 }
 
 .day-mode :global(.leaflet-container) {
-  background: #cec9c1 !important;
+  background: #dbeafe !important;
 }
 
 .day-mode .glass-card {
-  background: rgba(235, 230, 222, 0.94) !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
-  color: #1e1b18 !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  border-color: rgba(59, 130, 246, 0.12) !important;
+  color: #1e293b !important;
 }
 
 .day-mode .point-card {
-  background: rgba(242, 238, 232, 0.92) !important;
-  border-color: rgba(100, 80, 60, 0.08) !important;
-  color: #1e1b18 !important;
-  box-shadow: 0 1px 4px rgba(60, 45, 30, 0.06) !important;
+  background: rgba(248, 250, 252, 0.95) !important;
+  border-color: rgba(59, 130, 246, 0.08) !important;
+  color: #1e293b !important;
+  box-shadow: 0 1px 4px rgba(30, 64, 175, 0.06) !important;
 }
 
 .day-mode .point-card:hover {
-  background: rgba(248, 245, 240, 0.96) !important;
-  box-shadow: 0 2px 8px rgba(60, 45, 30, 0.1) !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.12) !important;
 }
 
 .day-mode .point-card.active {
-  border-color: rgba(0, 150, 80, 0.5) !important;
-  box-shadow: 0 0 0 1px rgba(0, 150, 80, 0.15), 0 2px 8px rgba(60, 45, 30, 0.1) !important;
+  border-color: rgba(59, 130, 246, 0.5) !important;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2), 0 2px 8px rgba(30, 64, 175, 0.1) !important;
 }
 
 .day-mode .sidebar-header,
 .day-mode .logo-text h1 {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
 
 .day-mode .logo-text span {
-  color: #6b6058 !important;
+  color: #64748b !important;
 }
 
 .day-mode .point-name {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
 
 .day-mode .point-address {
-  color: #5c5349 !important;
+  color: #64748b !important;
 }
 
 .day-mode .tab {
-  color: #6b6058 !important;
+  color: #64748b !important;
   border-color: transparent !important;
 }
 
 .day-mode .tab.active {
-  color: #00875a !important;
-  border-color: #00875a !important;
-  background: rgba(0, 135, 90, 0.08) !important;
+  color: #2563eb !important;
+  border-color: #2563eb !important;
+  background: rgba(59, 130, 246, 0.08) !important;
 }
 
 .day-mode .btn-ghost {
-  background: rgba(242, 238, 232, 0.8) !important;
-  color: #2a2520 !important;
-  border-color: rgba(100, 80, 60, 0.12) !important;
+  background: rgba(248, 250, 252, 0.9) !important;
+  color: #334155 !important;
+  border-color: rgba(59, 130, 246, 0.12) !important;
 }
 
 .day-mode .btn-ghost:hover {
-  background: rgba(248, 245, 240, 0.95) !important;
-  border-color: rgba(100, 80, 60, 0.2) !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
 }
 
 .day-mode .btn-secondary {
-  background: rgba(0, 135, 90, 0.1) !important;
-  color: #006a48 !important;
-  border-color: rgba(0, 135, 90, 0.25) !important;
+  background: rgba(59, 130, 246, 0.1) !important;
+  color: #1d4ed8 !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
 }
 
 .day-mode .btn-primary {
-  background: linear-gradient(135deg, #00875a, #006a48) !important;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
   color: #fff !important;
-  box-shadow: 0 2px 8px rgba(0, 135, 90, 0.25) !important;
+  box-shadow: 0 2px 10px rgba(37, 99, 235, 0.3) !important;
 }
 
 .day-mode .action-buttons {
-  border-color: rgba(100, 80, 60, 0.08) !important;
+  border-color: rgba(59, 130, 246, 0.08) !important;
 }
 
 .day-mode .content-area {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
 
 .day-mode .settings-panel {
-  background: rgba(240, 236, 228, 0.98) !important;
-  color: #1e1b18 !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  color: #1e293b !important;
 }
 
 .day-mode .settings-section h4 {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
 
 .day-mode .settings-overlay {
-  background: rgba(30, 25, 18, 0.35) !important;
+  background: rgba(15, 23, 42, 0.3) !important;
 }
 
 .day-mode .icon-btn {
-  background: rgba(242, 238, 232, 0.8) !important;
-  color: #2a2520 !important;
+  background: rgba(248, 250, 252, 0.9) !important;
+  color: #334155 !important;
 }
 
 .day-mode .icon-btn:hover {
-  background: rgba(248, 245, 240, 0.95) !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  color: #2563eb !important;
 }
 
 .day-mode .sidebar-toggle {
-  background: rgba(235, 230, 222, 0.95) !important;
-  color: #2a2520 !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  color: #334155 !important;
+  border-color: rgba(59, 130, 246, 0.12) !important;
 }
 
 .day-mode .notification {
-  background: rgba(242, 238, 232, 0.97) !important;
-  color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.12) !important;
-  box-shadow: 0 4px 16px rgba(60, 45, 30, 0.12) !important;
+  background: rgba(255, 255, 255, 0.97) !important;
+  color: #1e293b !important;
+  border-color: rgba(59, 130, 246, 0.12) !important;
+  box-shadow: 0 4px 20px rgba(30, 64, 175, 0.1) !important;
 }
 
 .day-mode .empty-state h4 {
-  color: #2a2520 !important;
+  color: #334155 !important;
 }
 .day-mode .empty-state p {
-  color: #6b6058 !important;
+  color: #64748b !important;
 }
 
 .day-mode .stat-card {
-  background: rgba(242, 238, 232, 0.92) !important;
-  border-color: rgba(100, 80, 60, 0.08) !important;
-  color: #1e1b18 !important;
-  box-shadow: 0 1px 4px rgba(60, 45, 30, 0.06) !important;
+  background: rgba(248, 250, 252, 0.95) !important;
+  border-color: rgba(59, 130, 246, 0.08) !important;
+  color: #1e293b !important;
+  box-shadow: 0 1px 4px rgba(30, 64, 175, 0.06) !important;
 }
 
 .day-mode .stat-value {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
 
 .day-mode .stat-label {
-  color: #6b6058 !important;
+  color: #64748b !important;
 }
 
 .day-mode .multi-select-toolbar {
-  background: linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(139,92,246,0.05) 100%) !important;
-  border-color: rgba(99,102,241,0.2) !important;
+  background: linear-gradient(135deg, rgba(59,130,246,0.08) 0%, rgba(99,102,241,0.05) 100%) !important;
+  border-color: rgba(59,130,246,0.2) !important;
 }
-.day-mode .mst-label { color: #6366f1 !important; }
-.day-mode .mst-count { background: rgba(99,102,241,0.1) !important; border-color: rgba(99,102,241,0.25) !important; }
-.day-mode .mst-count.has-selected { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; }
-.day-mode .mst-num { color: #6366f1 !important; }
+.day-mode .mst-label { color: #2563eb !important; }
+.day-mode .mst-count { background: rgba(59,130,246,0.1) !important; border-color: rgba(59,130,246,0.25) !important; }
+.day-mode .mst-count.has-selected { background: linear-gradient(135deg, #2563eb, #3b82f6) !important; }
+.day-mode .mst-num { color: #2563eb !important; }
 .day-mode .mst-count.has-selected .mst-num { color: #fff !important; }
-.day-mode .mst-btn { background: rgba(99,102,241,0.06) !important; color: #6366f1 !important; }
-.day-mode .mst-btn:hover { background: rgba(99,102,241,0.15) !important; }
+.day-mode .mst-btn { background: rgba(59,130,246,0.06) !important; color: #2563eb !important; }
+.day-mode .mst-btn:hover { background: rgba(59,130,246,0.15) !important; }
 .day-mode .mst-btn.delete { color: #9ca3af !important; }
 .day-mode .mst-btn.delete:hover:not(:disabled) { background: rgba(239,68,68,0.1) !important; color: #ef4444 !important; }
 .day-mode .mst-btn.close { color: #9ca3af !important; }
-.day-mode .mst-btn.close:hover { background: rgba(0,0,0,0.06) !important; color: #374151 !important; }
-.day-mode .mst-divider { background: rgba(99,102,241,0.15) !important; }
-.day-mode .checkbox { background: rgba(0,0,0,0.04) !important; border-color: rgba(99,102,241,0.25) !important; }
-.day-mode .checkbox.checked { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; border-color: transparent !important; }
-.day-mode .point-card.selected { background: rgba(99,102,241,0.04) !important; border-color: rgba(99,102,241,0.15) !important; }
+.day-mode .mst-btn.close:hover { background: rgba(0,0,0,0.06) !important; color: #334155 !important; }
+.day-mode .mst-divider { background: rgba(59,130,246,0.15) !important; }
+.day-mode .checkbox { background: rgba(0,0,0,0.03) !important; border-color: rgba(59,130,246,0.25) !important; }
+.day-mode .checkbox.checked { background: linear-gradient(135deg, #2563eb, #3b82f6) !important; border-color: transparent !important; }
+.day-mode .point-card.selected { background: rgba(59,130,246,0.05) !important; border-color: rgba(59,130,246,0.2) !important; }
 
 .day-mode .sidebar-scroll {
-  scrollbar-color: rgba(100, 80, 60, 0.18) transparent;
+  scrollbar-color: rgba(59, 130, 246, 0.2) transparent;
 }
 
 .day-mode .night-mode-btn {
-  color: #5c5349;
-  border-color: rgba(100, 80, 60, 0.12);
-  background: rgba(242, 238, 232, 0.7);
+  color: #64748b;
+  border-color: rgba(59, 130, 246, 0.12);
+  background: rgba(248, 250, 252, 0.8);
 }
 
 .day-mode .night-mode-btn:hover {
-  background: rgba(248, 245, 240, 0.9);
-  color: #2a2520;
+  background: rgba(255, 255, 255, 0.95);
+  color: #334155;
 }
 
 .day-mode .night-mode-btn.active {
-  background: rgba(0, 135, 90, 0.1);
-  border-color: rgba(0, 135, 90, 0.4);
-  color: #006a48;
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #1d4ed8;
 }
 
 .day-mode .vehicle-type-btn {
-  background: rgba(242, 238, 232, 0.7) !important;
-  color: #5c5349 !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
+  background: rgba(248, 250, 252, 0.8) !important;
+  color: #64748b !important;
+  border-color: rgba(59, 130, 246, 0.1) !important;
 }
 
 .day-mode .vehicle-type-btn.active {
-  background: rgba(0, 135, 90, 0.1) !important;
-  border-color: rgba(0, 135, 90, 0.4) !important;
-  color: #006a48 !important;
+  background: rgba(59, 130, 246, 0.1) !important;
+  border-color: rgba(59, 130, 246, 0.4) !important;
+  color: #1d4ed8 !important;
 }
 
 .day-mode .toggle-setting span {
-  color: #2a2520 !important;
+  color: #334155 !important;
 }
 
 .day-mode .toggle-btn {
-  background: rgba(100, 80, 60, 0.15) !important;
+  background: rgba(100, 116, 139, 0.2) !important;
 }
 
 .day-mode .toggle-btn.active {
-  background: #00875a !important;
+  background: #2563eb !important;
 }
 
 .day-mode .map-stats {
-  background: rgba(235, 230, 222, 0.94) !important;
-  color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  color: #1e293b !important;
+  border-color: rgba(59, 130, 246, 0.1) !important;
 }
 .day-mode .map-route-summary {
-  background: rgba(235, 230, 222, 0.94) !important;
-  border-color: rgba(100, 80, 60, 0.1) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  border-color: rgba(59, 130, 246, 0.1) !important;
 }
-.day-mode .mrs-value { color: #00875a !important; }
+.day-mode .mrs-value { color: #2563eb !important; }
 .day-mode .mrs-value.cost { color: #d97706 !important; }
-.day-mode .mrs-unit { color: #6b6058 !important; }
-.day-mode .mrs-divider { background: rgba(100, 80, 60, 0.12) !important; }
-.day-mode .mrs-btn.clear { background: rgba(0,0,0,0.04) !important; color: #9ca3af !important; }
+.day-mode .mrs-unit { color: #64748b !important; }
+.day-mode .mrs-divider { background: rgba(59, 130, 246, 0.12) !important; }
+.day-mode .mrs-btn.clear { background: rgba(0,0,0,0.04) !important; color: #94a3b8 !important; }
 
 .day-mode .search-panel {
-  background: rgba(235, 230, 222, 0.97) !important;
-  color: #1e1b18 !important;
+  background: rgba(255, 255, 255, 0.97) !important;
+  color: #1e293b !important;
 }
 
 .day-mode .search-panel input {
-  background: rgba(242, 238, 232, 0.9) !important;
-  color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.12) !important;
+  background: rgba(248, 250, 252, 0.95) !important;
+  color: #1e293b !important;
+  border-color: rgba(59, 130, 246, 0.15) !important;
 }
 
 .day-mode .search-panel input::placeholder {
-  color: #8a7e74 !important;
+  color: #94a3b8 !important;
 }
 
 .day-mode .delete-btn {
-  color: #a09488 !important;
+  color: #94a3b8 !important;
 }
 
 .day-mode .delete-btn:hover {
-  color: #c0392b !important;
-  background: rgba(192, 57, 43, 0.08) !important;
+  color: #dc2626 !important;
+  background: rgba(220, 38, 38, 0.08) !important;
 }
 
 .day-mode .priority-tag {
@@ -8427,57 +8435,79 @@ out center body;`;
 }
 
 .day-mode .distance-tag {
-  color: #5c5349 !important;
+  color: #64748b !important;
 }
 
 .day-mode .add-form .glass-card,
 .day-mode .add-form-overlay .glass-card {
-  background: rgba(240, 236, 228, 0.98) !important;
-  color: #1e1b18 !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  color: #1e293b !important;
 }
 
 .day-mode input, .day-mode textarea, .day-mode select {
-  background: rgba(242, 238, 232, 0.9) !important;
-  color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.15) !important;
+  background: rgba(248, 250, 252, 0.95) !important;
+  color: #1e293b !important;
+  border-color: rgba(59, 130, 246, 0.15) !important;
 }
 
 .day-mode .driver-card {
-  background: rgba(242, 238, 232, 0.8) !important;
-  color: #1e1b18 !important;
+  background: rgba(248, 250, 252, 0.9) !important;
+  color: #1e293b !important;
 }
 
 .day-mode .vehicle-info-card {
-  background: rgba(242, 238, 232, 0.85) !important;
-  color: #1e1b18 !important;
-  border-color: rgba(100, 80, 60, 0.12) !important;
+  background: rgba(248, 250, 252, 0.9) !important;
+  color: #1e293b !important;
+  border-color: rgba(59, 130, 246, 0.1) !important;
 }
-.day-mode .vehicle-info-card.fuel { background: linear-gradient(135deg, rgba(0,180,100,0.06) 0%, rgba(240,237,230,0.9) 100%) !important; border-color: rgba(0,180,100,0.18) !important; }
-.day-mode .vehicle-info-card.ev { background: linear-gradient(135deg, rgba(59,130,246,0.06) 0%, rgba(240,237,230,0.9) 100%) !important; border-color: rgba(59,130,246,0.18) !important; }
-.day-mode .vic-header-title { color: #1e1b18; }
-.day-mode .vic-header-sub { color: #71717a; }
-.day-mode .fuel-header .vic-header-sub { color: #059669; }
+.day-mode .vehicle-info-card.fuel { background: linear-gradient(135deg, rgba(34,197,94,0.06) 0%, rgba(255,255,255,0.9) 100%) !important; border-color: rgba(34,197,94,0.18) !important; }
+.day-mode .vehicle-info-card.ev { background: linear-gradient(135deg, rgba(59,130,246,0.06) 0%, rgba(255,255,255,0.9) 100%) !important; border-color: rgba(59,130,246,0.18) !important; }
+.day-mode .vic-header-title { color: #1e293b; }
+.day-mode .vic-header-sub { color: #64748b; }
+.day-mode .fuel-header .vic-header-sub { color: #16a34a; }
 .day-mode .ev-header .vic-header-sub { color: #2563eb; }
-.day-mode .vic-inline-val { color: #059669; }
-.day-mode .vic-inline-unit { color: #78716c; }
-.day-mode .vic-label, .day-mode .vic-label-compact { color: #5c5349; }
-.day-mode .vic-label strong { color: #1e1b18 !important; }
-.day-mode .vehicle-info-card.fuel .vic-label strong { color: #059669 !important; }
+.day-mode .vic-inline-val { color: #2563eb; }
+.day-mode .vic-inline-unit { color: #64748b; }
+.day-mode .vic-label, .day-mode .vic-label-compact { color: #64748b; }
+.day-mode .vic-label strong { color: #1e293b !important; }
+.day-mode .vehicle-info-card.fuel .vic-label strong { color: #16a34a !important; }
 .day-mode .vehicle-info-card.ev .vic-label strong { color: #2563eb !important; }
-.day-mode .vic-range { background: rgba(0,0,0,0.08); }
-.day-mode .vic-range-hint { color: rgba(0,0,0,0.15); }
-.day-mode .vic-mini-stats { background: rgba(0,0,0,0.04); }
-.day-mode .vic-mini-divider { background: rgba(0,0,0,0.08); }
-.day-mode .vic-mini-unit { color: #a8a29e; }
-.day-mode .vic-slider-row { border-top-color: rgba(0,0,0,0.06); }
-.day-mode .vic-grid-sliders { border-top-color: rgba(0,0,0,0.06); }
-.day-mode .vic-slider-cell { border-color: rgba(0,0,0,0.04) !important; }
-.day-mode .vic-chip small { color: #a8a29e; }
+.day-mode .vic-range { background: rgba(59,130,246,0.08); }
+.day-mode .vic-range-hint { color: rgba(0,0,0,0.12); }
+.day-mode .vic-mini-stats { background: rgba(59,130,246,0.04); }
+.day-mode .vic-mini-divider { background: rgba(59,130,246,0.1); }
+.day-mode .vic-mini-unit { color: #94a3b8; }
+.day-mode .vic-slider-row { border-top-color: rgba(59,130,246,0.08); }
+.day-mode .vic-grid-sliders { border-top-color: rgba(59,130,246,0.08); }
+.day-mode .vic-slider-cell { border-color: rgba(59,130,246,0.06) !important; }
+.day-mode .vic-chip small { color: #94a3b8; }
 
 .day-mode .route-summary h3,
 .day-mode .summary-header h3 {
-  color: #1e1b18 !important;
+  color: #1e293b !important;
 }
+
+/* Day mode — Leaflet controls */
+.day-mode :global(.leaflet-control-zoom) { box-shadow: 0 4px 20px rgba(30,64,175,0.1) !important; }
+.day-mode :global(.leaflet-control-zoom a) { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
+.day-mode :global(.leaflet-control-zoom a:hover) { background: rgba(59,130,246,0.08) !important; color: #2563eb !important; }
+
+/* Day mode — Map buttons */
+.day-mode .map-myloc-btn { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; box-shadow: 0 4px 20px rgba(30,64,175,0.1) !important; }
+.day-mode .map-myloc-btn:hover { background: rgba(59,130,246,0.08) !important; color: #2563eb !important; }
+.day-mode .add-point-toggle { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
+.day-mode .add-point-toggle.active { background: rgba(59,130,246,0.1) !important; color: #2563eb !important; border-color: rgba(59,130,246,0.3) !important; }
+.day-mode .map-nav-btn { background: linear-gradient(135deg, #2563eb, #1d4ed8) !important; color: #fff !important; }
+
+/* Day mode — Route buttons */
+.day-mode .btn-navigate { background: linear-gradient(135deg, #2563eb, #1d4ed8) !important; color: #fff !important; }
+.day-mode .btn-save-route { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
+.day-mode .btn-share { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
+.day-mode .btn-alt-routes { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
+
+/* Day mode — Desktop sidebar toggle */
+.day-mode .desktop-sidebar-toggle { background: rgba(255,255,255,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
+.day-mode .desktop-sidebar-toggle:hover { color: #2563eb !important; }
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
@@ -11837,15 +11867,15 @@ out center body;`;
 .cost-row.total .cost-value { font-size: 1.05rem; font-weight: 700; color: #00ff88; }
 
 /* Day mode - Trip Cost */
-.day-mode .trip-cost-card { background: rgba(242,238,232,0.9); border-color: rgba(100,80,60,0.1); }
-.day-mode .trip-cost-card h4 { color: #1e1b18; }
-.day-mode .cost-label { color: #5c5349; }
-.day-mode .cost-value { color: #00875a; }
-.day-mode .cost-value.no-toll { color: #8a7e74; }
-.day-mode .cost-row.sub span { color: #8a7e74; }
-.day-mode .cost-divider { border-color: rgba(100,80,60,0.12); }
-.day-mode .cost-row.total .cost-label { color: #1e1b18; }
-.day-mode .cost-row.total .cost-value { color: #006a48; }
+.day-mode .trip-cost-card { background: rgba(248,250,252,0.95); border-color: rgba(59,130,246,0.1); }
+.day-mode .trip-cost-card h4 { color: #1e293b; }
+.day-mode .cost-label { color: #64748b; }
+.day-mode .cost-value { color: #2563eb; }
+.day-mode .cost-value.no-toll { color: #94a3b8; }
+.day-mode .cost-row.sub span { color: #94a3b8; }
+.day-mode .cost-divider { border-color: rgba(59,130,246,0.12); }
+.day-mode .cost-row.total .cost-label { color: #1e293b; }
+.day-mode .cost-row.total .cost-value { color: #1d4ed8; }
 
 /* Turn Preview in Route Summary */
 .turn-preview-section {
