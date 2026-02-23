@@ -606,17 +606,22 @@
     });
   }
 
+  function setMapRotation(deg: number) {
+    const el = document.getElementById('map');
+    if (el) el.style.transform = `rotate(${deg}deg)`;
+  }
+
   function applyUserMapRotation() {
     if (!map) return;
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    map.setBearing(_userMapRotation);
+    setMapRotation(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) map.setBearing(0);
+    setMapRotation(0);
   }
 
   // Turn-by-Turn Navigation
@@ -2281,7 +2286,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        map.setBearing(0);
+        setMapRotation(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3280,7 +3285,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      map.setBearing(0);
+      setMapRotation(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3426,13 +3431,13 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth map rotation following heading (leaflet-rotate bearing + lerp)
+      // Smooth map rotation following heading (CSS rotation + lerp)
       if (map) {
         if (isOffRoute || currentSpeed < 10) {
           if (Math.abs(_lastAppliedRotation) > 0.3) {
             _lastAppliedRotation *= 0.92;
             if (Math.abs(_lastAppliedRotation) < 0.3) _lastAppliedRotation = 0;
-            map.setBearing(_lastAppliedRotation);
+            setMapRotation(_lastAppliedRotation);
           }
         } else {
           const target = -animCurrentHeading;
@@ -3442,7 +3447,7 @@
           if (Math.abs(diff) > 0.3) {
             const lerp = Math.abs(diff) > 60 ? 0.06 : 0.12;
             _lastAppliedRotation += diff * lerp;
-            map.setBearing(_lastAppliedRotation);
+            setMapRotation(_lastAppliedRotation);
           }
         }
       }
@@ -6000,9 +6005,6 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      (window as any).L = L;
-      // @ts-ignore
-      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6012,7 +6014,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        preferCanvas: false,
+        preferCanvas: true,
         zoomSnap: 1,
         wheelDebounceTime: 80,
         minZoom: 3,
@@ -6020,14 +6022,10 @@ out center body;`;
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
-        fadeAnimation: false,     // ปิด fade — tile ขึ้นทันทีไม่มีขาว
+        fadeAnimation: false,
         zoomAnimation: true,
-        markerZoomAnimation: true,
-        rotate: true,
-        bearing: 0,
-        touchRotate: true,
-        rotateControl: false
-      } as any).setView([initLat, initLng], initZoom);
+        markerZoomAnimation: true
+      }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
       // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
@@ -6606,7 +6604,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; setMapRotation(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
