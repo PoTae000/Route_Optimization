@@ -606,22 +606,17 @@
     });
   }
 
-  function setMapRotation(deg: number) {
-    if (!map) return;
-    map.getContainer().style.transform = `rotate(${deg}deg)`;
-  }
-
   function applyUserMapRotation() {
     if (!map) return;
     _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
-    setMapRotation(_userMapRotation);
+    map.setBearing(_userMapRotation);
     _lastAppliedRotation = _userMapRotation;
   }
 
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
-    if (map) setMapRotation(0);
+    if (map) map.setBearing(0);
   }
 
   // Turn-by-Turn Navigation
@@ -1619,8 +1614,6 @@
     else info += ' · ไม่มีทางด่วน';
     showNotification(info, alt.hasTolls ? 'warning' : 'success');
     speak(`เปลี่ยนไป${alt.label} ระยะทาง ${distKm} กิโลเมตร ${timeMin} นาที ${alt.hasTolls ? 'มีทางด่วน' : 'ไม่มีทางด่วน'}`);
-    // ค้นหาปั๊ม/สถานีชาร์จใหม่ตามเส้นทางที่เปลี่ยน
-    autoSearchStations();
   }
 
   // ==================== MANUAL WAYPOINT (จุดผ่านทาง) ====================
@@ -1828,8 +1821,6 @@
       incidentsOnRoute = [];
       clearIncidentMarkers();
     }
-    // ค้นหาปั๊ม/สถานีชาร์จอัตโนมัติตาม vehicleType
-    autoSearchStations();
   }
 
   // Extract diverging segments of altCoords that don't overlap with mainCoords
@@ -2290,7 +2281,7 @@
       // Reset heading rotation to prevent stale heading causing map spin
       _lastAppliedRotation = 0;
       if (map) {
-        setMapRotation(0);
+        map.setBearing(0);
       }
       // Build route info notification with toll & incident warnings
       const distKm = (mainRoute.distance / 1000).toFixed(1);
@@ -3289,7 +3280,7 @@
       map.off('zoomstart');
       map.off('click', onMapClickWaypoint);
       map.getContainer().style.cursor = '';
-      setMapRotation(0);
+      map.setBearing(0);
       _lastAppliedRotation = 0;
     }
     clearNavAlternativeLayers();
@@ -3435,13 +3426,13 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Smooth map rotation following heading (CSS + lerp)
+      // Smooth map rotation following heading (leaflet-rotate bearing + lerp)
       if (map) {
         if (isOffRoute || currentSpeed < 10) {
           if (Math.abs(_lastAppliedRotation) > 0.3) {
             _lastAppliedRotation *= 0.92;
             if (Math.abs(_lastAppliedRotation) < 0.3) _lastAppliedRotation = 0;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         } else {
           const target = -animCurrentHeading;
@@ -3451,7 +3442,7 @@
           if (Math.abs(diff) > 0.3) {
             const lerp = Math.abs(diff) > 60 ? 0.06 : 0.12;
             _lastAppliedRotation += diff * lerp;
-            setMapRotation(_lastAppliedRotation);
+            map.setBearing(_lastAppliedRotation);
           }
         }
       }
@@ -6009,6 +6000,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
+      (window as any).L = L;
+      // @ts-ignore
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6025,15 +6019,20 @@ out center body;`;
         maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
-        maxBoundsViscosity: 1.0
-      }).setView([initLat, initLng], initZoom);
+        maxBoundsViscosity: 1.0,
+        rotate: true,
+        bearing: 0,
+        touchRotate: true,
+        rotateControl: false
+      } as any).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // CartoDB Dark Matter — dark theme base
+      // CartoDB Dark Matter — dark theme base (keepBuffer สูงเพื่อโหลด tile ล่วงหน้ารอบ viewport)
       const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-        subdomains: 'abcd', maxZoom: 20, keepBuffer: 8,
+        subdomains: 'abcd', maxZoom: 20, keepBuffer: 25,
         updateWhenZooming: true, updateWhenIdle: false,
+        updateInterval: 100,
         noWrap: false,
         className: 'dark-tiles'
       }).addTo(map);
@@ -6578,7 +6577,7 @@ out center body;`;
     successCount={getSuccessCount()}
     remainingPointsCount={getRemainingPointsCount()}
     onAutoReroute={autoReroute}
-    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; setMapRotation(0); } else { centerOnCurrentLocation(); } }}
+    onToggleMapFollow={() => { if (isMapFollowing) { isMapFollowing = false; map.setBearing(0); } else { centerOnCurrentLocation(); } }}
     onMarkDeliverySuccess={markDeliverySuccess}
     onSkipToNextPoint={skipToNextPoint}
     onToggleVoice={toggleVoice}
