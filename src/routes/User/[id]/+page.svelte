@@ -6284,7 +6284,7 @@ out center body;`;
     if (currentUser.role) {
       const role = currentUser.role.toLowerCase();
       if (role === 'admin') { goto(`/Admin/${currentUser.id}`); return; }
-      if (role === 'driver') { goto(`/Home/${currentUser.id}`); return; }
+      if (role === 'driver') { goto(`/User/${currentUser.id}`); return; }
       if (role === 'customer') { goto(`/factory/${currentUser.id}`); return; }
     }
 
@@ -10375,6 +10375,8 @@ out center body;`;
     .map-stat-label { font-size: 6px; letter-spacing: 0; }
     .map-stat.weather .map-stat-value { font-size: 10px; }
     .map-info { display: none; }
+
+    .map-myloc-btn { bottom: 85px; }
 
     /* Floating Navigate Button - mobile */
     .map-nav-btn {

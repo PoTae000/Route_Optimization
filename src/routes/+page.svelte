@@ -92,11 +92,9 @@
 
   function redirectByRole(role: string, id: number) {
     const r = role.toLowerCase();
-    let target = `/Home/${id}`;
+    let target = `/User/${encodeUserId(id)}`;
     if (r === 'admin') target = `/Admin/${id}`;
-    else if (r === 'driver') target = `/Home/${id}`;
     else if (r === 'customer') target = `/factory/${id}`;
-    else if (r === 'user') target = `/User/${encodeUserId(id)}`;
     window.location.href = target;
   }
 

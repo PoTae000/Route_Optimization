@@ -3,27 +3,35 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
 
-  const API_URL = 'http://localhost:3000/api';
+  const API_URL = 'https://backendrouteoptimization-production.up.railway.app/api';
 
   let currentUser: any = null;
 
   // Data
-  let drivers: any[] = [];
   let allPoints: any[] = [];
   let deliveryHistory: any[] = [];
   let todayStats = { completed: 0, skipped: 0, pending: 0 };
-  let driverWorkload: any[] = [];
-  let customerOrders: any[] = [];
+  let dashboardUsers: any[] = []; // per_user from dashboard
+  let recentActivity: any[] = [];
+  let totalUsers = 0;
+  let users: any[] = [];
 
   // UI State
-  let activeTab: 'overview' | 'points' | 'history' | 'drivers' | 'customers' = 'overview';
-  let selectedDriver: number | null = null;
+  let activeTab: 'overview' | 'points' | 'history' | 'users' = 'overview';
   let selectedPoints: number[] = [];
   let showAssignModal = false;
+  let selectedDriver: number | null = null;
   let isLoading = true;
   let notification = { show: false, message: '', type: 'success' as 'success' | 'error' };
   let sidebarCollapsed = false;
   let currentTime = new Date();
+  let nightMode = true;
+
+  // Users CRUD
+  let showUserModal = false;
+  let editingUser: any = null;
+  let userForm = { username: '', password: '', name: '', role: 'User', phone: '', avatar: '' };
+  let showDeleteConfirm: number | null = null;
 
   // Filters
   let filterStatus: 'all' | 'pending' | 'completed' | 'skipped' = 'all';
@@ -34,6 +42,11 @@
   let refreshInterval: any;
   let timeInterval: any;
 
+  const adminHeaders = () => ({
+    'Content-Type': 'application/json',
+    'x-user-id': String(currentUser?.id || '')
+  });
+
   onMount(async () => {
     const userStr = localStorage.getItem('user');
     if (!userStr) {
@@ -41,10 +54,15 @@
       return;
     }
 
-    currentUser = JSON.parse(userStr);
-    
-    if (currentUser.role !== 'admin') {
-      goto(`/Home/${currentUser.id}`);
+    try {
+      currentUser = JSON.parse(userStr);
+    } catch {
+      goto('/');
+      return;
+    }
+
+    if (currentUser.role?.toLowerCase() !== 'admin') {
+      goto(`/User/${currentUser.id}`);
       return;
     }
 
@@ -54,11 +72,15 @@
       return;
     }
 
+    // Load night mode preference
+    const savedMode = localStorage.getItem('adminNightMode');
+    if (savedMode === 'light') nightMode = false;
+
     await loadAllData();
-    
+
     refreshInterval = setInterval(loadAllData, 30000);
     timeInterval = setInterval(() => currentTime = new Date(), 1000);
-    
+
     isLoading = false;
   });
 
@@ -69,21 +91,32 @@
 
   async function loadAllData() {
     await Promise.all([
-      loadDrivers(),
+      loadDashboard(),
       loadAllPoints(),
-      loadTodayStats(),
       loadDeliveryHistory(),
-      loadDriverWorkload(),
-      loadCustomerOrders()
+      loadUsers()
     ]);
   }
 
-  async function loadDrivers() {
+  async function loadDashboard() {
     try {
-      const res = await fetch(`${API_URL}/drivers`);
+      const res = await fetch(`${API_URL}/admin/dashboard`, {
+        headers: adminHeaders()
+      });
       const data = await res.json();
-      if (Array.isArray(data)) drivers = data;
-    } catch (e) { console.error('Load drivers error:', e); }
+      if (data.today) {
+        todayStats = data.today;
+      }
+      if (Array.isArray(data.per_user)) {
+        dashboardUsers = data.per_user;
+      }
+      if (Array.isArray(data.recent_activity)) {
+        recentActivity = data.recent_activity;
+      }
+      if (data.total_users !== undefined) {
+        totalUsers = data.total_users;
+      }
+    } catch (e) { console.error('Load dashboard error:', e); }
   }
 
   async function loadAllPoints() {
@@ -94,16 +127,6 @@
       const data = await res.json();
       if (Array.isArray(data)) allPoints = data;
     } catch (e) { console.error('Load points error:', e); }
-  }
-
-  async function loadTodayStats() {
-    try {
-      const params = new URLSearchParams();
-      params.append('role', 'admin');
-      const res = await fetch(`${API_URL}/deliveries/stats/today?${params.toString()}`);
-      const data = await res.json();
-      if (!data.error) todayStats = data;
-    } catch (e) { console.error('Load stats error:', e); }
   }
 
   async function loadDeliveryHistory() {
@@ -117,20 +140,95 @@
     } catch (e) { console.error('Load history error:', e); }
   }
 
-  async function loadDriverWorkload() {
+  async function loadUsers() {
     try {
-      const res = await fetch(`${API_URL}/drivers/workload`);
+      const res = await fetch(`${API_URL}/admin/users`, {
+        headers: adminHeaders()
+      });
       const data = await res.json();
-      if (Array.isArray(data)) driverWorkload = data;
-    } catch (e) { console.error('Load workload error:', e); }
+      if (Array.isArray(data)) users = data;
+    } catch (e) { console.error('Load users error:', e); }
   }
 
-  async function loadCustomerOrders() {
+  async function createUser() {
     try {
-      const res = await fetch(`${API_URL}/customer-orders`);
+      const res = await fetch(`${API_URL}/admin/users`, {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify(userForm)
+      });
       const data = await res.json();
-      if (Array.isArray(data)) customerOrders = data;
-    } catch (e) { console.error('Load customer orders error:', e); }
+      if (data.error) throw new Error(data.error);
+      showNotification('สร้างผู้ใช้สำเร็จ', 'success');
+      showUserModal = false;
+      editingUser = null;
+      await loadUsers();
+    } catch (e: any) {
+      showNotification(`เกิดข้อผิดพลาด: ${e.message}`, 'error');
+    }
+  }
+
+  async function updateUser(id: number) {
+    try {
+      const body: any = { ...userForm };
+      if (!body.password) delete body.password;
+      const res = await fetch(`${API_URL}/admin/users/${id}`, {
+        method: 'PUT',
+        headers: adminHeaders(),
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showNotification('แก้ไขผู้ใช้สำเร็จ', 'success');
+      showUserModal = false;
+      editingUser = null;
+      await loadUsers();
+    } catch (e: any) {
+      showNotification(`เกิดข้อผิดพลาด: ${e.message}`, 'error');
+    }
+  }
+
+  async function deleteUser(id: number) {
+    try {
+      const res = await fetch(`${API_URL}/admin/users/${id}`, {
+        method: 'DELETE',
+        headers: adminHeaders()
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showNotification('ลบผู้ใช้สำเร็จ', 'success');
+      showDeleteConfirm = null;
+      await loadUsers();
+    } catch (e: any) {
+      showNotification(`เกิดข้อผิดพลาด: ${e.message}`, 'error');
+    }
+  }
+
+  function openCreateModal() {
+    editingUser = null;
+    userForm = { username: '', password: '', name: '', role: 'User', phone: '', avatar: '' };
+    showUserModal = true;
+  }
+
+  function openEditModal(user: any) {
+    editingUser = user;
+    userForm = {
+      username: user.username || '',
+      password: '',
+      name: user.name || '',
+      role: user.role || 'User',
+      phone: user.phone || '',
+      avatar: user.avatar || ''
+    };
+    showUserModal = true;
+  }
+
+  function saveUser() {
+    if (editingUser) {
+      updateUser(editingUser.id);
+    } else {
+      createUser();
+    }
   }
 
   function togglePointSelection(id: number) {
@@ -151,7 +249,7 @@
     try {
       const res = await fetch(`${API_URL}/points/bulk-assign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: adminHeaders(),
         body: JSON.stringify({ point_ids: selectedPoints, driver_id: selectedDriver })
       });
 
@@ -175,13 +273,20 @@
   }
 
   function formatTime(dateStr: string): string {
+    if (!dateStr) return '-';
     const date = new Date(dateStr);
     return date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
   }
 
   function formatDate(dateStr: string): string {
+    if (!dateStr) return '-';
     const date = new Date(dateStr);
     return date.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' });
+  }
+
+  function toggleNightMode() {
+    nightMode = !nightMode;
+    localStorage.setItem('adminNightMode', nightMode ? 'dark' : 'light');
   }
 
   function logout() {
@@ -201,7 +306,7 @@
     }
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(p => p.name.toLowerCase().includes(q) || p.address.toLowerCase().includes(q));
+      filtered = filtered.filter(p => p.name?.toLowerCase().includes(q) || p.address?.toLowerCase().includes(q));
     }
     return filtered;
   })();
@@ -216,7 +321,7 @@
   $: unassignedCount = allPoints.filter(p => !p.driver_id).length;
   $: totalDeliveries = todayStats.completed + todayStats.skipped + todayStats.pending;
   $: completionRate = totalDeliveries > 0 ? Math.round((todayStats.completed / totalDeliveries) * 100) : 0;
-  $: pendingCustomerOrders = customerOrders.filter(o => o.status === 'pending').length;
+  $: usersWithWork = dashboardUsers.filter(d => (d.completed || 0) + (d.skipped || 0) > 0).length;
 </script>
 
 <svelte:head>
@@ -225,7 +330,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </svelte:head>
 
-<div class="admin-container" class:sidebar-collapsed={sidebarCollapsed}>
+<div class="admin-container" class:sidebar-collapsed={sidebarCollapsed} class:day-mode={!nightMode}>
   <!-- Animated Background -->
   <div class="bg-gradient"></div>
   <div class="bg-grid"></div>
@@ -248,24 +353,101 @@
           <h3>มอบหมายงาน</h3>
         </div>
         <p class="modal-subtitle">{selectedPoints.length} จุดที่เลือก</p>
-        
+
         <div class="form-group">
-          <label for="driver-select">เลือก Driver</label>
+          <label for="driver-select">เลือกผู้ใช้</label>
           <div class="select-wrapper">
             <select id="driver-select" bind:value={selectedDriver}>
-              <option value={null}>-- เลือก Driver --</option>
-              {#each drivers as driver}
-                <option value={driver.id}>{driver.avatar} {driver.name}</option>
+              <option value={null}>-- เลือกผู้ใช้ --</option>
+              {#each users as user}
+                <option value={user.id}>{user.avatar || '👤'} {user.name}</option>
               {/each}
             </select>
           </div>
         </div>
-        
+
         <div class="modal-actions">
           <button class="btn btn-primary" on:click={assignPointsToDriver} disabled={!selectedDriver}>
             <span>✓</span> มอบหมาย
           </button>
           <button class="btn btn-ghost" on:click={() => showAssignModal = false}>
+            ยกเลิก
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- User CRUD Modal -->
+  {#if showUserModal}
+    <div class="modal-overlay" on:click={() => showUserModal = false} on:keypress={() => {}} role="button" tabindex="-1">
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
+      <div class="modal glass-card modal-wide" on:click|stopPropagation on:keypress={() => {}} role="dialog">
+        <div class="modal-header">
+          <div class="modal-icon">{editingUser ? '✏️' : '➕'}</div>
+          <h3>{editingUser ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้ใหม่'}</h3>
+        </div>
+
+        <div class="user-form-grid">
+          <div class="form-group">
+            <label for="user-username">ชื่อผู้ใช้ (username)</label>
+            <input id="user-username" type="text" bind:value={userForm.username} placeholder="username">
+          </div>
+          <div class="form-group">
+            <label for="user-password">{editingUser ? 'รหัสผ่าน (เว้นว่างถ้าไม่เปลี่ยน)' : 'รหัสผ่าน'}</label>
+            <input id="user-password" type="password" bind:value={userForm.password} placeholder="••••••">
+          </div>
+          <div class="form-group">
+            <label for="user-name">ชื่อ</label>
+            <input id="user-name" type="text" bind:value={userForm.name} placeholder="ชื่อ-นามสกุล">
+          </div>
+          <div class="form-group">
+            <label for="user-role">ตำแหน่ง</label>
+            <div class="select-wrapper">
+              <select id="user-role" bind:value={userForm.role}>
+                <option value="User">User</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="user-phone">โทรศัพท์</label>
+            <input id="user-phone" type="text" bind:value={userForm.phone} placeholder="0xx-xxx-xxxx">
+          </div>
+          <div class="form-group">
+            <label for="user-avatar">Avatar (emoji)</label>
+            <input id="user-avatar" type="text" bind:value={userForm.avatar} placeholder="👤">
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-primary" on:click={saveUser} disabled={!userForm.username || (!editingUser && !userForm.password)}>
+            <span>{editingUser ? '✓' : '+'}</span> {editingUser ? 'บันทึก' : 'สร้าง'}
+          </button>
+          <button class="btn btn-ghost" on:click={() => showUserModal = false}>
+            ยกเลิก
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Delete Confirm Modal -->
+  {#if showDeleteConfirm !== null}
+    {@const userToDelete = users.find(u => u.id === showDeleteConfirm)}
+    <div class="modal-overlay" on:click={() => showDeleteConfirm = null} on:keypress={() => {}} role="button" tabindex="-1">
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
+      <div class="modal glass-card" on:click|stopPropagation on:keypress={() => {}} role="dialog">
+        <div class="modal-header">
+          <div class="modal-icon delete-icon">🗑️</div>
+          <h3>ยืนยันการลบ</h3>
+        </div>
+        <p class="modal-subtitle">คุณต้องการลบผู้ใช้ "{userToDelete?.name || userToDelete?.username}" ใช่หรือไม่?</p>
+        <div class="modal-actions">
+          <button class="btn btn-danger" on:click={() => deleteUser(showDeleteConfirm!)}>
+            <span>🗑️</span> ลบ
+          </button>
+          <button class="btn btn-ghost" on:click={() => showDeleteConfirm = null}>
             ยกเลิก
           </button>
         </div>
@@ -293,12 +475,12 @@
 
     <nav class="nav-menu">
       <div class="nav-section-title">{sidebarCollapsed ? '' : 'เมนูหลัก'}</div>
-      
+
       <button class="nav-item" class:active={activeTab === 'overview'} on:click={() => activeTab = 'overview'}>
         <span class="nav-icon">📊</span>
         {#if !sidebarCollapsed}<span class="nav-text">ภาพรวม</span>{/if}
       </button>
-      
+
       <button class="nav-item" class:active={activeTab === 'points'} on:click={() => activeTab = 'points'}>
         <span class="nav-icon">📍</span>
         {#if !sidebarCollapsed}<span class="nav-text">จุดส่งทั้งหมด</span>{/if}
@@ -306,23 +488,18 @@
           <span class="badge pulse">{unassignedCount}</span>
         {/if}
       </button>
-      
-      <button class="nav-item" class:active={activeTab === 'customers'} on:click={() => activeTab = 'customers'}>
-        <span class="nav-icon">🛒</span>
-        {#if !sidebarCollapsed}<span class="nav-text">คำสั่งซื้อลูกค้า</span>{/if}
-        {#if pendingCustomerOrders > 0}
-          <span class="badge warning pulse">{pendingCustomerOrders}</span>
-        {/if}
-      </button>
-      
+
       <button class="nav-item" class:active={activeTab === 'history'} on:click={() => activeTab = 'history'}>
         <span class="nav-icon">📋</span>
         {#if !sidebarCollapsed}<span class="nav-text">ประวัติการส่ง</span>{/if}
       </button>
-      
-      <button class="nav-item" class:active={activeTab === 'drivers'} on:click={() => activeTab = 'drivers'}>
-        <span class="nav-icon">🚗</span>
-        {#if !sidebarCollapsed}<span class="nav-text">จัดการ Driver</span>{/if}
+
+      <button class="nav-item" class:active={activeTab === 'users'} on:click={() => activeTab = 'users'}>
+        <span class="nav-icon">👥</span>
+        {#if !sidebarCollapsed}<span class="nav-text">ผู้ใช้</span>{/if}
+        {#if users.length > 0}
+          <span class="badge info">{users.length}</span>
+        {/if}
       </button>
     </nav>
 
@@ -342,9 +519,8 @@
         <h2 class="page-title">
           {#if activeTab === 'overview'}📊 ภาพรวม{/if}
           {#if activeTab === 'points'}📍 จุดส่งทั้งหมด{/if}
-          {#if activeTab === 'customers'}🛒 คำสั่งซื้อลูกค้า{/if}
           {#if activeTab === 'history'}📋 ประวัติการส่ง{/if}
-          {#if activeTab === 'drivers'}🚗 จัดการ Driver{/if}
+          {#if activeTab === 'users'}👥 ผู้ใช้ทั้งหมด{/if}
         </h2>
       </div>
       <div class="top-bar-right">
@@ -352,6 +528,9 @@
           <span class="time">{currentTime.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}</span>
           <span class="date">{currentTime.toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
         </div>
+        <button class="theme-toggle-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง' : 'เปลี่ยนเป็นโหมดมืด'}>
+          {nightMode ? '☀️' : '🌙'}
+        </button>
         <button class="refresh-btn" on:click={loadAllData} title="รีเฟรชข้อมูล">
           🔄
         </button>
@@ -426,14 +605,14 @@
                 <div class="stat-pattern"></div>
               </div>
               <div class="stat-content">
-                <div class="stat-icon-wrap">🚗</div>
+                <div class="stat-icon-wrap">👥</div>
                 <div class="stat-info">
-                  <div class="stat-value">{drivers.length}</div>
-                  <div class="stat-label">Driver ทั้งหมด</div>
+                  <div class="stat-value">{totalUsers || users.length}</div>
+                  <div class="stat-label">ผู้ใช้ทั้งหมด</div>
                 </div>
               </div>
               <div class="stat-footer">
-                <span class="trend">{driverWorkload.filter(d => d.pending > 0).length} คนมีงาน</span>
+                <span class="trend">{usersWithWork} คนมีงานวันนี้</span>
               </div>
             </div>
           </div>
@@ -443,10 +622,10 @@
             <div class="progress-ring-container">
               <svg class="progress-ring" width="180" height="180">
                 <circle class="progress-ring-bg" cx="90" cy="90" r="70" />
-                <circle 
-                  class="progress-ring-fill" 
-                  cx="90" 
-                  cy="90" 
+                <circle
+                  class="progress-ring-fill"
+                  cx="90"
+                  cy="90"
                   r="70"
                   style="stroke-dasharray: {completionRate * 4.4}, 440"
                 />
@@ -486,37 +665,37 @@
 
           <!-- Two Column Layout -->
           <div class="dashboard-grid">
-            <!-- Driver Status -->
+            <!-- User Status -->
             <div class="card glass-card">
               <div class="card-header">
-                <h3>🚗 สถานะ Driver</h3>
-                <button class="btn-icon" on:click={() => activeTab = 'drivers'}>→</button>
+                <h3>👥 สถานะผู้ใช้</h3>
+                <button class="btn-icon" on:click={() => activeTab = 'users'}>→</button>
               </div>
               <div class="card-content">
-                {#if driverWorkload.length === 0}
+                {#if dashboardUsers.length === 0}
                   <div class="empty-state">
-                    <span class="empty-icon">🚗</span>
-                    <p>ไม่มีข้อมูล Driver</p>
+                    <span class="empty-icon">👥</span>
+                    <p>ไม่มีข้อมูลผู้ใช้</p>
                   </div>
                 {:else}
                   <div class="driver-list">
-                    {#each driverWorkload as driver}
+                    {#each dashboardUsers as user}
                       <div class="driver-row-modern">
                         <div class="driver-avatar-sm">
-                          <span>{driver.avatar}</span>
-                          <div class="online-indicator" class:active={driver.pending > 0}></div>
+                          <span>{user.avatar || '👤'}</span>
+                          <div class="online-indicator" class:active={(user.completed || 0) + (user.skipped || 0) > 0}></div>
                         </div>
                         <div class="driver-details">
                           <div class="driver-name-row">
-                            <span class="name">{driver.name}</span>
+                            <span class="name">{user.name}</span>
                           </div>
                           <div class="driver-progress-bar">
-                            <div class="progress-fill" style="width: {driver.pending > 0 ? Math.min((driver.completed_today / (driver.completed_today + driver.pending)) * 100, 100) : 100}%"></div>
+                            <div class="progress-fill" style="width: {(user.completed || 0) + (user.skipped || 0) > 0 ? Math.min(((user.completed || 0) / ((user.completed || 0) + (user.skipped || 0))) * 100, 100) : 0}%"></div>
                           </div>
                         </div>
                         <div class="driver-stats-mini">
-                          <span class="stat pending">{driver.pending}</span>
-                          <span class="stat completed">{driver.completed_today}</span>
+                          <span class="stat completed">{user.completed || 0}</span>
+                          <span class="stat skipped">{user.skipped || 0}</span>
                         </div>
                       </div>
                     {/each}
@@ -532,14 +711,14 @@
                 <button class="btn-icon" on:click={() => activeTab = 'history'}>→</button>
               </div>
               <div class="card-content">
-                {#if deliveryHistory.length === 0}
+                {#if recentActivity.length === 0 && deliveryHistory.length === 0}
                   <div class="empty-state">
                     <span class="empty-icon">📋</span>
                     <p>ยังไม่มีกิจกรรม</p>
                   </div>
                 {:else}
                   <div class="activity-list">
-                    {#each deliveryHistory.slice(0, 8) as record}
+                    {#each (recentActivity.length > 0 ? recentActivity : deliveryHistory).slice(0, 8) as record}
                       <div class="activity-row-modern">
                         <div class="activity-icon-wrap" class:success={record.status === 'completed'} class:skip={record.status === 'skipped'}>
                           {record.status === 'completed' ? '✅' : '⏭️'}
@@ -547,7 +726,7 @@
                         <div class="activity-details">
                           <div class="activity-title">{record.point_name}</div>
                           <div class="activity-meta">
-                            <span class="driver-tag">{record.driver_name || 'ไม่ระบุ'}</span>
+                            <span class="driver-tag">{record.user_name || record.driver_name || 'ไม่ระบุ'}</span>
                             <span class="time-tag">{formatTime(record.delivered_at)}</span>
                           </div>
                         </div>
@@ -613,10 +792,10 @@
             <div class="filter-group">
               <div class="select-wrapper">
                 <select bind:value={filterDriver}>
-                  <option value={null}>🚗 Driver ทั้งหมด</option>
+                  <option value={null}>👤 ผู้ใช้ทั้งหมด</option>
                   <option value={0}>⏳ ยังไม่ assign</option>
-                  {#each drivers as driver}
-                    <option value={driver.id}>{driver.avatar} {driver.name}</option>
+                  {#each users as user}
+                    <option value={user.id}>{user.avatar || '👤'} {user.name}</option>
                   {/each}
                 </select>
               </div>
@@ -640,7 +819,7 @@
                   <th>#</th>
                   <th>ชื่อ</th>
                   <th>ที่อยู่</th>
-                  <th>Driver</th>
+                  <th>ผู้รับผิดชอบ</th>
                   <th>Priority</th>
                   <th>Actions</th>
                 </tr>
@@ -683,46 +862,6 @@
           </div>
         {/if}
 
-        <!-- Customer Orders Tab -->
-        {#if activeTab === 'customers'}
-          <div class="tab-header">
-            <div class="header-left">
-              <span class="result-count">{customerOrders.length} คำสั่งซื้อ</span>
-            </div>
-          </div>
-
-          <div class="orders-grid">
-            {#each customerOrders as order}
-              <div class="order-card glass-card" class:pending={order.status === 'pending'} class:accepted={order.status === 'accepted'} class:completed={order.status === 'completed'}>
-                <div class="order-header">
-                  <div class="customer-info">
-                    <span class="customer-avatar">{order.customer_avatar || '👤'}</span>
-                    <div class="customer-details">
-                      <div class="customer-name">{order.customer_name}</div>
-                      <div class="customer-phone">📞 {order.customer_phone || '-'}</div>
-                    </div>
-                  </div>
-                  <span class="order-status" class:pending={order.status === 'pending'} class:accepted={order.status === 'accepted'} class:completed={order.status === 'completed'}>
-                    {order.status === 'pending' ? '⏳ รอรับ' : order.status === 'accepted' ? '✅ รับแล้ว' : '🎉 เสร็จ'}
-                  </span>
-                </div>
-                <div class="order-address">📍 {order.address}</div>
-                {#if order.driver_name}
-                  <div class="order-driver">🚗 {order.driver_name}</div>
-                {/if}
-                <div class="order-time">
-                  🕐 {formatTime(order.created_at)} • {formatDate(order.created_at)}
-                </div>
-              </div>
-            {:else}
-              <div class="empty-state full-width">
-                <span class="empty-icon">🛒</span>
-                <p>ยังไม่มีคำสั่งซื้อ</p>
-              </div>
-            {/each}
-          </div>
-        {/if}
-
         <!-- History Tab -->
         {#if activeTab === 'history'}
           <div class="tab-header">
@@ -743,9 +882,9 @@
               </div>
               <div class="select-wrapper">
                 <select bind:value={filterDriver}>
-                  <option value={null}>🚗 Driver ทั้งหมด</option>
-                  {#each drivers as driver}
-                    <option value={driver.id}>{driver.avatar} {driver.name}</option>
+                  <option value={null}>👤 ผู้ใช้ทั้งหมด</option>
+                  {#each users as user}
+                    <option value={user.id}>{user.avatar || '👤'} {user.name}</option>
                   {/each}
                 </select>
               </div>
@@ -761,7 +900,7 @@
                   <th>สถานะ</th>
                   <th>ชื่อจุด</th>
                   <th>ที่อยู่</th>
-                  <th>Driver</th>
+                  <th>ผู้ส่ง</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -802,37 +941,62 @@
           </div>
         {/if}
 
-        <!-- Drivers Tab -->
-        {#if activeTab === 'drivers'}
-          <div class="drivers-grid-modern">
-            {#each drivers as driver}
-              {@const workload = driverWorkload.find(w => w.id === driver.id)}
-              <div class="driver-card-modern glass-card">
-                <div class="driver-card-header">
-                  <div class="driver-avatar-large">
-                    <span>{driver.avatar}</span>
-                    <div class="status-indicator" class:active={workload?.pending > 0}></div>
+        <!-- Users Tab -->
+        {#if activeTab === 'users'}
+          <div class="tab-header">
+            <div class="header-left">
+              <span class="result-count">{users.length} ผู้ใช้</span>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-primary" on:click={openCreateModal}>
+                <span>+</span> เพิ่มผู้ใช้
+              </button>
+            </div>
+          </div>
+
+          <div class="users-grid">
+            {#each users as user}
+              <div class="user-card-modern glass-card">
+                <div class="user-card-header-row">
+                  <div class="user-avatar-large">
+                    <span>{user.avatar || '👤'}</span>
                   </div>
-                  <div class="driver-main-info">
-                    <h3>{driver.name}</h3>
-                    <p class="vehicle-info">{driver.vehicle} • {driver.plateNumber}</p>
+                  <div class="user-main-info">
+                    <h3>{user.name || user.username}</h3>
+                    <p class="user-username">@{user.username}</p>
+                    <span class="role-chip" class:admin={user.role === 'admin'}>{user.role === 'admin' ? 'Admin' : 'User'}</span>
+                  </div>
+                  <div class="user-card-actions">
+                    <button class="action-btn" on:click={() => openEditModal(user)} title="แก้ไข">✏️</button>
+                    {#if user.id !== currentUser?.id}
+                      <button class="action-btn delete" on:click={() => showDeleteConfirm = user.id} title="ลบ">🗑️</button>
+                    {/if}
                   </div>
                 </div>
-                
-                <div class="driver-stats-row">
+
+                {#if user.phone}
+                  <div class="user-contact">📞 {user.phone}</div>
+                {/if}
+
+                <div class="user-stats-row">
                   <div class="stat-box pending">
-                    <div class="stat-number">{workload?.pending || 0}</div>
+                    <div class="stat-number">{user.pending_points ?? 0}</div>
                     <div class="stat-text">รอส่ง</div>
                   </div>
                   <div class="stat-box completed">
-                    <div class="stat-number">{workload?.completed_today || 0}</div>
+                    <div class="stat-number">{user.today_completed ?? 0}</div>
                     <div class="stat-text">เสร็จวันนี้</div>
                   </div>
+                  <div class="stat-box skipped">
+                    <div class="stat-number">{user.today_skipped ?? 0}</div>
+                    <div class="stat-text">ข้ามวันนี้</div>
+                  </div>
                 </div>
-                
-                <div class="driver-contact-info">
-                  <span class="contact-item">📞 {driver.phone}</span>
-                </div>
+              </div>
+            {:else}
+              <div class="empty-state full-width">
+                <span class="empty-icon">👥</span>
+                <p>ยังไม่มีผู้ใช้</p>
               </div>
             {/each}
           </div>
@@ -844,16 +1008,16 @@
 
 <style>
   :global(*) { margin: 0; padding: 0; box-sizing: border-box; }
-  :global(body) { 
-    font-family: 'Kanit', sans-serif; 
-    background: #0a0a0f; 
+  :global(body) {
+    font-family: 'Kanit', sans-serif;
+    background: #0a0a0f;
     color: #e4e4e7;
     overflow-x: hidden;
   }
 
-  .admin-container { 
-    display: flex; 
-    min-height: 100vh; 
+  .admin-container {
+    display: flex;
+    min-height: 100vh;
     position: relative;
   }
 
@@ -864,7 +1028,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: 
+    background:
       radial-gradient(ellipse at 20% 20%, rgba(102, 126, 234, 0.15) 0%, transparent 50%),
       radial-gradient(ellipse at 80% 80%, rgba(118, 75, 162, 0.15) 0%, transparent 50%),
       radial-gradient(ellipse at 50% 50%, rgba(0, 255, 136, 0.05) 0%, transparent 50%);
@@ -883,7 +1047,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background-image: 
+    background-image:
       linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
     background-size: 50px 50px;
@@ -905,15 +1069,15 @@
   }
 
   /* Sidebar */
-  .sidebar { 
-    width: 280px; 
+  .sidebar {
+    width: 280px;
     min-width: 280px;
-    height: 100vh; 
-    display: flex; 
-    flex-direction: column; 
-    position: fixed; 
-    top: 0; 
-    left: 0; 
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    left: 0;
     z-index: 100;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
@@ -921,61 +1085,6 @@
   .sidebar-collapsed .sidebar {
     width: 80px;
     min-width: 80px;
-  }
-
-  .sidebar-header { 
-    padding: 20px; 
-    display: flex; 
-    justify-content: space-between; 
-    align-items: center;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .logo { display: flex; align-items: center; gap: 14px; }
-  
-  .logo-icon { 
-    width: 48px; 
-    height: 48px; 
-    background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); 
-    border-radius: 14px; 
-    display: flex; 
-    align-items: center; 
-    justify-content: center; 
-    font-size: 24px;
-    box-shadow: 0 8px 32px rgba(0, 255, 136, 0.3);
-    animation: logoGlow 3s ease-in-out infinite;
-  }
-
-  @keyframes logoGlow {
-    0%, 100% { box-shadow: 0 8px 32px rgba(0, 255, 136, 0.3); }
-    50% { box-shadow: 0 8px 48px rgba(0, 255, 136, 0.5); }
-  }
-
-  .logo-text h1 { 
-    font-size: 20px; 
-    font-weight: 700; 
-    background: linear-gradient(135deg, #00ff88, #00cc6a);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-  
-  .logo-text span { font-size: 11px; color: #71717a; }
-
-  .collapse-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: #a1a1aa;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .collapse-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
   }
 
   .user-card {
@@ -986,14 +1095,14 @@
     gap: 14px;
   }
 
-  .user-avatar { 
-    width: 48px; 
-    height: 48px; 
-    background: linear-gradient(135deg, #667eea, #764ba2); 
-    border-radius: 14px; 
-    display: flex; 
-    align-items: center; 
-    justify-content: center; 
+  .user-avatar {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-size: 24px;
     position: relative;
     box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
@@ -1011,7 +1120,7 @@
   }
 
   .user-name { font-weight: 600; font-size: 15px; }
-  
+
   .role-badge {
     display: inline-block;
     padding: 4px 10px;
@@ -1023,8 +1132,8 @@
     font-weight: 500;
   }
 
-  .nav-menu { 
-    flex: 1; 
+  .nav-menu {
+    flex: 1;
     padding: 12px;
     overflow-y: auto;
   }
@@ -1039,19 +1148,19 @@
     margin-bottom: 8px;
   }
 
-  .nav-item { 
-    display: flex; 
-    align-items: center; 
-    gap: 14px; 
-    padding: 14px 16px; 
-    border-radius: 12px; 
-    background: transparent; 
-    border: none; 
-    color: #a1a1aa; 
-    font-family: 'Kanit', sans-serif; 
-    font-size: 14px; 
-    cursor: pointer; 
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: transparent;
+    border: none;
+    color: #a1a1aa;
+    font-family: 'Kanit', sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     width: 100%;
     position: relative;
     overflow: hidden;
@@ -1069,13 +1178,13 @@
     transition: transform 0.2s;
   }
 
-  .nav-item:hover { 
-    background: rgba(255, 255, 255, 0.05); 
-    color: #fff; 
+  .nav-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
   }
 
-  .nav-item.active { 
-    background: rgba(0, 255, 136, 0.1); 
+  .nav-item.active {
+    background: rgba(0, 255, 136, 0.1);
     color: #00ff88;
   }
 
@@ -1086,18 +1195,18 @@
   .nav-icon { font-size: 20px; }
   .nav-text { flex: 1; text-align: left; }
 
-  .badge { 
-    padding: 4px 10px; 
-    border-radius: 20px; 
-    font-size: 11px; 
+  .badge {
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 11px;
     font-weight: 600;
     background: linear-gradient(135deg, #ff6b6b, #ee5a5a);
     color: white;
     margin-left: auto;
   }
 
-  .badge.warning {
-    background: linear-gradient(135deg, #ffa502, #ff7f00);
+  .badge.info {
+    background: linear-gradient(135deg, #667eea, #764ba2);
   }
 
   .badge.pulse {
@@ -1109,37 +1218,37 @@
     50% { transform: scale(1.1); }
   }
 
-  .sidebar-footer { 
-    padding: 16px; 
-    border-top: 1px solid rgba(255, 255, 255, 0.06); 
+  .sidebar-footer {
+    padding: 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
   }
 
-  .logout-btn { 
-    width: 100%; 
-    padding: 14px; 
-    background: rgba(255, 107, 107, 0.1); 
-    border: 1px solid rgba(255, 107, 107, 0.2); 
-    border-radius: 12px; 
-    color: #ff6b6b; 
-    font-family: 'Kanit', sans-serif; 
-    font-size: 14px; 
-    cursor: pointer; 
-    display: flex; 
-    align-items: center; 
-    justify-content: center; 
-    gap: 10px; 
-    transition: all 0.2s; 
+  .logout-btn {
+    width: 100%;
+    padding: 14px;
+    background: rgba(255, 107, 107, 0.1);
+    border: 1px solid rgba(255, 107, 107, 0.2);
+    border-radius: 12px;
+    color: #ff6b6b;
+    font-family: 'Kanit', sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: all 0.2s;
   }
 
-  .logout-btn:hover { 
+  .logout-btn:hover {
     background: rgba(255, 107, 107, 0.2);
     transform: translateY(-2px);
   }
 
   /* Main Content */
-  .main-content { 
-    flex: 1; 
-    margin-left: 280px; 
+  .main-content {
+    flex: 1;
+    margin-left: 280px;
     min-height: 100vh;
     position: relative;
     z-index: 1;
@@ -1191,6 +1300,7 @@
     color: #71717a;
   }
 
+  .theme-toggle-btn,
   .refresh-btn {
     width: 44px;
     height: 44px;
@@ -1202,8 +1312,12 @@
     transition: all 0.2s;
   }
 
+  .theme-toggle-btn:hover,
   .refresh-btn:hover {
     background: rgba(255, 255, 255, 0.1);
+  }
+
+  .refresh-btn:hover {
     transform: rotate(180deg);
   }
 
@@ -1212,13 +1326,13 @@
   }
 
   /* Loading Screen */
-  .loading-screen { 
-    display: flex; 
-    flex-direction: column; 
-    align-items: center; 
-    justify-content: center; 
-    height: 60vh; 
-    gap: 24px; 
+  .loading-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 60vh;
+    gap: 24px;
   }
 
   .loading-spinner {
@@ -1295,22 +1409,22 @@
     background-size: 10px 10px;
   }
 
-  .stat-card.gradient-blue { 
+  .stat-card.gradient-blue {
     background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(102, 126, 234, 0.05));
     border-color: rgba(102, 126, 234, 0.3);
   }
 
-  .stat-card.gradient-green { 
+  .stat-card.gradient-green {
     background: linear-gradient(135deg, rgba(0, 255, 136, 0.2), rgba(0, 255, 136, 0.05));
     border-color: rgba(0, 255, 136, 0.3);
   }
 
-  .stat-card.gradient-orange { 
+  .stat-card.gradient-orange {
     background: linear-gradient(135deg, rgba(255, 165, 2, 0.2), rgba(255, 165, 2, 0.05));
     border-color: rgba(255, 165, 2, 0.3);
   }
 
-  .stat-card.gradient-purple { 
+  .stat-card.gradient-purple {
     background: linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(168, 85, 247, 0.05));
     border-color: rgba(168, 85, 247, 0.3);
   }
@@ -1328,9 +1442,9 @@
     filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
   }
 
-  .stat-value { 
-    font-size: 36px; 
-    font-weight: 700; 
+  .stat-value {
+    font-size: 36px;
+    font-weight: 700;
     font-family: 'JetBrains Mono', monospace;
     line-height: 1;
   }
@@ -1340,8 +1454,8 @@
   .stat-card.gradient-orange .stat-value { color: #ffa502; }
   .stat-card.gradient-purple .stat-value { color: #a855f7; }
 
-  .stat-label { 
-    font-size: 14px; 
+  .stat-label {
+    font-size: 14px;
     color: #a1a1aa;
     margin-top: 4px;
   }
@@ -1385,7 +1499,6 @@
 
   .progress-ring-fill {
     fill: none;
-    stroke: url(#progressGradient);
     stroke-width: 10;
     stroke-linecap: round;
     transition: stroke-dasharray 1s ease;
@@ -1529,7 +1642,7 @@
     opacity: 0.5;
   }
 
-  /* Driver List */
+  /* Driver/User List in Overview */
   .driver-list {
     display: flex;
     flex-direction: column;
@@ -1623,14 +1736,14 @@
     font-family: 'JetBrains Mono', monospace;
   }
 
-  .driver-stats-mini .stat.pending {
-    background: rgba(102, 126, 234, 0.2);
-    color: #818cf8;
-  }
-
   .driver-stats-mini .stat.completed {
     background: rgba(0, 255, 136, 0.2);
     color: #00ff88;
+  }
+
+  .driver-stats-mini .stat.skipped {
+    background: rgba(255, 165, 2, 0.2);
+    color: #ffa502;
   }
 
   /* Activity List */
@@ -1830,6 +1943,17 @@
   .btn-ghost:hover {
     background: rgba(255, 255, 255, 0.05);
     color: #fff;
+  }
+
+  .btn-danger {
+    background: linear-gradient(135deg, #ff6b6b, #ee5a5a);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .btn-danger:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(255, 107, 107, 0.3);
   }
 
   /* Filters */
@@ -2102,6 +2226,10 @@
     transform: scale(1.1);
   }
 
+  .action-btn.delete:hover {
+    background: rgba(255, 107, 107, 0.2);
+  }
+
   .time-col {
     white-space: nowrap;
   }
@@ -2122,201 +2250,94 @@
     color: #71717a;
   }
 
-  /* Customer Orders Grid */
-  .orders-grid {
+  /* Users Grid */
+  .users-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 24px;
   }
 
-  .order-card {
-    padding: 20px;
-    transition: all 0.3s;
-  }
-
-  .order-card:hover {
-    transform: translateY(-4px);
-  }
-
-  .order-card.pending {
-    border-color: rgba(255, 165, 2, 0.3);
-    background: linear-gradient(135deg, rgba(255, 165, 2, 0.1), rgba(255, 165, 2, 0.02));
-  }
-
-  .order-card.accepted {
-    border-color: rgba(0, 255, 136, 0.3);
-    background: linear-gradient(135deg, rgba(0, 255, 136, 0.1), rgba(0, 255, 136, 0.02));
-  }
-
-  .order-card.completed {
-    border-color: rgba(107, 114, 128, 0.3);
-    opacity: 0.7;
-  }
-
-  .order-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 16px;
-  }
-
-  .customer-info {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
-
-  .customer-avatar {
-    width: 44px;
-    height: 44px;
-    background: linear-gradient(135deg, #8b5cf6, #6d28d9);
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-  }
-
-  .customer-name {
-    font-weight: 600;
-    font-size: 15px;
-  }
-
-  .customer-phone {
-    font-size: 13px;
-    color: #71717a;
-  }
-
-  .order-status {
-    padding: 6px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .order-status.pending {
-    background: rgba(255, 165, 2, 0.2);
-    color: #ffa502;
-  }
-
-  .order-status.accepted {
-    background: rgba(0, 255, 136, 0.2);
-    color: #00ff88;
-  }
-
-  .order-status.completed {
-    background: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-
-  .order-address {
-    font-size: 13px;
-    color: #a1a1aa;
-    padding: 12px;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 10px;
-    margin-bottom: 12px;
-  }
-
-  .order-driver {
-    font-size: 13px;
-    color: #818cf8;
-    margin-bottom: 8px;
-  }
-
-  .order-time {
-    font-size: 12px;
-    color: #71717a;
-  }
-
-  /* Drivers Grid Modern */
-  .drivers-grid-modern {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 24px;
-  max-height: calc(100vh - 200px);
-  overflow-y: auto;
-  padding-bottom: 24px;
-  }
-
-  .drivers-grid-modern::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .drivers-grid-modern::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 3px;
-  }
-
-  .drivers-grid-modern::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .driver-card-modern {
+  .user-card-modern {
     padding: 24px;
     transition: all 0.3s;
   }
 
-  .driver-card-modern:hover {
+  .user-card-modern:hover {
     transform: translateY(-4px);
     border-color: rgba(102, 126, 234, 0.4);
   }
 
-  .driver-card-header {
+  .user-card-header-row {
     display: flex;
     gap: 16px;
-    margin-bottom: 20px;
+    align-items: flex-start;
+    margin-bottom: 16px;
   }
 
-  .driver-avatar-large {
-    width: 64px;
-    height: 64px;
+  .user-avatar-large {
+    width: 56px;
+    height: 56px;
     background: linear-gradient(135deg, #667eea, #764ba2);
     border-radius: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 32px;
-    position: relative;
+    font-size: 28px;
+    flex-shrink: 0;
     box-shadow: 0 8px 24px rgba(102, 126, 234, 0.3);
   }
 
-  .status-indicator {
-    position: absolute;
-    bottom: -4px;
-    right: -4px;
-    width: 18px;
-    height: 18px;
-    background: #52525b;
-    border: 3px solid #0a0a0f;
-    border-radius: 50%;
+  .user-main-info {
+    flex: 1;
+    min-width: 0;
   }
 
-  .status-indicator.active {
-    background: #00ff88;
-    box-shadow: 0 0 12px #00ff88;
-  }
-
-  .driver-main-info h3 {
-    font-size: 20px;
+  .user-main-info h3 {
+    font-size: 18px;
     font-weight: 600;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
   }
 
-  .vehicle-info {
+  .user-username {
     font-size: 13px;
     color: #71717a;
+    margin-bottom: 6px;
   }
 
-  .driver-stats-row {
+  .role-chip {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(102, 126, 234, 0.2);
+    color: #818cf8;
+  }
+
+  .role-chip.admin {
+    background: rgba(0, 255, 136, 0.2);
+    color: #00ff88;
+  }
+
+  .user-card-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .user-contact {
+    font-size: 13px;
+    color: #a1a1aa;
+    margin-bottom: 16px;
+  }
+
+  .user-stats-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 20px;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
   }
 
   .stat-box {
-    padding: 16px;
+    padding: 14px;
     background: rgba(0, 0, 0, 0.2);
     border-radius: 12px;
     text-align: center;
@@ -2330,29 +2351,24 @@
     border: 1px solid rgba(0, 255, 136, 0.3);
   }
 
+  .stat-box.skipped {
+    border: 1px solid rgba(255, 165, 2, 0.3);
+  }
+
   .stat-number {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
     font-family: 'JetBrains Mono', monospace;
   }
 
   .stat-box.pending .stat-number { color: #818cf8; }
   .stat-box.completed .stat-number { color: #00ff88; }
+  .stat-box.skipped .stat-number { color: #ffa502; }
 
   .stat-text {
     font-size: 12px;
     color: #71717a;
     margin-top: 4px;
-  }
-
-  .driver-contact-info {
-    padding-top: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .contact-item {
-    font-size: 14px;
-    color: #a1a1aa;
   }
 
   /* Modal */
@@ -2379,6 +2395,10 @@
     animation: slideUp 0.3s ease;
   }
 
+  .modal.modal-wide {
+    width: 520px;
+  }
+
   @keyframes slideUp {
     from { transform: translateY(20px); opacity: 0; }
     to { transform: translateY(0); opacity: 1; }
@@ -2402,6 +2422,10 @@
     font-size: 24px;
   }
 
+  .modal-icon.delete-icon {
+    background: linear-gradient(135deg, #ff6b6b, #ee5a5a);
+  }
+
   .modal h3 {
     font-size: 20px;
     font-weight: 600;
@@ -2414,8 +2438,15 @@
     margin-left: 64px;
   }
 
-  .form-group {
+  .user-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
     margin-bottom: 24px;
+  }
+
+  .form-group {
+    margin-bottom: 0;
   }
 
   .form-group label {
@@ -2423,7 +2454,25 @@
     font-size: 13px;
     font-weight: 500;
     color: #a1a1aa;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
+  }
+
+  .form-group input {
+    width: 100%;
+    padding: 12px 16px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    color: #e4e4e7;
+    font-family: 'Kanit', sans-serif;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+
+  .form-group input:focus {
+    outline: none;
+    border-color: #00ff88;
+    box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1);
   }
 
   .form-group .select-wrapper {
@@ -2474,6 +2523,518 @@
     to { transform: translateX(0); opacity: 1; }
   }
 
+  /* ═══════════════════════════════════════════════════ */
+  /* ═══ DAY MODE (Light Theme) ═══ */
+  /* ═══════════════════════════════════════════════════ */
+
+  .day-mode {
+    color: #1e293b;
+  }
+
+  :global(.admin-container.day-mode ~ body),
+  .day-mode :global(body) {
+    background: #edf2f7;
+    color: #1e293b;
+  }
+
+  .day-mode .bg-gradient {
+    background:
+      radial-gradient(ellipse at 20% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(99, 102, 241, 0.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(59, 130, 246, 0.03) 0%, transparent 50%);
+  }
+
+  .day-mode .bg-grid {
+    background-image:
+      linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
+  }
+
+  .day-mode .glass-card {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(59, 130, 246, 0.1);
+    box-shadow: 0 4px 24px rgba(30, 64, 175, 0.06);
+  }
+
+  .day-mode .glass-sidebar {
+    background: rgba(255, 255, 255, 0.92);
+    border-right-color: rgba(59, 130, 246, 0.1);
+  }
+
+  /* Sidebar day mode */
+  .day-mode .user-card.glass-card {
+    background: rgba(248, 250, 252, 0.9);
+  }
+
+  .day-mode .user-avatar {
+    box-shadow: 0 4px 20px rgba(59, 130, 246, 0.2);
+  }
+
+  .day-mode .status-dot {
+    border-color: #f8fafc;
+    background: #2563eb;
+  }
+
+  .day-mode .user-name { color: #1e293b; }
+
+  .day-mode .role-badge {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.1), rgba(59, 130, 246, 0.1));
+    border-color: rgba(37, 99, 235, 0.2);
+    color: #2563eb;
+  }
+
+  .day-mode .nav-section-title { color: #94a3b8; }
+
+  .day-mode .nav-item {
+    color: #64748b;
+  }
+
+  .day-mode .nav-item::before {
+    background: linear-gradient(180deg, #2563eb, #3b82f6);
+  }
+
+  .day-mode .nav-item:hover {
+    background: rgba(59, 130, 246, 0.06);
+    color: #1e293b;
+  }
+
+  .day-mode .nav-item.active {
+    background: rgba(37, 99, 235, 0.08);
+    color: #2563eb;
+  }
+
+  .day-mode .badge {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+  }
+
+  .day-mode .badge.info {
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+  }
+
+  .day-mode .sidebar-footer {
+    border-top-color: rgba(59, 130, 246, 0.08);
+  }
+
+  .day-mode .logout-btn {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+  }
+
+  .day-mode .logout-btn:hover {
+    background: rgba(239, 68, 68, 0.12);
+  }
+
+  /* Top bar day mode */
+  .day-mode .page-title { color: #1e293b; }
+
+  .day-mode .time-display .time {
+    color: #2563eb;
+  }
+
+  .day-mode .time-display .date { color: #94a3b8; }
+
+  .day-mode .theme-toggle-btn,
+  .day-mode .refresh-btn {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(59, 130, 246, 0.1);
+  }
+
+  .day-mode .theme-toggle-btn:hover,
+  .day-mode .refresh-btn:hover {
+    background: rgba(59, 130, 246, 0.08);
+  }
+
+  /* Stat cards day mode */
+  .day-mode .stat-card.gradient-blue {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(255, 255, 255, 0.9));
+    border-color: rgba(59, 130, 246, 0.15);
+  }
+
+  .day-mode .stat-card.gradient-green {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(255, 255, 255, 0.9));
+    border-color: rgba(34, 197, 94, 0.15);
+  }
+
+  .day-mode .stat-card.gradient-orange {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(255, 255, 255, 0.9));
+    border-color: rgba(245, 158, 11, 0.15);
+  }
+
+  .day-mode .stat-card.gradient-purple {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(255, 255, 255, 0.9));
+    border-color: rgba(139, 92, 246, 0.15);
+  }
+
+  .day-mode .stat-card.gradient-blue .stat-value { color: #2563eb; }
+  .day-mode .stat-card.gradient-green .stat-value { color: #16a34a; }
+  .day-mode .stat-card.gradient-orange .stat-value { color: #d97706; }
+  .day-mode .stat-card.gradient-purple .stat-value { color: #7c3aed; }
+
+  .day-mode .stat-label { color: #64748b; }
+
+  .day-mode .stat-footer {
+    border-top-color: rgba(59, 130, 246, 0.08);
+  }
+
+  .day-mode .trend { color: #94a3b8; }
+  .day-mode .trend.up { color: #16a34a; }
+
+  /* Progress section day mode */
+  .day-mode .progress-ring-bg {
+    stroke: rgba(59, 130, 246, 0.1);
+  }
+
+  .day-mode .progress-ring-fill {
+    stroke: #2563eb;
+  }
+
+  .day-mode .progress-value { color: #2563eb; }
+  .day-mode .progress-label { color: #94a3b8; }
+  .day-mode .progress-details h3 { color: #1e293b; }
+  .day-mode .item-label { color: #64748b; }
+  .day-mode .item-value { color: #1e293b; }
+  .day-mode .dot.green { background: #16a34a; }
+  .day-mode .dot.orange { background: #d97706; }
+  .day-mode .dot.blue { background: #2563eb; }
+
+  /* Dashboard grid day mode */
+  .day-mode .card-header {
+    border-bottom-color: rgba(59, 130, 246, 0.08);
+  }
+
+  .day-mode .card-header h3 { color: #1e293b; }
+
+  .day-mode .btn-icon {
+    background: rgba(59, 130, 246, 0.06);
+    color: #64748b;
+  }
+
+  .day-mode .btn-icon:hover {
+    background: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
+  }
+
+  .day-mode .empty-state { color: #94a3b8; }
+
+  .day-mode .driver-row-modern {
+    background: rgba(248, 250, 252, 0.8);
+  }
+
+  .day-mode .driver-row-modern:hover {
+    background: rgba(59, 130, 246, 0.04);
+  }
+
+  .day-mode .online-indicator {
+    background: #cbd5e1;
+    border-color: #fff;
+  }
+
+  .day-mode .online-indicator.active {
+    background: #2563eb;
+    box-shadow: 0 0 10px rgba(37, 99, 235, 0.4);
+  }
+
+  .day-mode .driver-name-row .name { color: #1e293b; }
+
+  .day-mode .driver-progress-bar {
+    background: rgba(59, 130, 246, 0.1);
+  }
+
+  .day-mode .progress-fill {
+    background: linear-gradient(90deg, #2563eb, #3b82f6);
+  }
+
+  .day-mode .driver-stats-mini .stat.completed {
+    background: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+  }
+
+  .day-mode .driver-stats-mini .stat.skipped {
+    background: rgba(245, 158, 11, 0.1);
+    color: #d97706;
+  }
+
+  /* Activity list day mode */
+  .day-mode .activity-row-modern:hover {
+    background: rgba(59, 130, 246, 0.03);
+  }
+
+  .day-mode .activity-icon-wrap.success {
+    background: rgba(34, 197, 94, 0.1);
+  }
+
+  .day-mode .activity-icon-wrap.skip {
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .day-mode .activity-title { color: #1e293b; }
+  .day-mode .driver-tag { color: #2563eb; }
+  .day-mode .time-tag { color: #94a3b8; }
+
+  /* Summary card day mode */
+  .day-mode .summary-header h3 { color: #1e293b; }
+  .day-mode .summary-value { color: #1e293b; }
+  .day-mode .summary-value.green { color: #16a34a; }
+  .day-mode .summary-value.red { color: #ef4444; }
+  .day-mode .summary-label { color: #64748b; }
+
+  .day-mode .summary-divider {
+    background: linear-gradient(180deg, transparent, rgba(59, 130, 246, 0.12), transparent);
+  }
+
+  /* Tab header day mode */
+  .day-mode .result-count { color: #94a3b8; }
+
+  /* Buttons day mode */
+  .day-mode .btn-primary {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #fff;
+  }
+
+  .day-mode .btn-primary:hover {
+    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.3);
+  }
+
+  .day-mode .btn-primary.glow {
+    box-shadow: 0 0 20px rgba(37, 99, 235, 0.3);
+  }
+
+  .day-mode .btn-secondary {
+    background: rgba(255, 255, 255, 0.9);
+    color: #64748b;
+    border-color: rgba(59, 130, 246, 0.12);
+  }
+
+  .day-mode .btn-secondary:hover {
+    background: rgba(59, 130, 246, 0.06);
+    color: #2563eb;
+  }
+
+  .day-mode .btn-ghost {
+    color: #64748b;
+    border-color: rgba(59, 130, 246, 0.12);
+  }
+
+  .day-mode .btn-ghost:hover {
+    background: rgba(59, 130, 246, 0.04);
+    color: #2563eb;
+  }
+
+  /* Filters day mode */
+  .day-mode .search-input-wrapper input {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(59, 130, 246, 0.12);
+    color: #1e293b;
+  }
+
+  .day-mode .search-input-wrapper input::placeholder {
+    color: #94a3b8;
+  }
+
+  .day-mode .search-input-wrapper input:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+
+  .day-mode .select-wrapper select {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(59, 130, 246, 0.12);
+    color: #1e293b;
+  }
+
+  .day-mode .select-wrapper select:focus {
+    border-color: #2563eb;
+  }
+
+  .day-mode .select-wrapper::after {
+    color: #94a3b8;
+  }
+
+  /* Table day mode */
+  .day-mode .modern-table th {
+    background: rgba(248, 250, 252, 0.9);
+    color: #64748b;
+  }
+
+  .day-mode .modern-table th,
+  .day-mode .modern-table td {
+    border-bottom-color: rgba(59, 130, 246, 0.06);
+  }
+
+  .day-mode .modern-table tbody tr:hover {
+    background: rgba(59, 130, 246, 0.03);
+  }
+
+  .day-mode .modern-table tbody tr.selected {
+    background: rgba(37, 99, 235, 0.06);
+  }
+
+  .day-mode .checkmark {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(59, 130, 246, 0.2);
+  }
+
+  .day-mode .custom-checkbox input:checked ~ .checkmark {
+    background: #2563eb;
+    border-color: #2563eb;
+  }
+
+  .day-mode .custom-checkbox input:checked ~ .checkmark::after {
+    color: #fff;
+  }
+
+  .day-mode .row-number {
+    background: rgba(59, 130, 246, 0.06);
+    color: #64748b;
+  }
+
+  .day-mode .point-name { color: #1e293b; }
+  .day-mode .address-text { color: #64748b; }
+
+  .day-mode .driver-chip {
+    background: rgba(59, 130, 246, 0.1);
+    color: #2563eb;
+  }
+
+  .day-mode .unassigned-chip {
+    background: rgba(239, 68, 68, 0.08);
+    color: #ef4444;
+  }
+
+  .day-mode .status-chip.completed {
+    background: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+  }
+
+  .day-mode .status-chip.skipped {
+    background: rgba(245, 158, 11, 0.1);
+    color: #d97706;
+  }
+
+  .day-mode .action-btn {
+    background: rgba(59, 130, 246, 0.06);
+  }
+
+  .day-mode .action-btn:hover {
+    background: rgba(59, 130, 246, 0.12);
+  }
+
+  .day-mode .action-btn.delete:hover {
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .day-mode .time-display-cell .time { color: #1e293b; }
+  .day-mode .time-display-cell .date { color: #94a3b8; }
+
+  /* Users grid day mode */
+  .day-mode .user-card-modern:hover {
+    border-color: rgba(59, 130, 246, 0.25);
+  }
+
+  .day-mode .user-avatar-large {
+    box-shadow: 0 8px 24px rgba(59, 130, 246, 0.2);
+  }
+
+  .day-mode .user-main-info h3 { color: #1e293b; }
+  .day-mode .user-username { color: #94a3b8; }
+
+  .day-mode .role-chip {
+    background: rgba(59, 130, 246, 0.1);
+    color: #2563eb;
+  }
+
+  .day-mode .role-chip.admin {
+    background: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+  }
+
+  .day-mode .user-contact { color: #64748b; }
+
+  .day-mode .stat-box {
+    background: rgba(248, 250, 252, 0.8);
+  }
+
+  .day-mode .stat-box.pending {
+    border-color: rgba(59, 130, 246, 0.15);
+  }
+
+  .day-mode .stat-box.completed {
+    border-color: rgba(34, 197, 94, 0.15);
+  }
+
+  .day-mode .stat-box.skipped {
+    border-color: rgba(245, 158, 11, 0.15);
+  }
+
+  .day-mode .stat-box.pending .stat-number { color: #2563eb; }
+  .day-mode .stat-box.completed .stat-number { color: #16a34a; }
+  .day-mode .stat-box.skipped .stat-number { color: #d97706; }
+
+  .day-mode .stat-text { color: #94a3b8; }
+
+  /* Modal day mode */
+  .day-mode .modal-overlay {
+    background: rgba(15, 23, 42, 0.5);
+  }
+
+  .day-mode .modal.glass-card {
+    background: rgba(255, 255, 255, 0.98);
+    border-color: rgba(59, 130, 246, 0.15);
+    box-shadow: 0 24px 48px rgba(30, 64, 175, 0.15);
+  }
+
+  .day-mode .modal h3 { color: #1e293b; }
+  .day-mode .modal-subtitle { color: #64748b; }
+
+  .day-mode .modal-icon {
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+  }
+
+  .day-mode .modal-icon.delete-icon {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+  }
+
+  .day-mode .form-group label { color: #64748b; }
+
+  .day-mode .form-group input {
+    background: rgba(248, 250, 252, 0.9);
+    border-color: rgba(59, 130, 246, 0.12);
+    color: #1e293b;
+  }
+
+  .day-mode .form-group input:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+
+  .day-mode .form-group input::placeholder {
+    color: #94a3b8;
+  }
+
+  /* Toast day mode */
+  .day-mode .toast.success {
+    background: rgba(34, 197, 94, 0.12);
+    border-color: rgba(34, 197, 94, 0.25);
+    color: #16a34a;
+  }
+
+  .day-mode .toast.error {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+  }
+
+  .day-mode .card-content::-webkit-scrollbar-thumb {
+    background: rgba(59, 130, 246, 0.15);
+  }
+
+  .day-mode .loading-screen p { color: #64748b; }
+
+  .day-mode .spinner-ring:nth-child(1) { border-top-color: #2563eb; }
+  .day-mode .spinner-ring:nth-child(2) { border-right-color: #3b82f6; }
+  .day-mode .spinner-ring:nth-child(3) { border-bottom-color: #d97706; }
+
   /* Responsive */
   @media (max-width: 1400px) {
     .hero-stats {
@@ -2485,17 +3046,17 @@
     .dashboard-grid {
       grid-template-columns: 1fr;
     }
-    
+
     .progress-section {
       flex-direction: column;
       text-align: center;
     }
-    
+
     .summary-content {
       flex-direction: column;
       gap: 20px;
     }
-    
+
     .summary-divider {
       width: 100%;
       height: 1px;
@@ -2508,42 +3069,49 @@
       transform: translateX(-100%);
       z-index: 1000;
     }
-    
+
     .sidebar.open {
       transform: translateX(0);
     }
-    
+
     .main-content {
       margin-left: 0;
     }
-    
+
     .hero-stats {
       grid-template-columns: 1fr;
     }
-    
+
     .filters-bar {
       flex-direction: column;
     }
-    
+
     .search-input-wrapper {
       min-width: 100%;
     }
-    
+
     .filter-group {
       width: 100%;
     }
-    
+
     .filter-group .select-wrapper {
       flex: 1;
     }
-    
+
     .filter-group .select-wrapper select {
       width: 100%;
     }
-    
-    .orders-grid,
-    .drivers-grid-modern {
+
+    .users-grid {
       grid-template-columns: 1fr;
+    }
+
+    .user-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .modal.modal-wide {
+      width: 95vw;
     }
   }
 </style>
