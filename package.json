@@ -52,6 +52,7 @@
 	"dependencies": {
 		"leaflet": "^1.9.4",
 		"leaflet-rotate": "^0.2.8",
-		"lucide-svelte": "^0.555.0"
+		"lucide-svelte": "^0.555.0",
+		"three": "^0.183.1"
 	}
 }

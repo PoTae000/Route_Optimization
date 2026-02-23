@@ -79,6 +79,8 @@
       window.removeEventListener('keydown', handleKeyboardShortcuts);
       if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
     }
+    // Destroy globe
+    disposeGlobe();
     // Destroy map
     if (map) { try { map.off(); map.remove(); } catch(e) {} map = null; }
     // Clear all user-dependent in-memory state (prevent data leaking to next user)
@@ -480,7 +482,19 @@
 
   // Globe Mode (3D Earth view when zoomed out)
   let globeMode = false;
-  let _globeStarsUrl = '';
+  let globeRenderer: any = null;
+  let globeScene: any = null;
+  let globeCamera: any = null;
+  let globeControls: any = null;
+  let globeEarth: any = null;
+  let globeUserMarker: any = null;
+  let globeUserPulse: any = null;
+  let globeAnimId = 0;
+  let globeReady = false;
+  let globeInitializing = false;
+  let _exitingGlobe = false;
+  let globeError = '';
+  let globeViewLabel = '';
 
   // Traffic
   let showTraffic = false;
@@ -534,26 +548,439 @@
     _lastAppliedRotation = 0;
   }
 
-  // ═══ Globe Mode: 3D Earth Effect ═══
-  function initGlobeStars() {
+  // ═══ Globe Mode: Three.js 3D Earth ═══
+  async function initGlobe() {
+    if (globeInitializing || globeReady) return;
+    globeInitializing = true;
+    console.log('[Globe] Starting init...');
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 1200;
-      canvas.height = 1200;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      for (let i = 0; i < 500; i++) {
-        const x = Math.random() * 1200;
-        const y = Math.random() * 1200;
-        const r = Math.random() > 0.95 ? 1.8 : Math.random() > 0.8 ? 1.2 : 0.6;
-        const a = Math.random() * 0.7 + 0.15;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
-        ctx.fill();
+      let threeModule: any, controlsModule: any;
+      try {
+        [threeModule, controlsModule] = await Promise.all([
+          import('three'),
+          import('three/addons/controls/OrbitControls.js')
+        ]);
+      } catch(importErr) {
+        console.error('[Globe] Import failed, trying fallback path:', importErr);
+        [threeModule, controlsModule] = await Promise.all([
+          import('three'),
+          import('three/examples/jsm/controls/OrbitControls.js')
+        ]);
       }
-      _globeStarsUrl = canvas.toDataURL('image/png');
-    } catch(e) {}
+      const THREE = threeModule as any;
+      const OrbitControls = (controlsModule as any).OrbitControls;
+      console.log('[Globe] Three.js loaded:', THREE.REVISION);
+
+      const container = document.getElementById('globe-container');
+      if (!container) {
+        console.error('[Globe] Container not found!');
+        globeError = 'Container not found';
+        globeInitializing = false;
+        return;
+      }
+
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      console.log('[Globe] Container size:', w, 'x', h);
+
+      // Scene
+      const scene = new THREE.Scene();
+      globeScene = scene;
+
+      // Camera — on mobile push camera further back so globe appears smaller
+      const isMobile = w < 768;
+      const fov = isMobile ? 62 : 50;
+      const camZ = isMobile ? 4.8 : 2.8;
+      const camera: any = new THREE.PerspectiveCamera(fov, w / h, 0.1, 1000);
+      camera.position.set(0, isMobile ? 0.15 : 0.3, camZ);
+      globeCamera = camera;
+
+      // Renderer
+      const renderer: any = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer.setSize(w, h);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setClearColor(0x000005, 1);
+      container.appendChild(renderer.domElement as HTMLCanvasElement);
+      globeRenderer = renderer;
+
+      // Lighting
+      scene.add(new THREE.AmbientLight(0x445566, 3.5));
+      const sun: any = new THREE.DirectionalLight(0xffffff, 1.5);
+      sun.position.set(5, 3, 5);
+      scene.add(sun);
+
+      // Stars background
+      const starsGeo = new THREE.BufferGeometry();
+      const starPos: number[] = [];
+      for (let i = 0; i < 3000; i++) {
+        const r = 40 + Math.random() * 60;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        starPos.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+      }
+      starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+      scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, sizeAttenuation: true })) as any);
+
+      // Earth sphere (dark placeholder → real texture loaded async)
+      const earthGeo = new THREE.SphereGeometry(1, 64, 64);
+      const earthMat = new THREE.MeshPhongMaterial({
+        color: 0x1a1a2e,
+        specular: new THREE.Color(0x111122),
+        shininess: 8
+      });
+      const earth: any = new THREE.Mesh(earthGeo, earthMat);
+      scene.add(earth);
+      globeEarth = earth;
+
+      // Atmosphere glow (backside larger sphere)
+      const atmosGeo = new THREE.SphereGeometry(1.02, 64, 64);
+      const atmosMat = new THREE.ShaderMaterial({
+        vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.6) * i; }`,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false
+      });
+      scene.add(new THREE.Mesh(atmosGeo, atmosMat) as any);
+
+      // OrbitControls (drag to rotate globe)
+      const controls = new OrbitControls(camera, renderer.domElement as HTMLElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.enablePan = false;
+      controls.minDistance = 1.5;
+      controls.maxDistance = isMobile ? 8 : 6;
+      controls.rotateSpeed = 0.5;
+      controls.zoomSpeed = 0.8;
+      globeControls = controls;
+
+      // Zoom-in detection → transition back to flat map
+      controls.addEventListener('change', () => {
+        if (_exitingGlobe || !globeCamera) return;
+        if (globeCamera.position.length() <= 1.55) {
+          _exitingGlobe = true;
+          const ll = getGlobeCenterLatLng();
+          if (ll) exitGlobeMode(ll);
+          setTimeout(() => { _exitingGlobe = false; }, 1500);
+        }
+      });
+
+      // Resize handler
+      const onGlobeResize = () => {
+        if (!container || !globeCamera || !globeRenderer) return;
+        const nw = container.clientWidth, nh = container.clientHeight;
+        globeCamera.aspect = nw / nh;
+        globeCamera.updateProjectionMatrix();
+        globeRenderer.setSize(nw, nh);
+      };
+      (window as any).__globeResizeHandler = onGlobeResize;
+      window.addEventListener('resize', onGlobeResize);
+
+      // Place user location marker on globe
+      updateGlobeUserMarker(THREE);
+
+      globeReady = true;
+      globeInitializing = false;
+      console.log('[Globe] Ready! Starting animation...');
+      animateGlobe();
+
+      // Load Earth texture in background
+      loadGlobeTexture(THREE).then((tex) => {
+        if (tex && globeEarth) {
+          globeEarth.material.map = tex;
+          globeEarth.material.color.set(0xffffff);
+          globeEarth.material.needsUpdate = true;
+          console.log('[Globe] Earth texture loaded');
+        }
+      }).catch((e: any) => console.error('[Globe] Texture load error:', e));
+    } catch(e: any) {
+      console.error('[Globe] Init error:', e);
+      globeError = String(e?.message || 'Unknown error');
+      globeInitializing = false;
+    }
+  }
+
+  let _globeFrameCount = 0;
+  function animateGlobe() {
+    if (!globeReady || !globeMode) return;
+    globeAnimId = requestAnimationFrame(animateGlobe);
+    globeControls?.update();
+    // Pulse user marker (green glow effect)
+    if (globeUserPulse) {
+      const t = Date.now() * 0.003;
+      const s = 1 + 0.4 * Math.sin(t);
+      globeUserPulse.scale.set(s, s, s);
+      globeUserPulse.material.opacity = 0.25 + 0.25 * Math.sin(t);
+      // Outer ring counter-pulse
+      const outer = globeUserPulse.children[0];
+      if (outer) {
+        const s2 = 1 + 0.5 * Math.sin(t * 0.7 + 1);
+        outer.scale.set(s2, s2, s2);
+        outer.material.opacity = 0.08 + 0.1 * Math.sin(t * 0.7);
+      }
+    }
+    // Glow on dot
+    if (globeUserMarker?.children[0]) {
+      globeUserMarker.children[0].material.opacity = 0.2 + 0.15 * Math.sin(Date.now() * 0.004);
+    }
+    // Update label every 30 frames
+    if (++_globeFrameCount % 30 === 0) updateGlobeViewLabel();
+    if (globeRenderer && globeScene && globeCamera) {
+      globeRenderer.render(globeScene, globeCamera);
+    }
+  }
+
+  async function loadGlobeTexture(THREE: any): Promise<any> {
+    try {
+      const zoom = 3;
+      const n = Math.pow(2, zoom); // 8x8 tiles
+      const tileSize = 256;
+      const merc = document.createElement('canvas');
+      merc.width = n * tileSize; // 2048
+      merc.height = n * tileSize;
+      const ctx = merc.getContext('2d')!;
+      ctx.fillStyle = '#1d1f20';
+      ctx.fillRect(0, 0, merc.width, merc.height);
+
+      const subs = 'abcd';
+      const promises: Promise<void>[] = [];
+      for (let ty = 0; ty < n; ty++) {
+        for (let tx = 0; tx < n; tx++) {
+          const s = subs[(tx + ty) % 4];
+          const url = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
+          promises.push(new Promise<void>(resolve => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => { ctx.drawImage(img, tx * tileSize, ty * tileSize); resolve(); };
+            img.onerror = () => resolve();
+            img.src = url;
+          }));
+        }
+      }
+      await Promise.allSettled(promises);
+
+      // Convert Mercator → Equirectangular for proper sphere mapping
+      const eq = mercatorToEquirect(merc);
+      const texture = new THREE.CanvasTexture(eq);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = 4;
+      return texture;
+    } catch(e) {
+      console.error('Globe texture error:', e);
+      return null;
+    }
+  }
+
+  function mercatorToEquirect(src: HTMLCanvasElement): HTMLCanvasElement {
+    const srcW = src.width, srcH = src.height;
+    const srcCtx = src.getContext('2d')!;
+    const srcData = srcCtx.getImageData(0, 0, srcW, srcH);
+    const outW = srcW, outH = Math.round(srcW / 2);
+    const out = document.createElement('canvas');
+    out.width = outW; out.height = outH;
+    const outCtx = out.getContext('2d')!;
+    const outData = outCtx.createImageData(outW, outH);
+    const MAX_LAT = 85.05112878 * Math.PI / 180;
+    const maxMercY = Math.log(Math.tan(Math.PI / 4 + MAX_LAT / 2));
+    for (let oy = 0; oy < outH; oy++) {
+      const lat = (0.5 - oy / outH) * Math.PI;
+      const clamped = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat));
+      const mercY = Math.log(Math.tan(Math.PI / 4 + clamped / 2));
+      const srcYNorm = 0.5 - mercY / (2 * maxMercY);
+      const srcY = Math.min(srcH - 1, Math.max(0, Math.round(srcYNorm * srcH)));
+      for (let ox = 0; ox < outW; ox++) {
+        const si = (srcY * srcW + ox) * 4;
+        const di = (oy * outW + ox) * 4;
+        outData.data[di] = srcData.data[si];
+        outData.data[di + 1] = srcData.data[si + 1];
+        outData.data[di + 2] = srcData.data[si + 2];
+        outData.data[di + 3] = 255;
+      }
+    }
+    outCtx.putImageData(outData, 0, 0);
+    return out;
+  }
+
+  function getGlobeCenterLatLng(): { lat: number; lng: number } | null {
+    if (!globeCamera) return null;
+    const pos = globeCamera.position;
+    const dir = { x: -pos.x, y: -pos.y, z: -pos.z };
+    const len = Math.sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    dir.x /= len; dir.y /= len; dir.z /= len;
+    const lat = Math.asin(dir.y) * 180 / Math.PI;
+    const phi = Math.atan2(dir.z, -dir.x);
+    let lng = phi * 180 / Math.PI - 180;
+    lng = ((lng + 540) % 360) - 180;
+    return { lat, lng };
+  }
+
+  function setGlobeViewLatLng(lat: number, lng: number) {
+    if (!globeCamera || !globeControls) return;
+    const phi = (lng + 180) * Math.PI / 180;
+    const theta = (90 - lat) * Math.PI / 180;
+    const r = globeCamera.position.length() || 2.8;
+    const x = -Math.cos(phi) * Math.sin(theta) * r;
+    const y = Math.cos(theta) * r;
+    const z = Math.sin(phi) * Math.sin(theta) * r;
+    globeCamera.position.set(x, y, z);
+    globeCamera.lookAt(0, 0, 0);
+    globeControls.update();
+  }
+
+  // Convert lat/lng to 3D point on globe surface (radius slightly above 1.0)
+  function latLngToGlobe3D(lat: number, lng: number, r: number = 1.01): { x: number; y: number; z: number } {
+    const phi = (lng + 180) * Math.PI / 180;
+    const theta = (90 - lat) * Math.PI / 180;
+    return {
+      x: -Math.cos(phi) * Math.sin(theta) * r,
+      y: Math.cos(theta) * r,
+      z: Math.sin(phi) * Math.sin(theta) * r
+    };
+  }
+
+  // Place user's GPS marker on the globe
+  function updateGlobeUserMarker(THREE: any) {
+    if (!globeScene || !currentLocation) return;
+    const pos = latLngToGlobe3D(currentLocation.lat, currentLocation.lng, 1.012);
+
+    if (!globeUserMarker) {
+      // Green glowing dot
+      const dotGeo = new THREE.SphereGeometry(0.02, 24, 24);
+      const dotMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
+      globeUserMarker = new THREE.Mesh(dotGeo, dotMat);
+      globeScene.add(globeUserMarker);
+
+      // Inner glow sphere (additive blend)
+      const glowGeo = new THREE.SphereGeometry(0.035, 24, 24);
+      const glowMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false });
+      const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+      globeUserMarker.add(glowMesh);
+
+      // Pulse ring
+      const ringGeo = new THREE.RingGeometry(0.03, 0.06, 48);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.5, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+      globeUserPulse = new THREE.Mesh(ringGeo, ringMat);
+      globeScene.add(globeUserPulse);
+
+      // Outer pulse ring (larger, fainter)
+      const outerRingGeo = new THREE.RingGeometry(0.06, 0.09, 48);
+      const outerRingMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.15, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+      const outerPulse = new THREE.Mesh(outerRingGeo, outerRingMat);
+      outerPulse.name = 'outerPulse';
+      globeUserPulse.add(outerPulse);
+    }
+
+    globeUserMarker.position.set(pos.x, pos.y, pos.z);
+    globeUserPulse.position.set(pos.x, pos.y, pos.z);
+    // Orient ring to face outward from globe center
+    globeUserPulse.lookAt(0, 0, 0);
+  }
+
+  // Get rough location name from lat/lng
+  function getGlobeRegionName(lat: number, lng: number): string {
+    // Thailand
+    if (lat >= 5 && lat <= 21 && lng >= 97 && lng <= 106) return 'ประเทศไทย';
+    // Southeast Asia
+    if (lat >= -10 && lat <= 25 && lng >= 92 && lng <= 141) return 'เอเชียตะวันออกเฉียงใต้';
+    // East Asia
+    if (lat >= 20 && lat <= 55 && lng >= 100 && lng <= 150) return 'เอเชียตะวันออก';
+    // South Asia
+    if (lat >= 5 && lat <= 40 && lng >= 60 && lng <= 97) return 'เอเชียใต้';
+    // Middle East
+    if (lat >= 12 && lat <= 42 && lng >= 25 && lng <= 63) return 'ตะวันออกกลาง';
+    // Europe
+    if (lat >= 35 && lat <= 72 && lng >= -25 && lng <= 45) return 'ยุโรป';
+    // Africa
+    if (lat >= -35 && lat <= 37 && lng >= -18 && lng <= 52) return 'แอฟริกา';
+    // North America
+    if (lat >= 15 && lat <= 72 && lng >= -170 && lng <= -50) return 'อเมริกาเหนือ';
+    // South America
+    if (lat >= -56 && lat <= 15 && lng >= -82 && lng <= -34) return 'อเมริกาใต้';
+    // Oceania
+    if (lat >= -50 && lat <= 0 && lng >= 110 && lng <= 180) return 'โอเชียเนีย';
+    // Poles
+    if (lat > 66) return 'อาร์กติก';
+    if (lat < -66) return 'แอนตาร์กติกา';
+    // Ocean areas
+    return `${lat.toFixed(1)}°${lat >= 0 ? 'N' : 'S'}, ${lng.toFixed(1)}°${lng >= 0 ? 'E' : 'W'}`;
+  }
+
+  // Update globe view label (called from animation loop)
+  function updateGlobeViewLabel() {
+    const ll = getGlobeCenterLatLng();
+    if (ll) {
+      globeViewLabel = getGlobeRegionName(ll.lat, ll.lng);
+    }
+  }
+
+  function goToMyLocationOnGlobe() {
+    if (!currentLocation) return;
+    setGlobeViewLatLng(currentLocation.lat, currentLocation.lng);
+  }
+
+  function enterGlobeMode() {
+    globeMode = true;
+    globeError = '';
+    if (!globeReady && !globeInitializing) {
+      // Wait a frame for Svelte to update DOM, then init Three.js
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          initGlobe().then(() => {
+            if (map && globeReady && globeMode) {
+              const c = map.getCenter();
+              setGlobeViewLatLng(c.lat, c.lng);
+            }
+          }).catch((e: any) => {
+            console.error('Globe init failed:', e);
+            globeError = String(e?.message || e);
+          });
+        }, 50);
+      });
+      // Timeout fallback: if globe doesn't init within 15s, exit
+      setTimeout(() => {
+        if (globeMode && !globeReady) {
+          console.warn('Globe init timeout — falling back to flat map');
+          globeError = 'โหลดไม่สำเร็จ';
+          globeMode = false;
+          globeInitializing = false;
+        }
+      }, 15000);
+    } else if (globeReady) {
+      if (map) {
+        const c = map.getCenter();
+        setGlobeViewLatLng(c.lat, c.lng);
+      }
+      animateGlobe();
+    }
+  }
+
+  function exitGlobeMode(latLng: { lat: number; lng: number }) {
+    globeMode = false;
+    cancelAnimationFrame(globeAnimId);
+    globeAnimId = 0;
+    if (map) {
+      map.setView([latLng.lat, latLng.lng], 5, { animate: false });
+    }
+  }
+
+  function disposeGlobe() {
+    globeReady = false;
+    cancelAnimationFrame(globeAnimId);
+    globeAnimId = 0;
+    if (globeRenderer) {
+      globeRenderer.dispose();
+      const canvas = globeRenderer.domElement;
+      canvas?.parentNode?.removeChild(canvas);
+    }
+    globeScene = null;
+    globeCamera = null;
+    globeControls = null;
+    globeRenderer = null;
+    globeEarth = null;
+    globeInitializing = false;
+    const rh = (window as any).__globeResizeHandler;
+    if (rh) { window.removeEventListener('resize', rh); delete (window as any).__globeResizeHandler; }
   }
 
   // Turn-by-Turn Navigation
@@ -5955,9 +6382,9 @@ out center body;`;
       // Layer 1: Safety net — tile zoom ต่ำยืดขยาย (โหลดไวมาก น้อย tiles)
       L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
         subdomains: 'abcd',
-        maxNativeZoom: 11,   // โหลดแค่ tile zoom 11 (แต่ละ tile ครอบคลุมพื้นที่ใหญ่มาก)
+        maxNativeZoom: 8,    // โหลด tile zoom 8 → น้อย tiles, ครอบคลุมพื้นที่ใหญ่มาก
         maxZoom: 20,         // ยืดให้แสดงได้ทุก zoom level
-        keepBuffer: 6,
+        keepBuffer: 12,      // โหลดรอบๆ viewport มากขึ้น → ไม่เห็นเทาตอนซูม
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 50,
@@ -5977,9 +6404,6 @@ out center body;`;
         noWrap: false,
         className: 'dark-tiles'
       }).addTo(map);
-
-      // Generate star field for globe mode
-      initGlobeStars();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -6032,9 +6456,15 @@ out center body;`;
         document.getElementById('map')?.style.setProperty('--marker-scale', String(scale));
         const labelScale = z >= 16 ? 1 : z >= 14 ? 0.85 : z >= 12 ? 0.7 : z >= 10 ? 0.55 : 0.4;
         document.getElementById('map')?.style.setProperty('--start-label-scale', String(labelScale));
-        // Globe mode — 3D Earth effect when zoomed out
+        // Globe mode — 3D Earth when zoomed out
         const shouldGlobe = z <= 3;
-        if (shouldGlobe !== globeMode) globeMode = shouldGlobe;
+        if (shouldGlobe && !globeMode) {
+          enterGlobeMode();
+        } else if (!shouldGlobe && globeMode) {
+          globeMode = false;
+          cancelAnimationFrame(globeAnimId);
+          globeAnimId = 0;
+        }
       };
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
@@ -7012,12 +7442,47 @@ out center body;`;
   {/if}
 
   <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm} class:globe-mode={globeMode}>
-    <!-- Globe: Space Background + Stars -->
-    <div class="globe-space-bg" class:active={globeMode} style={_globeStarsUrl ? `background-image: url(${_globeStarsUrl})` : ''}></div>
-    <div id="map" class:globe-active={globeMode}></div>
-    <!-- Globe: Atmosphere Glow + Sphere Shading -->
-    <div class="globe-atmosphere-ring" class:active={globeMode}></div>
-    <div class="globe-shading-overlay" class:active={globeMode}></div>
+    <div id="map"></div>
+    <!-- Three.js 3D Globe -->
+    <!-- Three.js 3D Globe -->
+    <div id="globe-container" class:active={globeMode}>
+      {#if globeMode && !globeReady && !globeError}
+        <div class="globe-loading">
+          <div class="globe-loading-spinner"></div>
+          <span>กำลังโหลดโลก 3D...</span>
+        </div>
+      {/if}
+      {#if globeError}
+        <div class="globe-loading">
+          <span style="color: #ef4444">{globeError}</span>
+          <button class="globe-retry-btn" on:click={() => { globeError = ''; globeInitializing = false; globeReady = false; enterGlobeMode(); }}>ลองใหม่</button>
+        </div>
+      {/if}
+      {#if globeMode}
+        <button class="globe-back-btn" on:click={() => { const ll = getGlobeCenterLatLng(); exitGlobeMode(ll || { lat: 13.7, lng: 100.5 }); }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          กลับแผนที่
+        </button>
+        <!-- Globe location info + my location button -->
+        {#if globeReady}
+          <div class="globe-info-panel">
+            <div class="globe-region-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;flex-shrink:0"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <span>{globeViewLabel || 'กำลังโหลด...'}</span>
+            </div>
+            {#if currentLocation}
+              <div class="globe-my-loc-info">
+                <svg viewBox="0 0 24 24" fill="currentColor" style="width:12px;height:12px;flex-shrink:0;color:#00ff88"><circle cx="12" cy="12" r="6"/></svg>
+                <span>ตำแหน่งของคุณ: {currentLocation.lat.toFixed(4)}, {currentLocation.lng.toFixed(4)}</span>
+              </div>
+            {/if}
+          </div>
+          <button class="globe-myloc-btn" on:click={goToMyLocationOnGlobe} title="ไปตำแหน่งของฉัน">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        {/if}
+      {/if}
+    </div>
 
     {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker}
       <div class="map-stats glass-card" class:route-active={optimizedRoute}>
@@ -7037,6 +7502,13 @@ out center body;`;
 
     {#if !isNavigating && !optimizedRoute && addPointMode}
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
+    {/if}
+
+    <!-- My Location Button (bottom-right, above zoom) -->
+    {#if !isNavigating && !globeMode}
+      <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+      </button>
     {/if}
 
     <!-- Floating Navigate Button (mobile) -->
@@ -9149,67 +9621,85 @@ out center body;`;
   .map-container.settings-open > *:not(#map) { display: none !important; }
   .map-container.addform-open > *:not(#map) { display: none !important; }
 
-  /* ═══ Globe Mode: 3D Earth View ═══ */
+  /* ═══ Globe Mode: Three.js 3D Earth ═══ */
   .map-container.globe-mode { background: #000005 !important; }
+  .map-container.globe-mode #map { opacity: 0; pointer-events: none; transition: opacity 0.4s ease; }
 
-  .globe-space-bg {
-    position: absolute; inset: 0; z-index: 0;
-    background-color: #000005;
-    background-size: 1200px 1200px;
-    background-repeat: repeat;
-    opacity: 0;
-    transition: opacity 0.8s ease;
-    pointer-events: none;
+  #globe-container {
+    position: absolute; inset: 0; z-index: 1100;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.5s ease;
+    background: #000005;
   }
-  .globe-space-bg.active { opacity: 1; }
+  #globe-container.active {
+    opacity: 1; pointer-events: auto;
+  }
+  :global(#globe-container canvas) {
+    width: 100% !important; height: 100% !important;
+    display: block;
+  }
+  .globe-loading {
+    position: absolute; inset: 0; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    color: #a1a1aa; font-size: 14px; font-family: 'Kanit', sans-serif;
+  }
+  .globe-loading-spinner {
+    width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.1);
+    border-top: 3px solid #00ff88; border-radius: 50%;
+    animation: globe-spin 1s linear infinite;
+  }
+  @keyframes globe-spin { to { transform: rotate(360deg); } }
+  .globe-retry-btn {
+    padding: 8px 20px; border-radius: 8px; border: 1px solid rgba(0,255,136,0.3);
+    background: rgba(0,255,136,0.1); color: #00ff88; cursor: pointer;
+    font-family: 'Kanit', sans-serif; font-size: 13px;
+  }
+  .globe-back-btn {
+    position: absolute; top: 20px; left: 20px; z-index: 30;
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 18px; border-radius: 12px;
+    background: rgba(15, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.12);
+    color: #e4e4e7; font-size: 13px; font-family: 'Kanit', sans-serif;
+    cursor: pointer; transition: background 0.2s, border-color 0.2s;
+  }
+  .globe-back-btn svg { width: 16px; height: 16px; }
+  .globe-back-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
 
-  #map {
-    clip-path: circle(150vmax at 50% 50%);
-    transition: clip-path 1s cubic-bezier(0.4, 0, 0.2, 1);
-    position: relative; z-index: 1;
+  .globe-info-panel {
+    position: absolute; bottom: 24px; left: 24px; z-index: 30;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 12px 16px; border-radius: 12px;
+    background: rgba(15, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.1);
+    font-family: 'Kanit', sans-serif; font-size: 13px; color: #e4e4e7;
+    max-width: 280px;
   }
-  :global(#map.globe-active) {
-    clip-path: circle(42vmin at 50% 50%);
+  .globe-region-label {
+    display: flex; align-items: center; gap: 8px;
+    color: #00ff88; font-weight: 500; font-size: 14px;
   }
+  .globe-my-loc-info {
+    display: flex; align-items: center; gap: 6px;
+    color: #a1a1aa; font-size: 11px;
+  }
+  .globe-myloc-btn {
+    position: absolute; bottom: 24px; right: 24px; z-index: 30;
+    width: 48px; height: 48px; border-radius: 50%;
+    background: rgba(15, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.12);
+    color: #e4e4e7; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+  }
+  .globe-myloc-btn svg { width: 24px; height: 24px; }
+  .globe-myloc-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
 
-  .globe-atmosphere-ring {
-    position: absolute;
-    width: 86vmin; height: 86vmin;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    box-shadow:
-      0 0 60px 15px rgba(70, 150, 255, 0.08),
-      0 0 120px 30px rgba(70, 150, 255, 0.04),
-      inset 0 0 40px 10px rgba(70, 150, 255, 0.05);
-    border: 1px solid rgba(100, 180, 255, 0.08);
-    pointer-events: none;
-    z-index: 2;
-    opacity: 0;
-    transition: opacity 0.8s ease 0.4s;
+  /* Globe mobile adjustments */
+  @media (max-width: 768px) {
+    .globe-info-panel { bottom: 16px; left: 12px; padding: 10px 12px; max-width: 220px; font-size: 12px; border-radius: 10px; }
+    .globe-region-label { font-size: 13px; }
+    .globe-my-loc-info { font-size: 10px; }
+    .globe-myloc-btn { bottom: 16px; right: 12px; width: 42px; height: 42px; }
+    .globe-back-btn { top: 14px; left: 12px; padding: 8px 14px; font-size: 12px; border-radius: 10px; }
   }
-  .globe-atmosphere-ring.active { opacity: 1; }
-
-  .globe-shading-overlay {
-    position: absolute;
-    width: 84vmin; height: 84vmin;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    background: radial-gradient(
-      circle at 32% 30%,
-      transparent 15%,
-      rgba(0, 0, 0, 0.08) 35%,
-      rgba(0, 0, 0, 0.35) 60%,
-      rgba(0, 0, 0, 0.7) 85%,
-      rgba(0, 0, 0, 0.9) 100%
-    );
-    pointer-events: none;
-    z-index: 2;
-    opacity: 0;
-    transition: opacity 0.6s ease 0.3s;
-  }
-  .globe-shading-overlay.active { opacity: 1; }
 
   /* Hide UI overlays in globe mode */
   .map-container.globe-mode .map-stats,
@@ -9379,6 +9869,20 @@ out center body;`;
   :global(.leaflet-control-zoom a:hover) { background: rgba(25, 25, 40, 0.95) !important; color: #e4e4e7 !important; }
   :global(.leaflet-control-zoom-in) { border-radius: 10px 10px 0 0 !important; }
   :global(.leaflet-control-zoom-out) { border-radius: 0 0 10px 10px !important; }
+
+  /* My Location Button — above zoom control, bottom-right */
+  .map-myloc-btn {
+    position: absolute; bottom: 110px; right: 10px; z-index: 1001;
+    width: 40px; height: 40px; border-radius: 12px;
+    background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255,255,255,0.08);
+    color: #a1a1aa; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+  }
+  .map-myloc-btn svg { width: 20px; height: 20px; }
+  .map-myloc-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
+  .map-myloc-btn:active { transform: scale(0.92); }
 
   :global(.marker-pin) {
     width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
