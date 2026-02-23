@@ -54,6 +54,8 @@
   }
 
   function logout() {
+    // Stop session timeout
+    cleanupSessionTimeout();
     // Stop navigation if running
     if (isNavigating) stopNavigation();
     // Stop all GPS watches
@@ -193,6 +195,10 @@
   let lastArrivalDist = Infinity; // hysteresis for arrival detection
   let _navMarkerState = ''; // perf: skip marker rebuild when state unchanged
   let _lastAppliedRotation = 0; // perf: skip map rotation when < 2deg diff
+  let _userMapRotation = 0; // user gesture rotation (degrees)
+  let _gestureStartAngle = 0;
+  let _gestureBaseRotation = 0;
+  let _isGestureRotating = false;
   let _navIntervalTick = 0; // perf: stagger heavy funcs in nav interval
   let _lastCurveRouteIdx = 0; // perf: skip curve detect until moved 50 route pts
 
@@ -369,7 +375,9 @@
   let alongRoutePOIs: RoutePOI[] = [];
   let poiMarkers: any[] = [];
   let showPOIOverlay = false;
-  let activePOITypes: Set<string> = new Set(['viewpoint', 'attraction']);
+  let showPOIModal = false;
+  let selectedPOIMarker: any = null;
+  let activePOITypes: Set<string> = new Set(['gas', 'convenience', 'restaurant', 'cafe', 'ev_charging', 'viewpoint', 'attraction', 'temple', 'park', 'museum']);
   let isLoadingPOIs = false;
   const POI_MAX_DIST = 500; // เพิ่มระยะค้นหาสำหรับสถานที่ท่องเที่ยว
 
@@ -449,8 +457,8 @@
   let selectedRouteIndex = 0;
   let showRouteSelector = false;
   let alternativeRouteLayers: any[] = [];
-  const routeColors = ['#00ff88', '#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899', '#6366f1', '#84cc16', '#06b6d4', '#e11d48'];
-  const altRouteColors = ['#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899', '#6366f1', '#84cc16', '#06b6d4', '#e11d48'];
+  const routeColors = ['#00ff88', '#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899'];
+  const altRouteColors = ['#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899'];
   const routeLabels = ['เส้นทางที่เร็วที่สุด', 'เส้นทางทางเลือก', 'เส้นทาง 3', 'เส้นทาง 4', 'เส้นทาง 5', 'เส้นทาง 6', 'เส้นทาง 7', 'เส้นทาง 8', 'เส้นทาง 9', 'เส้นทาง 10', 'เส้นทาง 11', 'เส้นทาง 12'];
 
   // Toll & Expressway Options
@@ -458,6 +466,17 @@
   let avoidExpressways = false;
   let routePreference: 'fastest' | 'shortest' | 'no_tolls' | 'no_highways' = 'fastest';
   let tollCostEstimate = 0;
+
+  // Custom Start Point
+  let useCustomStartPoint = false;
+  let customStartPoint: { lat: number; lng: number; name: string } | null = null;
+  let showStartPointPicker = false;
+  let customStartMarker: any = null;
+  let startPointSearchQuery = '';
+  let startPointResults: any[] = [];
+  let startSearchTimer: any = null;
+  let isSearchingStartPoint = false;
+  let isDataLoaded = false;
 
   // Traffic
   let showTraffic = false;
@@ -479,7 +498,128 @@
   let lastSpokenThreshold = '';
   let oilPriceFailCount = 0;
 
+  // Session Timeout (30 นาที)
+  const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+  let sessionTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastActivityTime = Date.now();
 
+  function resetSessionTimer() {
+    lastActivityTime = Date.now();
+    if (sessionTimeoutTimer) clearTimeout(sessionTimeoutTimer);
+    sessionTimeoutTimer = setTimeout(() => {
+      showNotification('หมดเวลาใช้งาน กรุณาเข้าสู่ระบบใหม่', 'warning');
+      setTimeout(() => logout(), 1500);
+    }, SESSION_TIMEOUT);
+  }
+
+  function setupSessionTimeout() {
+    const events = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'click'];
+    events.forEach(evt => window.addEventListener(evt, resetSessionTimer, { passive: true }));
+    resetSessionTimer();
+  }
+
+  function cleanupSessionTimeout() {
+    if (sessionTimeoutTimer) { clearTimeout(sessionTimeoutTimer); sessionTimeoutTimer = null; }
+    const events = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'click'];
+    events.forEach(evt => window.removeEventListener(evt, resetSessionTimer));
+  }
+
+  // Map Rotation Gesture
+  function setupMapRotation() {
+    if (!map) return;
+    const el = map.getContainer();
+    let touchStartAngle: number | null = null;
+    let initialPinchDist = 0;
+
+    function getTouchAngle(t1: Touch, t2: Touch): number {
+      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * (180 / Math.PI);
+    }
+    function getTouchDist(t1: Touch, t2: Touch): number {
+      return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    }
+
+    // Two-finger: detect rotation vs zoom
+    el.addEventListener('touchstart', (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        touchStartAngle = getTouchAngle(e.touches[0], e.touches[1]);
+        initialPinchDist = getTouchDist(e.touches[0], e.touches[1]);
+        _gestureBaseRotation = _userMapRotation;
+      }
+    }, { passive: true });
+
+    el.addEventListener('touchmove', (e: TouchEvent) => {
+      if (e.touches.length === 2 && touchStartAngle !== null) {
+        const currentAngle = getTouchAngle(e.touches[0], e.touches[1]);
+        const angleDelta = currentAngle - touchStartAngle;
+        const currentDist = getTouchDist(e.touches[0], e.touches[1]);
+        const distRatio = initialPinchDist > 0 ? currentDist / initialPinchDist : 1;
+
+        // ถ้าหมุนมากกว่า zoom → เป็น rotation gesture
+        const isRotating = Math.abs(angleDelta) > 8 || (Math.abs(angleDelta) > 3 && Math.abs(distRatio - 1) < 0.15);
+        if (isRotating) {
+          if (!_isGestureRotating) {
+            _isGestureRotating = true;
+            map.touchZoom?.disable();
+            map.dragging?.disable();
+          }
+          _userMapRotation = _gestureBaseRotation + angleDelta;
+          applyUserMapRotation();
+        }
+      }
+    }, { passive: true });
+
+    el.addEventListener('touchend', () => {
+      if (_isGestureRotating) {
+        _isGestureRotating = false;
+        map.touchZoom?.enable();
+        map.dragging?.enable();
+      }
+      touchStartAngle = null;
+    }, { passive: true });
+
+    // Desktop: Shift+drag or Ctrl+drag
+    let shiftDragStart: { x: number; y: number } | null = null;
+    el.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.shiftKey || e.ctrlKey) {
+        shiftDragStart = { x: e.clientX, y: e.clientY };
+        _gestureBaseRotation = _userMapRotation;
+        _isGestureRotating = true;
+        map.dragging.disable();
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener('mousemove', (e: MouseEvent) => {
+      if (shiftDragStart && _isGestureRotating) {
+        const dx = e.clientX - shiftDragStart.x;
+        _userMapRotation = _gestureBaseRotation + dx * 0.5;
+        applyUserMapRotation();
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (shiftDragStart) {
+        shiftDragStart = null;
+        _isGestureRotating = false;
+        if (map) map.dragging.enable();
+      }
+    });
+  }
+
+  function applyUserMapRotation() {
+    if (!map) return;
+    const el = map.getContainer();
+    // Normalize to -180..180
+    _userMapRotation = ((_userMapRotation % 360) + 540) % 360 - 180;
+    el.style.transform = `rotate(${_userMapRotation}deg)`;
+    _lastAppliedRotation = _userMapRotation;
+  }
+
+  function resetMapRotation() {
+    _userMapRotation = 0;
+    _lastAppliedRotation = 0;
+    if (map) map.getContainer().style.transform = 'rotate(0deg)';
+  }
 
   // Turn-by-Turn Navigation
   let turnInstructions: TurnInstruction[] = [];
@@ -677,7 +817,7 @@
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: `custom-marker${isDragMode ? ' drag-mode' : ''}`,
-          html: `<div class="marker-pin${isDragMode ? ' draggable' : ''}" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};"><span>${i + 1}</span>${isDragMode ? '<div class="drag-hint">✥</div>' : ''}</div>`,
+          html: `<div class="marker-pin${isDragMode ? ' draggable' : ''}" style="background: ${colors.bg}; box-shadow: 0 0 20px ${colors.glow};"><span>${i + 1}</span>${isDragMode ? '<div class="drag-hint">✥</div>' : ''}<div class="marker-name-label">${escapeHtml(point.name)}</div></div>`,
           iconSize: [44, 44],
           iconAnchor: [22, 22]
         }),
@@ -864,7 +1004,13 @@
       const data = await res.json();
       if (data.error || !res.ok) throw new Error(data.error || 'ลบไม่สำเร็จ');
       await loadDeliveryPoints();
-      if (optimizedRoute) clearRoute();
+      if (optimizedRoute) {
+        clearRoute();
+        clearAlternativeRouteLayers();
+        routeAlternatives = [];
+        showRouteSelector = false;
+        showRouteComparison = false;
+      }
       showNotification('ลบสำเร็จ', 'success');
     } catch (err) {
       showNotification('ลบไม่สำเร็จ', 'error');
@@ -1209,52 +1355,80 @@
     }
   }
 
-  // ปรับความหนาเส้นตาม zoom — บางลงเมื่อซูมออก
-  function getRouteWeight(zoom: number): { main: number; mainSel: number } {
-    if (zoom >= 16) return { main: 6, mainSel: 7 };
-    if (zoom >= 14) return { main: 5, mainSel: 6 };
-    if (zoom >= 12) return { main: 4, mainSel: 5 };
-    if (zoom >= 10) return { main: 3, mainSel: 4 };
-    return { main: 2, mainSel: 3 };
+  // ขนาดเส้นตาม zoom — บางลงเมื่อซูมออก
+  function getRouteWeight(zoom?: number): { main: number; mainSel: number } {
+    const z = zoom ?? map?.getZoom?.() ?? 14;
+    if (z >= 16) return { main: 5, mainSel: 6 };
+    if (z >= 14) return { main: 4, mainSel: 5 };
+    if (z >= 13) return { main: 3.5, mainSel: 4.5 };
+    if (z >= 12) return { main: 3, mainSel: 4 };
+    if (z >= 10) return { main: 2, mainSel: 3 };
+    if (z >= 7)  return { main: 1.5, mainSel: 2 };
+    return { main: 1, mainSel: 1.5 };
   }
 
   function updateRouteWeights() {
     if (!map) return;
-    const w = getRouteWeight(map.getZoom());
+    const w = getRouteWeight();
     alternativeRouteLayers.forEach((layer: any) => {
-      if (!layer.setStyle || !layer.options?._isRoute) return;
-      layer.setStyle({ weight: layer.options._isSelected ? w.mainSel : w.main });
+      if (!layer.setStyle || !layer.options) return;
+      if (layer.options._isRoute) {
+        layer.setStyle({ weight: layer.options._isSelected ? w.mainSel : w.main });
+      }
     });
     if (routeLayer) routeLayer.setStyle({ weight: w.mainSel });
+    if (remainingRouteLayer) remainingRouteLayer.setStyle?.({ weight: w.mainSel });
+    // Nav alternative layers
+    navAlternativeLayers.forEach((layer: any) => {
+      if (!layer.setStyle || !layer.options) return;
+      if (layer.options._isRoute) layer.setStyle({ weight: w.main });
+    });
   }
 
   function displayAllRouteAlternatives(startPoint: any, sortedPoints: any[]) {
     clearAlternativeRouteLayers();
-    const w = getRouteWeight(map?.getZoom?.() || 14);
-    // Draw non-selected routes first, then selected route last (on top) so green covers shared sections
-    const drawOrder = routeAlternatives.map((alt, idx) => ({ alt, idx })).sort((a, b) => {
-      if (a.idx === selectedRouteIndex) return 1;
-      if (b.idx === selectedRouteIndex) return -1;
-      return 0;
-    });
+    const w = getRouteWeight();
+    const selected = routeAlternatives[selectedRouteIndex];
+    if (!selected?.geometry?.coordinates) return;
+    const selectedCoords: [number, number][] = selected.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+
+    // 1) วาดเส้นเขียว (selected) เต็มเส้น — opacity 1
+    const greenLine = L.polyline(selectedCoords, {
+      color: '#00ff88', weight: w.mainSel, opacity: 1,
+      lineCap: 'round', lineJoin: 'round', smoothFactor: 0,
+      _isSelected: true, _isRoute: true
+    } as any).addTo(map);
+    greenLine.on('click', () => selectRoute(selectedRouteIndex, startPoint, sortedPoints));
+
+    // 2) วาดเส้นเลือกเฉพาะส่วนที่แยก (diverging) — ไม่ทับเส้นเขียว
     let altClrIdx = 0;
-    drawOrder.forEach(({ alt, idx }) => {
+    routeAlternatives.forEach((alt, idx) => {
+      if (idx === selectedRouteIndex) return;
       if (!alt.geometry?.coordinates) return;
-      const coords = alt.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
-      const isSelected = idx === selectedRouteIndex;
-      const color = isSelected ? '#00ff88' : altRouteColors[altClrIdx++ % altRouteColors.length];
-      const mainLine = L.polyline(coords, {
-        color: color, weight: isSelected ? w.mainSel : w.main, opacity: isSelected ? 1 : 0.45,
-        lineCap: 'round', lineJoin: 'round', dashArray: isSelected ? '' : '12 8',
-        smoothFactor: 0, _isSelected: isSelected, _isRoute: true,
-        className: isSelected ? '' : 'route-glow'
-      } as any).addTo(map);
-      mainLine.on('click', () => selectRoute(idx, startPoint, sortedPoints));
-      const midIdx = Math.floor(coords.length / 2);
-      const labelMarker = L.marker(coords[midIdx], {
+      const altCoords: [number, number][] = alt.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
+      const color = altRouteColors[altClrIdx++ % altRouteColors.length];
+      const divergingSections = getDivergingSections(altCoords, selectedCoords);
+      if (divergingSections.length === 0) return;
+
+      divergingSections.forEach(section => {
+        if (section.length < 2) return;
+        const line = L.polyline(section, {
+          color: color, weight: w.main, opacity: 0.7,
+          lineCap: 'round', lineJoin: 'round', smoothFactor: 0, _isRoute: true
+        } as any).addTo(map);
+        line.on('click', () => selectRoute(idx, startPoint, sortedPoints));
+        const hit = L.polyline(section, { color: 'transparent', weight: 30, opacity: 0 }).addTo(map);
+        hit.on('click', () => selectRoute(idx, startPoint, sortedPoints));
+        alternativeRouteLayers.push(line, hit);
+      });
+
+      // Label ที่ส่วนแยกยาวที่สุด
+      const longestSection = divergingSections.reduce((a, b) => a.length > b.length ? a : b);
+      const midIdx = Math.floor(longestSection.length / 2);
+      const labelMarker = L.marker(longestSection[midIdx], {
         icon: L.divIcon({
           className: 'route-label-marker',
-          html: `<div class="route-alt-label" style="background: ${color}; opacity: ${isSelected ? 1 : 0.7}">
+          html: `<div class="route-alt-label" style="background: ${color}; opacity: 0.85">
             <span class="alt-label-text">${alt.label}</span>
             <span class="alt-label-info">${(alt.distance / 1000).toFixed(1)} กม. · ${Math.round(alt.duration / 60)} นาที</span>
             ${alt.hasTolls ? '<span class="alt-toll-badge">💰 ทางด่วน ~฿' + alt.tollEstimate + '</span>' : '<span class="alt-no-toll">✅ ไม่มีทางด่วน</span>'}
@@ -1262,8 +1436,20 @@
           iconSize: [200, 70], iconAnchor: [100, 35]
         })
       }).addTo(map);
-      alternativeRouteLayers.push(mainLine, labelMarker);
+      labelMarker.on('click', () => selectRoute(idx, startPoint, sortedPoints));
+      alternativeRouteLayers.push(labelMarker);
+      altLabelMarkers.push(labelMarker);
     });
+
+    // เส้นเขียวต้องอยู่บนสุดเสมอ
+    greenLine.bringToFront();
+    alternativeRouteLayers.push(greenLine);
+
+    // Label visibility ตาม zoom
+    if (altLabelMarkers.length > 0) {
+      map.on('zoomend', updateAltLabelVisibility);
+      updateAltLabelVisibility();
+    }
   }
 
   function clearAlternativeRouteLayers() {
@@ -1281,10 +1467,10 @@
     altLabelMarkers.forEach(marker => {
       const el = marker.getElement?.();
       if (!el) return;
-      if (zoom >= 14) {
+      if (zoom >= 13) {
         el.style.opacity = '1';
         el.style.pointerEvents = 'auto';
-      } else if (zoom >= 13) {
+      } else if (zoom >= 12) {
         el.style.opacity = '0.6';
         el.style.pointerEvents = 'auto';
       } else {
@@ -1315,12 +1501,12 @@
       if (divergingSections.length === 0) return;
 
       const sectionLayers: any[] = [];
-      const dw = getRouteWeight(map.getZoom());
+      const dw = getRouteWeight();
       divergingSections.forEach(section => {
         if (section.length < 2) return;
         const line = L.polyline(section, {
-          color: color, weight: dw.main, opacity: 0.45, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, className: 'route-glow'
-        }).addTo(map);
+          color: color, weight: dw.main, opacity: 0.55, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, _isRoute: true
+        } as any).addTo(map);
         const hit = L.polyline(section, {
           color: 'transparent', weight: 30, opacity: 0
         }).addTo(map);
@@ -1430,6 +1616,8 @@
     else info += ' · ไม่มีทางด่วน';
     showNotification(info, alt.hasTolls ? 'warning' : 'success');
     speak(`เปลี่ยนไป${alt.label} ระยะทาง ${distKm} กิโลเมตร ${timeMin} นาที ${alt.hasTolls ? 'มีทางด่วน' : 'ไม่มีทางด่วน'}`);
+    // ค้นหาปั๊ม/สถานีชาร์จใหม่ตามเส้นทางที่เปลี่ยน
+    autoSearchStations();
   }
 
   // ==================== MANUAL WAYPOINT (จุดผ่านทาง) ====================
@@ -1637,6 +1825,8 @@
       incidentsOnRoute = [];
       clearIncidentMarkers();
     }
+    // ค้นหาปั๊ม/สถานีชาร์จอัตโนมัติตาม vehicleType
+    autoSearchStations();
   }
 
   // Extract diverging segments of altCoords that don't overlap with mainCoords
@@ -1718,8 +1908,8 @@
       const sectionLayers: any[] = [];
       divergingSections.forEach(section => {
         if (section.length < 2) return;
-        const rw = getRouteWeight(map.getZoom());
-        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.45, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, className: 'route-glow' }).addTo(map);
+        const rw = getRouteWeight();
+        const line = L.polyline(section, { color, weight: rw.main, opacity: 0.55, lineCap: 'round', lineJoin: 'round', smoothFactor: 0, _isRoute: true } as any).addTo(map);
         const hit = L.polyline(section, { color: 'transparent', weight: 30, opacity: 0 }).addTo(map);
         sectionLayers.push(line, hit);
         alternativeRouteLayers.push(line, hit);
@@ -2230,9 +2420,13 @@
 
   async function navigateToSearchResult() {
     if (!directDestination) return;
-    newPoint = { name: directDestination.name, address: directDestination.address, lat: directDestination.lat, lng: directDestination.lng, priority: 1 };
+    newPoint = { name: directDestination.name, address: directDestination.address || directDestination.name, lat: directDestination.lat, lng: directDestination.lng, priority: 1 };
     try {
       await addDeliveryPoint();
+      // Clear destination marker + state
+      if (destinationMarker) { destinationMarker.remove(); destinationMarker = null; }
+      directDestination = null;
+      // Recalculate route with new point included
       await calculateRouteWithAlternatives();
     } catch (err) {
       showNotification('ไม่สามารถนำทางได้', 'error');
@@ -2243,21 +2437,25 @@
 
   async function directNavigate(destination: { lat: number; lng: number; name: string }) {
     try {
-      const startPoint = await getCurrentLocationAsStart();
+      const startPoint = await getStartPoint();
       const waypoints = `${startPoint.lng},${startPoint.lat};${destination.lng},${destination.lat}`;
 
       // Use fetchRouteAlternatives for consistent multi-route fetching
       const routes = await fetchRouteAlternatives(waypoints);
 
-      routeAlternatives = routes.map((route: any, index: number) => ({
-        index, geometry: route.geometry, distance: route.distance, duration: route.duration,
-        legs: route.legs || [], steps: extractTurnInstructions(route),
-        hasTolls: detectTollRoad(route), tollEstimate: estimateTollCost(route),
-        label: route._label || routeLabels[index] || `เส้นทาง ${index + 1}`,
-        color: route._color || routeColors[index % routeColors.length],
-        excludeUsed: route._exclude || []
-      }));
-      const startData = { ...startPoint, name: 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้น', id: -1 };
+      routeAlternatives = routes.map((route: any, index: number) => {
+        const hasTolls = detectTollRoad(route);
+        const baseLabel = route._label || routeLabels[index] || `เส้นทาง ${index + 1}`;
+        return {
+          index, geometry: route.geometry, distance: route.distance, duration: route.duration,
+          legs: route.legs || [], steps: extractTurnInstructions(route),
+          hasTolls, tollEstimate: estimateTollCost(route),
+          label: hasTolls ? `${baseLabel} (ทางด่วน)` : baseLabel,
+          color: route._color || routeColors[index % routeColors.length],
+          excludeUsed: route._exclude || []
+        };
+      });
+      const startData = { ...startPoint, name: useCustomStartPoint && customStartPoint ? customStartPoint.name : 'ตำแหน่งปัจจุบัน', address: 'จุดเริ่มต้น', id: -1 };
       const destData = { ...destination, address: destination.name, id: Date.now(), priority: 1 };
       if (routeAlternatives.length > 1) {
         showRouteSelector = true;
@@ -2447,7 +2645,7 @@
     routeAbortController = new AbortController();
     const signal = routeAbortController.signal;
     try {
-      const startPoint = await getCurrentLocationAsStart();
+      const startPoint = await getStartPoint();
       const sortedPoints = manualOrder
         ? [...allDeliveryPoints]
         : sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
@@ -2455,14 +2653,18 @@
 
       const routes = await fetchRouteAlternatives(waypoints, signal);
 
-      routeAlternatives = routes.map((route: any, index: number) => ({
-        index, geometry: route.geometry, distance: route.distance, duration: route.duration,
-        legs: route.legs || [],
-        hasTolls: detectTollRoad(route), tollEstimate: estimateTollCost(route),
-        label: route._label || routeLabels[index] || `เส้นทาง ${index + 1}`,
-        color: route._color || routeColors[index % routeColors.length],
-        excludeUsed: route._exclude || []
-      }));
+      routeAlternatives = routes.map((route: any, index: number) => {
+        const hasTolls = detectTollRoad(route);
+        const baseLabel = route._label || routeLabels[index] || `เส้นทาง ${index + 1}`;
+        return {
+          index, geometry: route.geometry, distance: route.distance, duration: route.duration,
+          legs: route.legs || [],
+          hasTolls, tollEstimate: estimateTollCost(route),
+          label: hasTolls ? `${baseLabel} (ทางด่วน)` : baseLabel,
+          color: route._color || routeColors[index % routeColors.length],
+          excludeUsed: route._exclude || []
+        };
+      });
 
       // Auto-select route based on preference
       let bestIdx = 0;
@@ -2641,7 +2843,7 @@
 
     try {
       // Get start point
-      const startPoint = await getCurrentLocationAsStart();
+      const startPoint = await getStartPoint();
 
       // Build points array with start at index 0
       const points = [startPoint, ...allDeliveryPoints.map(p => ({ lat: p.lat, lng: p.lng }))];
@@ -2772,6 +2974,101 @@
     return withTimeout(inner, 20000, 'GPS location');
   }
 
+  // จุดเริ่มต้น: GPS หรือกำหนดเอง
+  async function getStartPoint(): Promise<{ lat: number; lng: number }> {
+    if (useCustomStartPoint || showStartPointPicker) {
+      if (customStartPoint) {
+        return { lat: customStartPoint.lat, lng: customStartPoint.lng };
+      }
+      throw new Error('กรุณากำหนดจุดเริ่มต้นก่อนคำนวณเส้นทาง');
+    }
+    return getCurrentLocationAsStart();
+  }
+
+  async function searchStartPoint(query: string) {
+    if (!query.trim() || query.trim().length < 2) { startPointResults = []; return; }
+    isSearchingStartPoint = true;
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=th&limit=5&accept-language=th`);
+      const data = await res.json();
+      startPointResults = data.map((r: any) => ({
+        lat: parseFloat(r.lat), lng: parseFloat(r.lon),
+        name: r.display_name.split(',').slice(0, 2).join(','),
+        fullName: r.display_name
+      }));
+    } catch { startPointResults = []; }
+    isSearchingStartPoint = false;
+  }
+
+  function setCustomStartFromSearch(result: { lat: number; lng: number; name: string }) {
+    useCustomStartPoint = true;
+    customStartPoint = result;
+    showStartPointPicker = false;
+    startPointResults = [];
+    startPointSearchQuery = '';
+    // ซ่อน GPS blue dot + accuracy circle
+    if (currentLocationMarker && map) {
+      try { map.removeLayer(currentLocationMarker); } catch(_){}
+      currentLocationMarker = null;
+    }
+    if (accuracyCircle && map) {
+      try { map.removeLayer(accuracyCircle); } catch(_){}
+      accuracyCircle = null;
+    }
+    // วาง marker จุดเริ่มต้นแบบเด่น (คล้าย GPS blue dot แต่สีเขียว)
+    if (customStartMarker) { try { map.removeLayer(customStartMarker); } catch(_){} }
+    if (map && L) {
+      customStartMarker = L.marker([result.lat, result.lng], {
+        icon: L.divIcon({
+          className: 'custom-start-marker',
+          html: `<div class="custom-start-wrapper">
+            <div class="custom-start-pulse"></div>
+            <div class="custom-start-pulse custom-start-pulse-2"></div>
+            <div class="custom-start-dot"></div>
+            <div class="custom-start-label">${escapeHtml(result.name)}</div>
+          </div>`,
+          iconSize: [44, 44], iconAnchor: [22, 22]
+        }),
+        zIndexOffset: 1000,
+        interactive: true
+      }).addTo(map);
+      map.setView([result.lat, result.lng], 14);
+    }
+  }
+
+  function clearCustomStartPoint() {
+    useCustomStartPoint = false;
+    customStartPoint = null;
+    showStartPointPicker = false;
+    startPointResults = [];
+    startPointSearchQuery = '';
+    if (customStartMarker) { try { map.removeLayer(customStartMarker); } catch(_){} customStartMarker = null; }
+    // คืน GPS blue dot
+    if (currentLocation && map && L && !currentLocationMarker) {
+      currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
+        icon: L.divIcon({
+          className: '',
+          html: `<div class="my-loc-wrapper"><div class="loc-pulse-ring"></div><div class="loc-pulse-ring loc-pulse-ring-2"></div><div class="heading-beam" style="transform: rotate(0deg); opacity: 0;"></div><div class="my-loc-dot"></div><div class="custom-start-label start-label-gps">ตำแหน่งปัจจุบัน</div></div>`,
+          iconSize: [40, 40], iconAnchor: [20, 20]
+        }),
+        zIndexOffset: 1000, interactive: false
+      }).addTo(map);
+      headingMarkerElement = currentLocationMarker.getElement();
+    }
+    // คืน accuracy circle
+    if (currentLocation && map && L && !accuracyCircle && accuracy > 0) {
+      accuracyCircle = L.circle([currentLocation.lat, currentLocation.lng], {
+        radius: accuracy, color: '#00ff88', fillColor: '#00ff88',
+        fillOpacity: 0.08, weight: 1.5, opacity: 0.35, dashArray: '4 6'
+      }).addTo(map);
+    }
+  }
+
+  function onStartPointSearchInput() {
+    if (startSearchTimer) clearTimeout(startSearchTimer);
+    startSearchTimer = setTimeout(() => searchStartPoint(startPointSearchQuery), 400);
+  }
+
   function displayOptimizedRoute() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
     if (routeLayer) routeLayer.remove();
@@ -2794,12 +3091,18 @@
       const isStart = i === 0;
       const isCurrentLocation = isStart && point.id === -1;
 
-      // Skip start point marker — use GPS blue dot instead
-      if (isCurrentLocation) return;
+      // Skip GPS start point — use blue dot instead (but show custom start)
+      if (isCurrentLocation && !useCustomStartPoint) return;
+
+      // Custom start point → marker เด่นสีเขียว
+      if (isCurrentLocation && useCustomStartPoint) {
+        // customStartMarker แสดงอยู่แล้ว ไม่ต้องสร้างซ้ำ
+        return;
+      }
 
       const gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
       const glow = '#667eea';
-      const markerHtml = `<div class="marker-pin route-pin" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${i}</span></div>`;
+      const markerHtml = `<div class="marker-pin route-pin" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${i}</span><div class="marker-name-label">${escapeHtml(point.name)}</div></div>`;
 
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
@@ -2825,6 +3128,7 @@
       markers = [];
     }
     if (clickMarker) { try { map.removeLayer(clickMarker); } catch (e) {} clickMarker = null; }
+    clearAllPOI();
     optimizedRoute = null;
     arrivedPoints = [];
     currentTargetIndex = 0;
@@ -2840,6 +3144,7 @@
     }
 
     isNavigating = true;
+    _userMapRotation = 0; // reset user rotation when nav starts
     currentTargetIndex = 1;
     arrivedPoints = [0];
 
@@ -3025,8 +3330,9 @@
     showRouteSelector = false;
     showRouteComparison = false;
 
-    // Show current location blue dot after stopping
+    // Show current location blue dot after stopping (with heading beam)
     if (currentLocation && map) {
+      const hdeg = currentHeading !== null ? currentHeading : 0;
       currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
         icon: L.divIcon({
           className: '',
@@ -3034,7 +3340,9 @@
             <div class="my-loc-wrapper">
               <div class="loc-pulse-ring"></div>
               <div class="loc-pulse-ring loc-pulse-ring-2"></div>
+              <div class="heading-beam" style="transform: rotate(${hdeg}deg); opacity: 0;"></div>
               <div class="my-loc-dot"></div>
+              <div class="custom-start-label start-label-gps">ตำแหน่งปัจจุบัน</div>
             </div>
           `,
           iconSize: [40, 40],
@@ -3043,6 +3351,7 @@
         zIndexOffset: 1000,
         interactive: false
       }).addTo(map);
+      headingMarkerElement = currentLocationMarker.getElement();
       map.setView([currentLocation.lat, currentLocation.lng], 16);
     }
     showNotification('หยุดนำทางแล้ว', 'success');
@@ -3345,6 +3654,8 @@
 
   function updateCurrentLocationMarker() {
     if (!L || !map || !currentLocation) return;
+    // ถ้าใช้จุดเริ่มต้นแบบกำหนดเอง ไม่ต้องแสดง GPS marker
+    if (useCustomStartPoint || showStartPointPicker) return;
     const headingDeg = currentHeading !== null ? currentHeading : 0;
     const showHeading = currentHeading !== null && currentSpeed > 1;
 
@@ -3385,6 +3696,7 @@
               <div class="loc-pulse-ring loc-pulse-ring-2"></div>
               <div class="heading-beam" style="transform: rotate(${headingDeg}deg); opacity: ${showHeading ? 1 : 0};"></div>
               <div class="my-loc-dot"></div>
+              <div class="custom-start-label start-label-gps">ตำแหน่งปัจจุบัน</div>
             </div>
           `,
           iconSize: [40, 40],
@@ -3466,7 +3778,7 @@
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: 'route-marker',
-          html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${displayNumber}</span>${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}</div>`,
+          html: `<div class="marker-pin route-pin ${isArrived ? 'arrived' : ''} ${isCurrent ? 'current-target' : ''}" style="background: ${gradient}; box-shadow: 0 0 25px ${glow};"><span>${displayNumber}</span><div class="marker-name-label">${escapeHtml(point.name)}</div>${isCurrent ? '<div class="marker-label target-label">เป้าหมาย</div>' : ''}</div>`,
           iconSize: [52, 52],
           iconAnchor: [26, 26]
         })
@@ -4107,6 +4419,8 @@
     vehicleType = vehicleType === 'fuel' ? 'ev' : 'fuel';
     localStorage.setItem(getUserKey('vehicleType'), vehicleType);
     showNotification(`เปลี่ยนเป็น${vehicleType === 'fuel' ? 'รถน้ำมัน' : 'รถไฟฟ้า'}`, 'success');
+    // ค้นหาปั๊ม/สถานีชาร์จใหม่ตาม vehicleType
+    if (optimizedRoute) autoSearchStations();
   }
 
   // ==================== EV CHARGING STATIONS ====================
@@ -4211,7 +4525,7 @@
     }
     isOptimizing = true;
     try {
-      const startPoint = await getCurrentLocationAsStart();
+      const startPoint = await getStartPoint();
       const sortedPoints = manualOrder
         ? [...allDeliveryPoints]
         : sortByNearestNeighbor(startPoint, [...allDeliveryPoints]);
@@ -4460,6 +4774,13 @@
     await loadDeliveryPoints();
     selectedPoints = [];
     isMultiSelectMode = false;
+    if (optimizedRoute) {
+      clearRoute();
+      clearAlternativeRouteLayers();
+      routeAlternatives = [];
+      showRouteSelector = false;
+      showRouteComparison = false;
+    }
     showNotification(`ลบจุดสำเร็จ`, 'success');
   }
 
@@ -4623,7 +4944,7 @@ out center body;`;
           pois.push({
             id: String(el.id),
             type: poiType,
-            name: tags.name || tags['name:th'] || tags.brand || '',
+            name: tags['name:th'] || tags.name || tags.alt_name || tags.official_name || tags.brand || tags.description || '',
             lat: lat,
             lng: lon,
             routeIndex: match.routeIndex,
@@ -4635,11 +4956,22 @@ out center body;`;
       }
 
       pois.sort((a, b) => a.distAlongRoute - b.distAlongRoute);
-      alongRoutePOIs = pois;
+      const MIN_SPACING: Record<string, number> = { gas: 20000, convenience: 10000 };
+      const lastDist: Record<string, number> = {};
+      const spacedPois = pois.filter(p => {
+        const minDist = MIN_SPACING[p.type];
+        if (!minDist) return true; // ไม่จำกัดประเภทอื่น
+        const prev = lastDist[p.type];
+        if (prev !== undefined && (p.distAlongRoute - prev) < minDist) return false;
+        lastDist[p.type] = p.distAlongRoute;
+        return true;
+      });
+      alongRoutePOIs = spacedPois;
       displayPOIMarkers();
+      showPOIModal = true;
 
-      const attractionCount = pois.filter(p => ['viewpoint', 'attraction', 'temple', 'park', 'museum'].includes(p.type)).length;
-      showNotification(`พบ ${pois.length} สถานที่ (${attractionCount} ที่เที่ยว)`, 'success');
+      const attractionCount = spacedPois.filter(p => ['viewpoint', 'attraction', 'temple', 'park', 'museum'].includes(p.type)).length;
+      showNotification(`พบ ${spacedPois.length} สถานที่ (${attractionCount} ที่เที่ยว)`, 'success');
     } catch (err: any) {
       if (err.name === 'AbortError') return;
       console.error('POI search error:', err);
@@ -4721,6 +5053,16 @@ out center body;`;
     }
   }
 
+  async function autoSearchStations() {
+    if (!optimizedRoute?.route?.geometry?.coordinates) return;
+    clearAllPOI();
+    if (vehicleType === 'fuel') {
+      await searchPOIsAlongRoute();
+    } else {
+      await searchEVAlongRoute();
+    }
+  }
+
   function getPOIIcon(type: string): string {
     switch (type) {
       case 'gas': return '⛽';
@@ -4761,38 +5103,7 @@ out center body;`;
   }
 
   function displayPOIMarkers() {
-    if (!L || !map) return;
     clearPOIMarkers();
-    const filtered = alongRoutePOIs.filter(p => activePOITypes.has(p.type));
-    const zoom = map.getZoom();
-    const minZoom = getPoiMinZoom(filtered.length);
-    if (zoom < minZoom) return;
-    for (const poi of filtered) {
-      if (isNavigating && poi.routeIndex <= lastRouteIndex) continue;
-      const marker = L.marker([poi.lat, poi.lng], {
-        icon: L.divIcon({
-          className: 'poi-marker-wrap',
-          html: `<div class="poi-pin ${poi.type}">${getPOIIcon(poi.type)}</div>`,
-          iconSize: [32, 32],
-          iconAnchor: [16, 32]
-        })
-      }).addTo(map);
-
-      const etaMin = Math.round(poi.distAlongRoute / (currentSpeed > 3 ? currentSpeed * 1000 / 3600 : 30000 / 3600) / 60);
-      marker.bindPopup(`
-        <div class="poi-popup">
-          <div class="poi-popup-header"><div class="popup-badge poi-badge">${getPOIIcon(poi.type)}</div><span class="poi-popup-name">${escapeHtml(poi.name || getPOILabel(poi.type))}</span></div>
-          <div class="poi-popup-meta">
-            <p>📏 ${formatDistance(poi.distAlongRoute)} บนเส้นทาง</p>
-            <p>↔️ ห่างจากเส้นทาง ${poi.distFromRoute} ม.</p>
-            <p>⏱️ ~${etaMin} นาที</p>
-            ${poi.tags?.brand ? `<p>🏷️ ${escapeHtml(poi.tags.brand)}</p>` : ''}
-            ${poi.tags?.opening_hours ? `<p>🕐 ${escapeHtml(poi.tags.opening_hours)}</p>` : ''}
-          </div>
-        </div>
-      `, { className: 'dark-popup', maxWidth: 260 });
-      poiMarkers.push(marker);
-    }
   }
 
   function clearPOIMarkers() {
@@ -4811,14 +5122,41 @@ out center body;`;
   }
 
   function flyToPOI(poi: RoutePOI) {
-    if (map) {
-      map.flyTo([poi.lat, poi.lng], 17, { duration: 0.8 });
-    }
+    if (!map || !L) return;
+    showPOIModal = false;
+    clearSelectedPOI();
+
+    // สร้าง selected marker แบบ poi-pin แต่ใหญ่กว่า + มี label
+    selectedPOIMarker = L.marker([poi.lat, poi.lng], {
+      icon: L.divIcon({
+        className: 'selected-poi-marker-wrap',
+        html: `<div class="poi-pin selected-poi-pin ${poi.type}">${getPOIIcon(poi.type)}<div class="poi-pin-label selected-poi-label">${escapeHtml(poi.name || getPOILabel(poi.type))}</div><div class="selected-poi-close" onclick="window.__clearSelectedPOI && window.__clearSelectedPOI()">✕</div></div>`,
+        iconSize: [44, 44],
+        iconAnchor: [22, 44]
+      }),
+      zIndexOffset: 2000
+    }).addTo(map);
+
+    // ลงทะเบียน global callback สำหรับปุ่มยกเลิก
+    (window as any).__clearSelectedPOI = () => clearSelectedPOI();
+
+    map.flyTo([poi.lat, poi.lng], 17, { duration: 0.8 });
+  }
+
+  function clearSelectedPOI() {
+    if (selectedPOIMarker && map) { try { map.removeLayer(selectedPOIMarker); } catch(_) {} selectedPOIMarker = null; }
+    if (typeof window !== 'undefined' && (window as any).__clearSelectedPOI) { delete (window as any).__clearSelectedPOI; }
   }
 
   function closePOIPanel() {
+    showPOIModal = false;
+  }
+
+  function clearAllPOI() {
     clearPOIMarkers();
+    clearSelectedPOI();
     alongRoutePOIs = [];
+    showPOIModal = false;
   }
 
   // ==================== SHARE ROUTE QR ====================
@@ -5690,18 +6028,42 @@ out center body;`;
         attributionControl: false,
         preferCanvas: true,
         zoomSnap: 1,
-        wheelDebounceTime: 80
+        wheelDebounceTime: 80,
+        minZoom: 3,
+        maxZoom: 19,
+        worldCopyJump: true,
+        maxBounds: [[-85, -Infinity], [85, Infinity]],
+        maxBoundsViscosity: 1.0
       }).setView([initLat, initLng], initZoom);
       L.control.zoom({ position: 'bottomright' }).addTo(map);
-      // OSM Standard — ป้ายภาษาไทยครบ + CSS dark filter
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        maxZoom: 19, keepBuffer: 2,
-        updateWhenZooming: false,
-        updateWhenIdle: true,
-        crossOrigin: 'anonymous',
-        detectRetina: true
+
+      // Satellite layer สำหรับ zoom ต่ำ (globe-like effect)
+      const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19, keepBuffer: 4,
+        updateWhenZooming: true, updateWhenIdle: false,
+        noWrap: false,
+        className: 'satellite-tiles'
       }).addTo(map);
+
+      // CartoDB Dark Matter — dark theme base
+      const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+        subdomains: 'abcd', maxZoom: 20, keepBuffer: 8,
+        updateWhenZooming: true, updateWhenIdle: false,
+        noWrap: false,
+        className: 'dark-tiles'
+      }).addTo(map);
+
+      // Zoom-based layer blending: satellite visible at low zoom, fades out at high zoom
+      const updateTileBlending = () => {
+        const z = map.getZoom();
+        const satEl = document.querySelector('.satellite-tiles') as HTMLElement;
+        const darkEl = document.querySelector('.dark-tiles') as HTMLElement;
+        if (satEl) satEl.style.opacity = z <= 6 ? '1' : z <= 9 ? String(1 - (z - 6) / 3) : '0';
+        if (darkEl) darkEl.style.opacity = z <= 6 ? '0.3' : z <= 9 ? String(0.3 + (z - 6) / 3 * 0.7) : '1';
+      };
+      map.on('zoomend', updateTileBlending);
+      updateTileBlending();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -5752,6 +6114,8 @@ out center body;`;
         const z = map.getZoom();
         const scale = z >= 17 ? 1 : z >= 15 ? 0.85 : z >= 13 ? 0.7 : z >= 11 ? 0.55 : 0.4;
         document.getElementById('map')?.style.setProperty('--marker-scale', String(scale));
+        const labelScale = z >= 16 ? 1 : z >= 14 ? 0.85 : z >= 12 ? 0.7 : z >= 10 ? 0.55 : 0.4;
+        document.getElementById('map')?.style.setProperty('--start-label-scale', String(labelScale));
       };
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
@@ -5776,6 +6140,7 @@ out center body;`;
         withTimeout(loadDeliveryHistory(), 15000, 'loadDeliveryHistory'),
         withTimeout(fetchOilPrices(), 15000, 'fetchOilPrices')
       ]);
+      isDataLoaded = true;
       const failedCount = results.filter(r => r.status === 'rejected').length;
       if (failedCount > 0) {
         console.warn(`${failedCount} data load(s) failed/timed out:`, results.filter(r => r.status === 'rejected'));
@@ -5792,6 +6157,12 @@ out center body;`;
 
       // Keyboard shortcuts
       window.addEventListener('keydown', handleKeyboardShortcuts);
+
+      // Session timeout (30 นาที ไม่ active → logout)
+      setupSessionTimeout();
+
+      // Map rotation gesture (two-finger mobile / shift+drag desktop)
+      setupMapRotation();
 
       // popstate + visibilitychange — จับ browser back/forward
       const pathGuard = () => {
@@ -5908,6 +6279,7 @@ out center body;`;
     on:toggleChargingStations={toggleChargingStations}
     on:loadNearbyChargingStations={loadNearbyChargingStations}
     on:searchEVAlongRoute={searchEVAlongRoute}
+    on:searchGasAlongRoute={searchPOIsAlongRoute}
     on:clearChargingStations={clearChargingStations}
     on:exportRouteData={exportRouteData}
     on:logout={() => showLogoutConfirm = true}
@@ -6275,10 +6647,36 @@ out center body;`;
         {/if}
       </button>
       <div class="sidebar-header">
-        <div class="logo">
-          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/><path d="M8.5 17l1.5 2M15.5 17l-1.5 2M10 19h4" stroke-linecap="round" opacity="0.5"/></svg></div>
+        {#if !isNavigating}
+        <div class="logo desktop-only">
+          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg></div>
           <div class="logo-text"><h1>Route Planing</h1><span>วางแผนเส้นทาง</span></div>
         </div>
+        <div class="header-start-point mobile-only">
+          <div class="start-options">
+            <button class="start-opt {!showStartPointPicker && !useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } clearCustomStartPoint(); }}>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 00-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 00-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+              GPS
+            </button>
+            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } if (accuracyCircle && map) { try { map.removeLayer(accuracyCircle); } catch(_){} accuracyCircle = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+              กำหนดเอง
+            </button>
+          </div>
+          {#if useCustomStartPoint && customStartPoint}
+            <div class="start-selected">
+              <svg viewBox="0 0 24 24" width="10" height="10" fill="#00ff88" stroke="none"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>
+              <span class="start-name">{customStartPoint.name}</span>
+              <button class="start-clear" on:click={clearCustomStartPoint} title="ล้าง">✕</button>
+            </div>
+          {/if}
+        </div>
+        {:else}
+        <div class="logo">
+          <div class="logo-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg></div>
+          <div class="logo-text"><h1>Route Planing</h1><span>นำทางอยู่...</span></div>
+        </div>
+        {/if}
         <div class="header-actions">
           <button class="icon-btn keyboard-help-btn" on:click={() => showKeyboardHelp = true} title="คีย์ลัด [?]">⌨️</button>
           <button class="icon-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง [D]' : 'เปลี่ยนเป็นโหมดมืด [D]'}>{nightMode ? '🌙' : '☀️'}</button>
@@ -6316,8 +6714,29 @@ out center body;`;
       {/if}
 
       <div class="action-buttons">
-        <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1} title="คำนวณเส้นทาง [R]">
-          {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>{/if}
+        {#if !isNavigating}
+        <div class="header-start-point desktop-only">
+          <div class="start-options">
+            <button class="start-opt {!showStartPointPicker && !useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } clearCustomStartPoint(); }}>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 00-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 00-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+              GPS
+            </button>
+            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } if (accuracyCircle && map) { try { map.removeLayer(accuracyCircle); } catch(_){} accuracyCircle = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+              กำหนดเอง
+            </button>
+          </div>
+          {#if useCustomStartPoint && customStartPoint}
+            <div class="start-selected">
+              <svg viewBox="0 0 24 24" width="10" height="10" fill="#00ff88" stroke="none"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>
+              <span class="start-name">{customStartPoint.name}</span>
+              <button class="start-clear" on:click={clearCustomStartPoint} title="ล้าง">✕</button>
+            </div>
+          {/if}
+        </div>
+        {/if}
+        <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1 || ((showStartPointPicker || useCustomStartPoint) && !customStartPoint)} title="คำนวณเส้นทาง [R]">
+          {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>{:else if (showStartPointPicker || useCustomStartPoint) && !customStartPoint}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg><span>เลือกจุดเริ่มต้นก่อน</span>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>{/if}
         </button>
         {#if optimizedRoute}
           <button class="btn btn-navigate" on:click={startNavigation} title="เริ่มนำทาง [N]"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
@@ -6676,16 +7095,16 @@ out center body;`;
   <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm}>
     <div id="map"></div>
 
-    {#if !isNavigating && !isSearchFocused && !directDestination}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker}
       <div class="map-stats glass-card" class:route-active={optimizedRoute}>
-        <div class="map-stat"><span class="map-stat-value">{deliveryPoints.length}</span><span class="map-stat-label">จุดแวะ</span></div>
-        <div class="map-stat"><span class="map-stat-value">{getSuccessCount()}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
+        <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? deliveryPoints.length : '...'}</span><span class="map-stat-label">จุดแวะ</span></div>
+        <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? getSuccessCount() : '...'}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
         <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
       </div>
     {/if}
 
     <!-- Add Point Mode Toggle (hidden when route is calculated) -->
-    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute && !showStartPointPicker}
       <button class="add-point-toggle glass-card" class:active={addPointMode} on:click={() => { addPointMode = !addPointMode; if (map) map.getContainer().style.cursor = addPointMode ? 'crosshair' : ''; if (!addPointMode && clickMarker) { clickMarker.remove(); clickMarker = null; } }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         <span>{addPointMode ? 'ปักหมุดอยู่...' : 'เพิ่มจุด'}</span>
@@ -6711,11 +7130,18 @@ out center body;`;
       {isNavigating}
       {directDestination}
       {getUserKey}
+      {showStartPointPicker}
+      {startPointSearchQuery}
+      {isSearchingStartPoint}
+      {startPointResults}
       on:selectResult={(e) => selectSearchResult(e.detail)}
       on:navigate={navigateToSearchResult}
       on:clearDestination={() => { if (destinationMarker) { destinationMarker.remove(); destinationMarker = null; } directDestination = null; }}
       on:searchError={(e) => showNotification(e.detail.message, 'error')}
       on:searchFocus={(e) => isSearchFocused = e.detail}
+      on:startPointInput={(e) => { startPointSearchQuery = e.detail; onStartPointSearchInput(); }}
+      on:selectStartPoint={(e) => setCustomStartFromSearch(e.detail)}
+      on:closeStartPointSearch={() => { showStartPointPicker = false; if (!useCustomStartPoint) clearCustomStartPoint(); }}
     />
 
     <!-- Floating Route Preferences -->
@@ -6723,7 +7149,8 @@ out center body;`;
       <div class="map-prefs-float glass-card">
         <div class="float-pref-chips">
           <button class="float-pref-chip" class:active={routePreference === 'fastest'} on:click={() => toggleRoutePreference('fastest')}>🚀 เร็วสุด</button>
-          <button class="float-pref-chip" class:active={routePreference === 'no_tolls'} on:click={() => toggleRoutePreference('no_tolls')}>🚫 เลี่ยงด่วน</button>
+          <button class="float-pref-chip" class:active={routePreference === 'shortest'} on:click={() => toggleRoutePreference('shortest')}>📏 สั้นสุด</button>
+          <button class="float-pref-chip" class:active={routePreference === 'no_tolls'} on:click={() => toggleRoutePreference('no_tolls')}>🚫 เลี่ยงทางด่วน</button>
           <button class="float-pref-chip" class:active={routePreference === 'no_highways'} on:click={() => toggleRoutePreference('no_highways')}>🏘️ เลี่ยงมอเตอร์เวย์</button>
         </div>
         <div class="float-pref-toggles">
@@ -6731,6 +7158,9 @@ out center body;`;
           <button class="float-toggle-chip" class:active={showIncidentsPanel} on:click={toggleIncidentsPanel} title="เหตุการณ์จราจร">🚨</button>
           <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
           <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
+          {#if Math.abs(_userMapRotation) > 1}
+            <button class="float-toggle-chip compass-reset-btn" on:click={resetMapRotation} title="หันเหนือ (รีเซ็ตการหมุน)" style="transform: rotate({_userMapRotation}deg);">🧭</button>
+          {/if}
         </div>
       </div>
 
@@ -6885,51 +7315,20 @@ out center body;`;
       {/if}
     {/if}
 
-    <!-- Floating Along-Route POI -->
+    <!-- Floating Along-Route POI (search button) -->
     {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination}
       <div class="map-poi-float glass-card">
-        <div class="poi-header">
-          <button class="poi-search-btn" on:click={searchPOIsAlongRoute} disabled={isLoadingPOIs}>
-            {isLoadingPOIs ? '⏳ กำลังค้นหา...' : '🔍 ค้นหาสถานที่บนเส้นทาง'}
-          </button>
-          {#if alongRoutePOIs.length > 0}
-            <button class="poi-close-btn" on:click={closePOIPanel} title="ปิด">✕</button>
-          {/if}
-        </div>
-        {#if alongRoutePOIs.length > 0}
-          <div class="poi-filter-section">
-            <span class="poi-filter-label">🎯 ท่องเที่ยว</span>
-            <div class="poi-filter-chips">
-              <button class="poi-chip attraction" class:active={activePOITypes.has('viewpoint')} on:click={() => togglePOIType('viewpoint')}>📸 จุดชมวิว</button>
-              <button class="poi-chip attraction" class:active={activePOITypes.has('attraction')} on:click={() => togglePOIType('attraction')}>🏛️ ท่องเที่ยว</button>
-              <button class="poi-chip attraction" class:active={activePOITypes.has('temple')} on:click={() => togglePOIType('temple')}>🏯 วัด</button>
-              <button class="poi-chip attraction" class:active={activePOITypes.has('park')} on:click={() => togglePOIType('park')}>🌳 สวน</button>
-              <button class="poi-chip attraction" class:active={activePOITypes.has('museum')} on:click={() => togglePOIType('museum')}>🎨 พิพิธภัณฑ์</button>
-            </div>
-          </div>
-          <div class="poi-filter-section">
-            <span class="poi-filter-label">🛎️ บริการ</span>
-            <div class="poi-filter-chips">
-              <button class="poi-chip" class:active={activePOITypes.has('gas')} on:click={() => togglePOIType('gas')}>⛽ ปั๊ม</button>
-              <button class="poi-chip" class:active={activePOITypes.has('convenience')} on:click={() => togglePOIType('convenience')}>🏪 สะดวกซื้อ</button>
-              <button class="poi-chip" class:active={activePOITypes.has('restaurant')} on:click={() => togglePOIType('restaurant')}>🍜 อาหาร</button>
-              <button class="poi-chip" class:active={activePOITypes.has('cafe')} on:click={() => togglePOIType('cafe')}>☕ คาเฟ่</button>
-              <button class="poi-chip" class:active={activePOITypes.has('ev_charging')} on:click={() => togglePOIType('ev_charging')}>⚡ ชาร์จ</button>
-            </div>
-          </div>
-          <div class="poi-results-summary">
-            พบ {alongRoutePOIs.filter(p => activePOITypes.has(p.type)).length} แห่ง บนเส้นทาง
-          </div>
-          <div class="poi-list-compact">
-            {#each alongRoutePOIs.filter(p => activePOITypes.has(p.type)) as poi}
-              <div class="poi-item" on:click={() => flyToPOI(poi)} on:keypress={() => {}} role="button" tabindex="0">
-                <span class="poi-type-icon">{getPOIIcon(poi.type)}</span>
-                <div class="poi-item-info">
-                  <span class="poi-name">{poi.name || poi.tags?.brand || getPOILabel(poi.type)}</span>
-                  <span class="poi-meta">{formatDistance(poi.distAlongRoute)} บนเส้นทาง · ห่าง {Math.round(poi.distFromRoute)} ม.</span>
-                </div>
-              </div>
-            {/each}
+        <button class="poi-search-btn" on:click={searchPOIsAlongRoute} disabled={isLoadingPOIs}>
+          {isLoadingPOIs ? '⏳ กำลังค้นหา...' : '🔍 ค้นหาสถานที่บนเส้นทาง'}
+        </button>
+        {#if alongRoutePOIs.length > 0 && !showPOIModal}
+          <div class="poi-btn-row">
+            <button class="poi-btn-half poi-reopen-btn" on:click={() => { showPOIModal = true; }}>
+              📋 ดู ({alongRoutePOIs.length})
+            </button>
+            <button class="poi-btn-half poi-clear-btn" on:click={clearAllPOI}>
+              ✕ ยกเลิก
+            </button>
           </div>
         {/if}
       </div>
@@ -6985,6 +7384,66 @@ out center body;`;
     {/if}
   </div>
 </div>
+
+<!-- POI Results Modal (outside app-container for proper fixed positioning) -->
+{#if showPOIModal && alongRoutePOIs.length > 0 && !isNavigating}
+  <div class="poi-modal-backdrop" on:click={closePOIPanel} on:keypress={() => {}} role="button" tabindex="-1"></div>
+  <div class="poi-modal">
+    <div class="poi-modal-header">
+      <h3 class="poi-modal-title">สถานที่บนเส้นทาง</h3>
+      <span class="poi-modal-count">{alongRoutePOIs.filter(p => activePOITypes.has(p.type)).length} แห่ง</span>
+      <button class="poi-modal-close" on:click={closePOIPanel}>✕</button>
+    </div>
+    <div class="poi-filter-section">
+      <span class="poi-filter-label">🎯 ท่องเที่ยว</span>
+      <div class="poi-filter-chips">
+        <button class="poi-chip attraction" class:active={activePOITypes.has('viewpoint')} on:click={() => togglePOIType('viewpoint')}>📸 จุดชมวิว</button>
+        <button class="poi-chip attraction" class:active={activePOITypes.has('attraction')} on:click={() => togglePOIType('attraction')}>🏛️ ท่องเที่ยว</button>
+        <button class="poi-chip attraction" class:active={activePOITypes.has('temple')} on:click={() => togglePOIType('temple')}>🏯 วัด</button>
+        <button class="poi-chip attraction" class:active={activePOITypes.has('park')} on:click={() => togglePOIType('park')}>🌳 สวน</button>
+        <button class="poi-chip attraction" class:active={activePOITypes.has('museum')} on:click={() => togglePOIType('museum')}>🎨 พิพิธภัณฑ์</button>
+      </div>
+    </div>
+    <div class="poi-filter-section">
+      <span class="poi-filter-label">🛎️ บริการ</span>
+      <div class="poi-filter-chips">
+        <button class="poi-chip" class:active={activePOITypes.has('gas')} on:click={() => togglePOIType('gas')}>⛽ ปั๊ม</button>
+        <button class="poi-chip" class:active={activePOITypes.has('convenience')} on:click={() => togglePOIType('convenience')}>🏪 สะดวกซื้อ</button>
+        <button class="poi-chip" class:active={activePOITypes.has('restaurant')} on:click={() => togglePOIType('restaurant')}>🍜 อาหาร</button>
+        <button class="poi-chip" class:active={activePOITypes.has('cafe')} on:click={() => togglePOIType('cafe')}>☕ คาเฟ่</button>
+        <button class="poi-chip" class:active={activePOITypes.has('ev_charging')} on:click={() => togglePOIType('ev_charging')}>⚡ ชาร์จ</button>
+      </div>
+    </div>
+    {#if alongRoutePOIs.filter(p => activePOITypes.has(p.type)).length === 0}
+      <div class="poi-empty">ไม่พบสถานที่ในหมวดที่เลือก</div>
+    {:else}
+      <div class="poi-list-modal">
+        {#each alongRoutePOIs.filter(p => activePOITypes.has(p.type)) as poi}
+          <div class="poi-item-modal" on:click={() => flyToPOI(poi)} on:keypress={() => {}} role="button" tabindex="0">
+            <span class="poi-type-icon-lg">{getPOIIcon(poi.type)}</span>
+            <div class="poi-item-detail">
+              <span class="poi-name-lg">{poi.name || poi.tags?.brand || getPOILabel(poi.type)}</span>
+              <span class="poi-type-label">{getPOILabel(poi.type)}</span>
+              {#if poi.tags?.['addr:road'] || poi.tags?.['addr:city'] || poi.tags?.['addr:subdistrict']}
+                <span class="poi-address">{[poi.tags?.['addr:road'], poi.tags?.['addr:subdistrict'], poi.tags?.['addr:city']].filter(Boolean).join(', ')}</span>
+              {/if}
+              {#if poi.tags?.cuisine}
+                <span class="poi-extra">🍽️ {poi.tags.cuisine.replace(/;/g, ', ')}</span>
+              {/if}
+              {#if poi.tags?.opening_hours}
+                <span class="poi-extra">🕐 {poi.tags.opening_hours}</span>
+              {/if}
+              {#if poi.tags?.phone}
+                <span class="poi-extra">📞 {poi.tags.phone}</span>
+              {/if}
+              <span class="poi-distance-info">📍 {formatDistance(poi.distAlongRoute)} บนเส้นทาง · ห่าง {Math.round(poi.distFromRoute)} ม.</span>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
 
@@ -7245,8 +7704,9 @@ out center body;`;
 
 /* ==================== REORDER MODE ==================== */
 .btn-reorder-active {
-  background: #9333ea !important;
-  color: #fff !important;
+  background: rgba(0,255,136,0.15) !important;
+  color: #00ff88 !important;
+  border: 1px solid rgba(0,255,136,0.3) !important;
   border: 1px solid rgba(147, 51, 234, 0.5) !important;
 }
 
@@ -7319,7 +7779,7 @@ out center body;`;
 }
 
 .day-mode :global(.leaflet-tile-pane) {
-  filter: brightness(0.92) saturate(0.8) sepia(0.05) !important;
+  filter: brightness(1.1) saturate(1.2) !important;
 }
 
 .day-mode :global(.leaflet-container) {
@@ -7768,14 +8228,16 @@ out center body;`;
     border-right: none;
     overflow: hidden;
   }
-  .sidebar-header { padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: rgba(0, 0, 0, 0.1); }
-  .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
+  .sidebar-header { padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; background: rgba(0, 0, 0, 0.1); position: relative; }
+  .sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; padding-bottom: 10px; }
   .sidebar-scroll::-webkit-scrollbar { width: 5px; }
   .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
   .sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(0, 255, 136, 0.15); border-radius: 10px; transition: background 0.3s; }
   .sidebar-scroll::-webkit-scrollbar-thumb:hover { background: rgba(0, 255, 136, 0.35); }
 
   .logo { display: flex; align-items: center; gap: 10px; }
+  .logo.desktop-only { margin-bottom: 8px; }
+  .mobile-only { display: none; }
   .logo-icon { width: 34px; height: 34px; background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0, 255, 136, 0.2); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease; }
   .logo-icon:hover { transform: scale(1.08) rotate(-3deg); box-shadow: 0 4px 16px rgba(0, 255, 136, 0.3); }
   .logo-icon svg { width: 18px; height: 18px; color: #0a0a0f; }
@@ -7786,6 +8248,70 @@ out center body;`;
   .stats-badge:hover { transform: scale(1.05); box-shadow: 0 4px 16px rgba(0, 255, 136, 0.12); }
   .stats-number { font-size: 16px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .stats-label { font-size: 9px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Start Point Selector (in header) */
+  .header-start-point { flex: 0 1 auto; min-width: 0; }
+  .header-start-point .start-options { display: flex; gap: 4px; }
+  .header-start-point .start-selected { margin-top: 4px; padding: 3px 6px; font-size: 10px; }
+  .start-options { display: flex; gap: 4px; }
+  .start-opt { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 7px 22px; font-size: 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.03); color: #a1a1aa; cursor: pointer; transition: all 0.2s; font-family: inherit; white-space: nowrap; }
+  /* Floating Start Point Search (on map) */
+  .start-opt:hover { background: rgba(255,255,255,0.06); color: #e4e4e7; }
+  .start-opt.active { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
+  .start-opt.disabled-route { opacity: 0.4; cursor: not-allowed; }
+  .start-selected { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding: 6px 10px; background: rgba(0,255,136,0.06); border: 1px solid rgba(0,255,136,0.15); border-radius: 8px; font-size: 12px; color: #00ff88; }
+  .start-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .start-clear { background: none; border: none; color: #a1a1aa; cursor: pointer; padding: 2px 4px; font-size: 14px; line-height: 1; font-family: inherit; }
+  .start-clear:hover { color: #ef4444; }
+  .start-point-search { margin-top: 6px; }
+  .start-search-input { width: 100%; padding: 8px 12px; font-size: 13px; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; background: rgba(255,255,255,0.04); color: #e4e4e7; outline: none; font-family: inherit; }
+  .start-search-input:focus { border-color: rgba(0,255,136,0.4); }
+  .start-searching { padding: 8px; font-size: 12px; color: #a1a1aa; text-align: center; }
+  .start-results { margin-top: 4px; max-height: 180px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(15,15,25,0.95); }
+  .start-result-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; font-size: 12px; color: #e4e4e7; border: none; border-bottom: 1px solid rgba(255,255,255,0.04); background: none; cursor: pointer; text-align: left; font-family: inherit; }
+  .start-result-item:last-child { border-bottom: none; }
+  .start-result-item:hover { background: rgba(0,255,136,0.06); }
+  .start-result-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :global(.custom-start-marker) { background: none !important; border: none !important; }
+  :global(.custom-start-wrapper) { position: relative; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; }
+  :global(.custom-start-dot) {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #00ff88; border: 3px solid #fff;
+    box-shadow: 0 0 12px rgba(0,255,136,0.6), 0 0 24px rgba(0,255,136,0.3);
+    position: relative; z-index: 3;
+  }
+  :global(.custom-start-pulse) {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(0,255,136,0.15); border: 2px solid rgba(0,255,136,0.3);
+    animation: customStartPulse 2s ease-out infinite; z-index: 1;
+  }
+  :global(.custom-start-pulse-2) { animation-delay: 1s; }
+  :global(.custom-start-label) {
+    position: absolute; top: -28px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
+    transform-origin: bottom center;
+    background: rgba(0,255,136,0.9); color: #0a0a0f;
+    font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
+    white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 4;
+    font-family: 'Kanit', sans-serif; transition: transform 0.2s ease;
+  }
+  :global(.start-label-gps) {
+    background: rgba(66,133,244,0.9);
+  }
+  :global(.start-label-gps::after) {
+    border-top-color: rgba(66,133,244,0.9) !important;
+  }
+  :global(.custom-start-label::after) {
+    content: ''; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%);
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 5px solid rgba(0,255,136,0.9);
+  }
+  @keyframes customStartPulse {
+    0% { transform: translate(-50%, -50%) scale(0.8); opacity: 1; }
+    100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
+  }
+  .start-pin { filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
 
   .action-buttons { padding: 10px 14px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
   .action-buttons .btn { flex: 1 1 calc(50% - 3px); min-width: 0; }
@@ -7821,14 +8347,14 @@ out center body;`;
   .btn-primary { background: #00ff88; color: #0a0a0f; box-shadow: 0 2px 12px rgba(0, 255, 136, 0.2); }
   .btn-primary:hover:not(:disabled) { background: #00e67a; box-shadow: 0 4px 20px rgba(0, 255, 136, 0.35); transform: translateY(-1px); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
-  .btn-navigate { background: #3b82f6; color: white; box-shadow: 0 2px 12px rgba(59, 130, 246, 0.2); }
-  .btn-navigate:hover { background: #2563eb; box-shadow: 0 4px 20px rgba(59, 130, 246, 0.35); transform: translateY(-1px); }
-  .btn-secondary { background: rgba(102, 126, 234, 0.15); color: #818cf8; border: 1px solid rgba(102, 126, 234, 0.3); }
-  .btn-secondary:hover { background: rgba(102, 126, 234, 0.25); border-color: rgba(102, 126, 234, 0.5); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(102, 126, 234, 0.15); }
+  .btn-navigate { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid rgba(0,255,136,0.25); box-shadow: 0 2px 12px rgba(0,255,136,0.1); }
+  .btn-navigate:hover { background: rgba(0,255,136,0.2); box-shadow: 0 4px 20px rgba(0,255,136,0.2); transform: translateY(-1px); }
+  .btn-secondary { background: rgba(255,255,255,0.06); color: #a1a1aa; border: 1px solid rgba(255,255,255,0.1); }
+  .btn-secondary:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); color: #e4e4e7; transform: translateY(-1px); }
   .btn-ghost { background: rgba(255, 255, 255, 0.05); color: #a1a1aa; border: 1px solid rgba(255, 255, 255, 0.1); }
   .btn-ghost:hover { background: rgba(255, 255, 255, 0.1); color: #e4e4e7; border-color: rgba(255, 255, 255, 0.2); transform: translateY(-1px); }
-  .btn-drag-active { background: rgba(251, 146, 60, 0.2); color: #fb923c; border: 1px solid rgba(251, 146, 60, 0.5); }
-  .btn-drag-active:hover { background: rgba(251, 146, 60, 0.3); border-color: rgba(251, 146, 60, 0.7); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(251, 146, 60, 0.15); }
+  .btn-drag-active { background: rgba(0,255,136,0.15); color: #00ff88; border: 1px solid rgba(0,255,136,0.3); }
+  .btn-drag-active:hover { background: rgba(0,255,136,0.25); border-color: rgba(0,255,136,0.5); transform: translateY(-1px); }
 
   .spinner { width: 20px; height: 20px; border: 2px solid rgba(10, 10, 15, 0.3); border-top-color: #0a0a0f; border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -7916,7 +8442,7 @@ out center body;`;
   .tabs {
     display: flex;
     gap: 4px;
-    margin: 0 14px 10px;
+    margin: 3px 14px 10px;
     padding: 3px;
     background: rgba(255, 255, 255, 0.03);
     border-radius: 10px;
@@ -8339,7 +8865,7 @@ out center body;`;
   .vehicle-quick-toggle { padding: 12px 24px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
   .vehicle-toggle-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px; border-radius: 10px; border: none; cursor: pointer; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 500; transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease, transform 0.2s ease; }
   .vehicle-toggle-btn.fuel { background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.2); color: #00ff88; }
-  .vehicle-toggle-btn.ev { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; }
+  .vehicle-toggle-btn.ev { background: rgba(0,200,255,0.08); border: 1px solid rgba(0,200,255,0.2); color: #67e8f9; }
   .vehicle-toggle-btn:hover { background: rgba(255, 255, 255, 0.05); }
   .toggle-icon { font-size: 20px; }
   .ev-charge-badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; color: #000; }
@@ -8440,7 +8966,7 @@ out center body;`;
   .route-badge.ev-badge { background: rgba(59, 130, 246, 0.08); border-color: rgba(59, 130, 246, 0.15); color: #3b82f6; }
 
   /* EV Primary Button */
-  .btn-primary.btn-ev { background: #3b82f6; color: white; }
+  .btn-primary.btn-ev { background: rgba(0,200,255,0.15); color: #67e8f9; border: 1px solid rgba(0,200,255,0.25); }
 
   /* Stat Card EV */
   .stat-card.ev { border-color: rgba(59, 130, 246, 0.15); background: rgba(59, 130, 246, 0.05); }
@@ -8493,17 +9019,17 @@ out center body;`;
     font-family: 'JetBrains Mono', monospace;
   }
   .mst-count.has-selected .mst-num { color: #fff; }
-  .mst-label { font-size: 12px; color: #a5b4fc; font-weight: 500; }
+  .mst-label { font-size: 12px; color: #a1a1aa; font-weight: 500; }
   .mst-actions { display: flex; align-items: center; gap: 4px; }
   .mst-btn {
     width: 32px; height: 32px; border-radius: 8px; border: none;
     background: rgba(255,255,255,0.05);
-    color: #a5b4fc; cursor: pointer;
+    color: #a1a1aa; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
   }
   .mst-btn svg { width: 16px; height: 16px; }
-  .mst-btn:hover { background: rgba(99,102,241,0.2); color: #c7d2fe; transform: scale(1.1); }
+  .mst-btn:hover { background: rgba(0,255,136,0.1); color: #00ff88; transform: scale(1.1); }
   .mst-btn:active { transform: scale(0.95); }
   .mst-btn.delete { color: #71717a; }
   .mst-btn.delete:hover:not(:disabled) { background: rgba(239,68,68,0.15); color: #f87171; }
@@ -8731,9 +9257,15 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; will-change: transform; }
-  :global(.leaflet-tile-pane) { filter: grayscale(1) invert(1) brightness(0.55); image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
-  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; }
+  #map { width: 100%; height: 100%; will-change: transform; overflow: hidden; transform-origin: center center; }
+  :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); }
+  :global(.leaflet-marker-icon.leaflet-default-icon-path),
+  :global(.leaflet-marker-shadow) { display: none !important; }
+  :global(.satellite-tiles), :global(.dark-tiles) { transition: opacity 0.5s ease; }
+  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; background: #1d1f20; }
+  :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
+  :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
+  :global(.leaflet-fade-anim .leaflet-tile) { will-change: opacity; }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
@@ -8846,7 +9378,7 @@ out center body;`;
   .undo-btn { background: rgba(255, 255, 255, 0.15); color: inherit; border: 1px solid rgba(255, 255, 255, 0.25); padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: 'Kanit', sans-serif; transition: background 0.2s; margin-left: 4px; }
   .undo-btn:hover { background: rgba(255, 255, 255, 0.25); }
 
-  :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #0a0a0f; }
+  :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #1d1f20; }
   :global(.leaflet-control-zoom) { border: none !important; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35) !important; border-radius: 12px !important; overflow: hidden; }
   :global(.leaflet-control-zoom a) { background: rgba(15, 15, 25, 0.95) !important; color: #a1a1aa !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; transition: background 0.25s ease, color 0.25s ease !important; }
   :global(.leaflet-control-zoom a:hover) { background: rgba(0, 255, 136, 0.15) !important; color: #00ff88 !important; }
@@ -8871,6 +9403,20 @@ out center body;`;
   :global(.route-pin) { width: 48px; height: 48px; font-size: 17px; border-width: 3px; }
   :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
+  :global(.marker-name-label) {
+    position: absolute; top: -26px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
+    transform-origin: bottom center;
+    background: rgba(102,126,234,0.9); color: #fff;
+    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px;
+    white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 4;
+    font-family: 'Kanit', sans-serif; pointer-events: none; transition: transform 0.2s ease;
+  }
+  :global(.marker-name-label::after) {
+    content: ''; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%);
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 4px solid rgba(102,126,234,0.9);
+  }
   @keyframes pulse-label { 0%, 100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.1); } }
   :global(.current-target) { animation: pulse-target 1.5s ease-in-out infinite; }
   /* ===== Start Location Marker (route calculated) ===== */
@@ -8932,17 +9478,22 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 0; height: 0;
+    width: 120px; height: 120px;
     top: 50%; left: 50%;
-    transform-origin: 0 0;
-    border-left: 28px solid transparent;
-    border-right: 28px solid transparent;
-    border-bottom: 80px solid rgba(0, 255, 136, 0.25);
-    margin-left: -28px;
-    margin-top: -80px;
-    filter: blur(6px);
-    -webkit-mask: linear-gradient(to top, transparent 0%, black 30%, black 100%);
-    mask: linear-gradient(to top, transparent 0%, black 30%, black 100%);
+    margin-left: -60px;
+    margin-top: -120px;
+    transform-origin: 50% 100%;
+    background: conic-gradient(
+      from -30deg at 50% 100%,
+      transparent 0deg,
+      rgba(0, 255, 136, 0.18) 15deg,
+      rgba(0, 255, 136, 0.28) 30deg,
+      rgba(0, 255, 136, 0.18) 45deg,
+      transparent 60deg
+    );
+    border-radius: 50%;
+    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 30%, transparent 70%);
+    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 30%, transparent 70%);
     pointer-events: none;
     transition: transform 0.3s ease, opacity 0.3s;
     z-index: 5;
@@ -8980,8 +9531,10 @@ out center body;`;
   
   /* Tablet */
   @media (max-width: 1024px) {
+    .desktop-only { display: none !important; }
+    .mobile-only { display: block !important; }
     .app-container { flex-direction: column; }
-    .sidebar { width: 100%; height: auto; max-height: 60vh; min-height: 200px; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.1); overflow-y: auto; }
+    .sidebar { width: 100%; height: auto; max-height: 60vh; min-height: 200px; border-right: none; border-bottom: none; overflow-y: auto; }
     .map-container { flex: 1; height: 60vh; min-height: 300px; position: relative; overflow: hidden; }
     #map { position: absolute; inset: 0; width: 100%; height: 100%; }
     .sidebar-content { padding: 12px; }
@@ -9121,16 +9674,16 @@ out center body;`;
     }
     .action-buttons .btn.btn-primary:active { box-shadow: 0 1px 6px rgba(0,255,136,0.3); }
     .action-buttons .btn.btn-navigate {
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
-      border-color: transparent; color: #fff;
-      font-weight: 700; box-shadow: 0 3px 12px rgba(59,130,246,0.25);
+      background: rgba(0,255,136,0.12);
+      border-color: rgba(0,255,136,0.25); color: #00ff88;
+      font-weight: 700; box-shadow: 0 3px 12px rgba(0,255,136,0.15);
     }
-    .action-buttons .btn.btn-navigate:active { box-shadow: 0 1px 6px rgba(59,130,246,0.3); }
-    .action-buttons .btn.btn-secondary { color: #c084fc; border-color: rgba(168,85,247,0.2); }
+    .action-buttons .btn.btn-navigate:active { box-shadow: 0 1px 6px rgba(0,255,136,0.2); }
+    .action-buttons .btn.btn-secondary { color: #a1a1aa; border-color: rgba(255,255,255,0.1); }
     .action-buttons .btn.btn-ghost { color: #a1a1aa; border-color: rgba(255,255,255,0.05); }
-    .action-buttons .btn.btn-save-route { color: #fbbf24; border-color: rgba(251,191,36,0.15); }
-    .action-buttons .btn.btn-share { color: #818cf8; border-color: rgba(129,140,248,0.15); }
-    .action-buttons .btn.btn-alt-routes { color: #38bdf8; border-color: rgba(56,189,248,0.15); }
+    .action-buttons .btn.btn-save-route { color: #a1a1aa; border-color: rgba(255,255,255,0.08); }
+    .action-buttons .btn.btn-share { color: #a1a1aa; border-color: rgba(255,255,255,0.08); }
+    .action-buttons .btn.btn-alt-routes { color: #a1a1aa; border-color: rgba(255,255,255,0.08); }
 
     /* --- Tabs --- */
     .tabs {
@@ -9303,22 +9856,22 @@ out center body;`;
       z-index: 1002;
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 10px 18px;
+      gap: 4px;
+      padding: 7px 12px;
       border-radius: 9999px;
-      border: none;
-      background: linear-gradient(135deg, #3b82f6, #1d4ed8) !important;
-      color: white;
+      border: 1px solid rgba(0,255,136,0.25);
+      background: rgba(10,15,20,0.85) !important;
+      color: #00ff88;
       font-family: 'Kanit', sans-serif;
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 11px;
+      font-weight: 500;
       cursor: pointer;
-      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.4);
-      transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+      transition: all 0.2s ease;
       animation: mrsSlideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1);
     }
     .map-nav-btn:active { transform: scale(0.95); }
-    .map-nav-btn svg { width: 16px; height: 16px; }
+    .map-nav-btn svg { width: 13px; height: 13px; }
     @keyframes mrsSlideUp {
       from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
@@ -9562,14 +10115,15 @@ out center body;`;
 }
 
 .btn-danger {
-  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
-  color: white;
-  box-shadow: 0 4px 20px rgba(255, 107, 107, 0.3);
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+  border: 1px solid rgba(239,68,68,0.25);
+  box-shadow: none;
 }
 
 .btn-danger:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 30px rgba(255, 107, 107, 0.4);
+  background: rgba(239,68,68,0.2);
+  transform: translateY(-1px);
 }
 .today-stat .stat-label {
   font-size: 10px;
@@ -10094,20 +10648,20 @@ out center body;`;
 
 /* 🆕 Cash Payment Button */
 .btn-cash {
-  background: linear-gradient(135deg, #ffc107, #ff9800);
-  color: #000;
+  background: rgba(0,255,136,0.1);
+  color: #00ff88;
   padding: 10px;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  border: none;
+  border: 1px solid rgba(0,255,136,0.2);
   transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
 }
 
 .btn-cash:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 15px rgba(255, 193, 7, 0.4);
+  background: rgba(0,255,136,0.18);
+  transform: translateY(-1px);
 }
 
 /* Responsive */
@@ -10334,23 +10888,23 @@ out center body;`;
 
 /* Button Variants */
 .btn-alt-routes {
-  background: rgba(102, 126, 234, 0.15);
-  color: #818cf8;
-  border: 1px solid rgba(102, 126, 234, 0.3);
+  background: rgba(255,255,255,0.05);
+  color: #a1a1aa;
+  border: 1px solid rgba(255,255,255,0.1);
 }
-.btn-alt-routes:hover { background: rgba(102, 126, 234, 0.25); }
+.btn-alt-routes:hover { background: rgba(0,255,136,0.08); color: #00ff88; border-color: rgba(0,255,136,0.2); }
 .btn-save-route {
-  background: rgba(255, 165, 2, 0.15);
-  color: #ffa502;
-  border: 1px solid rgba(255, 165, 2, 0.3);
+  background: rgba(255,255,255,0.05);
+  color: #a1a1aa;
+  border: 1px solid rgba(255,255,255,0.1);
 }
-.btn-save-route:hover { background: rgba(255, 165, 2, 0.25); }
+.btn-save-route:hover { background: rgba(0,255,136,0.08); color: #00ff88; border-color: rgba(0,255,136,0.2); }
 .btn-share {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgba(255,255,255,0.05);
+  color: #a1a1aa;
+  border: 1px solid rgba(255,255,255,0.1);
 }
-.btn-share:hover { background: rgba(59, 130, 246, 0.25); }
+.btn-share:hover { background: rgba(0,255,136,0.08); color: #00ff88; border-color: rgba(0,255,136,0.2); }
 
 /* Share Route QR Modal */
 .share-qr-overlay {
@@ -10449,8 +11003,7 @@ out center body;`;
 :global(.route-flow-line) { animation: route-flow 1.5s linear infinite; }
 @keyframes route-flow { to { stroke-dashoffset: -32; } }
 
-/* Alt Route Glow */
-:global(.route-glow) { filter: drop-shadow(0 0 6px currentColor) drop-shadow(0 0 2px currentColor); }
+/* Alt Route — outline stroke handled by separate polyline layer */
 
 /* Route Selector Overlay */
 .route-selector-overlay {
@@ -10962,10 +11515,10 @@ out center body;`;
 }
 
 /* Nav Action Buttons - Notify & Amenity */
-.nav-btn-notify { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
-.nav-btn-notify:hover { background: rgba(59, 130, 246, 0.25); }
-.nav-btn-amenity { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
-.nav-btn-amenity:hover { background: rgba(168, 85, 247, 0.25); }
+.nav-btn-notify { background: rgba(0,255,136,0.1); color: #00ff88; }
+.nav-btn-notify:hover { background: rgba(0,255,136,0.18); }
+.nav-btn-amenity { background: rgba(255,255,255,0.06); color: #a1a1aa; }
+.nav-btn-amenity:hover { background: rgba(255,255,255,0.1); color: #e4e4e7; }
 
 /* ==================== RESPONSIVE - ADVANCED FEATURES ==================== */
 
@@ -11216,26 +11769,67 @@ out center body;`;
   max-width: 340px;
   font-family: 'Kanit', sans-serif;
 }
-.poi-header {
-  display: flex;
-  gap: 6px;
-  align-items: center;
+.poi-modal-backdrop {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5); z-index: 2000;
 }
-.poi-close-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #ef4444;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s;
-  flex-shrink: 0;
+.poi-modal {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 90%; max-width: 420px; max-height: 80vh;
+  background: rgba(15, 15, 25, 0.97);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 18px; z-index: 2001;
+  padding: 20px; font-family: 'Kanit', sans-serif;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  display: flex; flex-direction: column;
+  animation: modalIn 0.2s ease-out;
 }
-.poi-close-btn:hover {
-  background: rgba(239, 68, 68, 0.25);
+@keyframes modalIn { from { opacity: 0; transform: translate(-50%, -48%); } to { opacity: 1; transform: translate(-50%, -50%); } }
+.poi-modal-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px; padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
 }
+.poi-modal-title {
+  font-size: 16px; font-weight: 600; color: #e4e4e7; margin: 0; flex: 1;
+}
+.poi-modal-count {
+  font-size: 12px; color: #00ff88; background: rgba(0,255,136,0.1);
+  padding: 3px 10px; border-radius: 12px; font-weight: 500;
+}
+.poi-modal-close {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3);
+  color: #ef4444; font-size: 14px; cursor: pointer;
+  transition: background 0.2s; flex-shrink: 0;
+  font-family: inherit;
+}
+.poi-modal-close:hover { background: rgba(239,68,68,0.25); }
+.poi-list-modal {
+  max-height: 45vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px;
+  scrollbar-width: thin; scrollbar-color: rgba(0,255,136,0.3) transparent;
+}
+.poi-list-modal::-webkit-scrollbar { width: 6px; }
+.poi-list-modal::-webkit-scrollbar-track { background: transparent; }
+.poi-list-modal::-webkit-scrollbar-thumb { background: rgba(0,255,136,0.3); border-radius: 3px; }
+.poi-list-modal::-webkit-scrollbar-thumb:hover { background: rgba(0,255,136,0.5); }
+.poi-item-modal {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 12px; background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06); border-radius: 10px;
+  cursor: pointer; transition: background 0.15s, border-color 0.15s;
+}
+.poi-item-modal:hover { background: rgba(0,255,136,0.06); border-color: rgba(0,255,136,0.15); }
+.poi-type-icon-lg { font-size: 24px; flex-shrink: 0; margin-top: 2px; }
+.poi-item-detail { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.poi-name-lg { font-size: 13px; font-weight: 600; color: #e4e4e7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.poi-type-label { font-size: 10px; color: #00ff88; font-weight: 500; }
+.poi-address { font-size: 10px; color: #a1a1aa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.poi-extra { font-size: 10px; color: #71717a; }
+.poi-distance-info { font-size: 10px; color: #52525b; margin-top: 2px; }
+.poi-empty { padding: 20px; text-align: center; color: #71717a; font-size: 13px; }
 .poi-search-btn {
   width: 100%;
   padding: 8px 14px;
@@ -11250,6 +11844,17 @@ out center body;`;
 }
 .poi-search-btn:hover { background: rgba(0, 255, 136, 0.22); }
 .poi-search-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.poi-btn-row { display: flex; gap: 6px; margin-top: 6px; }
+.poi-btn-half {
+  flex: 1; padding: 6px 8px; border-radius: 8px;
+  font-size: 11px; font-family: 'Kanit', sans-serif;
+  cursor: pointer; transition: background 0.2s, border-color 0.2s;
+  text-align: center; white-space: nowrap;
+}
+.poi-reopen-btn { background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.3); color: #818cf8; }
+.poi-reopen-btn:hover { background: rgba(99,102,241,0.22); }
+.poi-clear-btn { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #ef4444; }
+.poi-clear-btn:hover { background: rgba(239,68,68,0.22); }
 .poi-filter-chips {
   display: flex;
   gap: 4px;
@@ -11341,7 +11946,15 @@ out center body;`;
   cursor: pointer;
   transform: rotate(-45deg);
 }
-:global(.poi-pin) > * { transform: rotate(45deg); }
+:global(.poi-pin) > *:not(.poi-pin-label) { transform: rotate(45deg); }
+:global(.poi-pin-label) {
+  position: absolute; top: -22px; left: 50%; transform: rotate(45deg) translateX(-50%);
+  background: rgba(0,0,0,0.8); color: #fff;
+  font-size: 9px; font-weight: 500; padding: 2px 6px; border-radius: 4px;
+  white-space: nowrap; max-width: 100px; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; font-family: 'Kanit', sans-serif;
+  transform-origin: bottom left;
+}
 :global(.poi-pin.gas) { background: linear-gradient(135deg, #f97316, #ea580c); }
 :global(.poi-pin.convenience) { background: linear-gradient(135deg, #22c55e, #16a34a); }
 :global(.poi-pin.restaurant) { background: linear-gradient(135deg, #ef4444, #dc2626); }
@@ -11352,6 +11965,36 @@ out center body;`;
 :global(.poi-pin.temple) { background: linear-gradient(135deg, #f59e0b, #d97706); }
 :global(.poi-pin.park) { background: linear-gradient(135deg, #10b981, #059669); }
 :global(.poi-pin.museum) { background: linear-gradient(135deg, #6366f1, #4f46e5); }
+:global(.selected-poi-marker-wrap) { background: none !important; border: none !important; }
+:global(.selected-poi-pin) {
+  width: 38px !important; height: 38px !important; font-size: 18px !important;
+  box-shadow: 0 0 12px rgba(0,255,136,0.4), 0 0 24px rgba(0,255,136,0.15);
+  border: 2px solid rgba(255,255,255,0.5) !important;
+  animation: selectedPoiBounce 0.4s ease-out;
+  transform: rotate(-45deg) scale(var(--start-label-scale, 1)) !important;
+}
+:global(.selected-poi-label) {
+  font-size: 11px !important; font-weight: 600 !important;
+  background: rgba(0,0,0,0.85) !important; padding: 3px 8px !important;
+  border: 1px solid rgba(0,255,136,0.4); border-radius: 6px !important;
+  max-width: 160px; top: -28px !important;
+}
+:global(.selected-poi-close) {
+  position: absolute; top: -30px; right: -30px;
+  transform: rotate(45deg);
+  width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(239,68,68,0.85); color: #fff;
+  font-size: 11px; line-height: 20px; text-align: center;
+  cursor: pointer; pointer-events: auto;
+  border: 1px solid rgba(239,68,68,0.6);
+  transition: background 0.2s;
+}
+:global(.selected-poi-close:hover) { background: rgba(239,68,68,1); }
+@keyframes selectedPoiBounce {
+  0% { transform: rotate(-45deg) scale(0.3); opacity: 0; }
+  60% { transform: rotate(-45deg) scale(1.1); opacity: 1; }
+  100% { transform: rotate(-45deg) scale(var(--start-label-scale, 1)); opacity: 1; }
+}
 :global(.poi-popup) { font-family: 'Kanit', sans-serif; }
 :global(.poi-popup-header) { display: flex; align-items: center; gap: 10px; padding: 12px 14px 8px; }
 :global(.poi-badge) { width: 32px; height: 32px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); font-size: 16px; }
@@ -11381,18 +12024,8 @@ out center body;`;
   .float-pref-chips { flex-wrap: nowrap; }
   .float-pref-chip { font-size: 10px; padding: 4px 7px; }
   .map-poi-float { top: 69px; right: 10px; max-width: 220px; padding: 6px; font-size: 11px; border-radius: 10px; }
-  .map-poi-float .poi-header { gap: 4px; }
   .map-poi-float .poi-search-btn { font-size: 10px; padding: 4px 8px; }
-  .map-poi-float .poi-close-btn { width: 24px; height: 24px; font-size: 11px; border-radius: 6px; }
-  .map-poi-float .poi-filter-section { margin-top: 4px; }
-  .map-poi-float .poi-filter-label { font-size: 9px; }
-  .map-poi-float .poi-filter-chips { gap: 3px; }
-  .map-poi-float .poi-chip { font-size: 9px; padding: 2px 6px; }
-  .map-poi-float .poi-results-summary { font-size: 9px; margin-top: 3px; }
-  .map-poi-float .poi-list-compact { max-height: 120px; }
-  .map-poi-float .poi-item { padding: 4px 6px; }
-  .map-poi-float .poi-name { font-size: 10px; }
-  .map-poi-float .poi-meta { font-size: 8px; }
+  .poi-modal { width: 95%; max-width: 360px; padding: 14px; }
   .map-vehicle-float { display: none; }
   .map-saved-float { bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 40px); }
 }
@@ -11411,8 +12044,7 @@ out center body;`;
   .float-pref-chip { font-size: 9px; padding: 3px 6px; }
   .float-toggle-chip { width: 26px; height: 26px; font-size: 11px; }
   .map-poi-float { top: 67px; right: 8px; max-width: 200px; padding: 5px; font-size: 10px; border-radius: 8px; }
-  .poi-list-compact { display: none; }
-  .poi-results-summary { display: none; }
+  .poi-modal { width: 95%; padding: 12px; }
   .poi-chip { font-size: 10px; padding: 3px 8px; }
   .map-vehicle-float { display: none; }
   .map-saved-float { bottom: 14px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 30px); }
@@ -11954,11 +12586,12 @@ out center body;`;
 
 /* ==================== 2-OPT OPTIMIZATION ==================== */
 .btn-optimize-2opt {
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
-  color: white;
+  background: rgba(0,255,136,0.1);
+  color: #00ff88;
+  border: 1px solid rgba(0,255,136,0.2);
 }
 .btn-optimize-2opt:hover:not(:disabled) {
-  background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+  background: rgba(0,255,136,0.18);
   transform: translateY(-1px);
 }
 .btn-optimize-2opt:disabled {

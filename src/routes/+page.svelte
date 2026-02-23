@@ -22,6 +22,17 @@
       showAlert('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน');
       return;
     }
+    // ตรวจสอบว่ามี session ซ้อนอยู่หรือไม่
+    const existingUser = localStorage.getItem('user');
+    if (existingUser) {
+      try {
+        const u = JSON.parse(existingUser);
+        if (u?.username && u.username !== username.trim()) {
+          showAlert('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+          return;
+        }
+      } catch {}
+    }
     isLoading = true;
     try {
       const res = await fetch(`${API_URL}/auth/login`, {
@@ -33,7 +44,10 @@
       if (data.error) {
         showAlert(data.error);
       } else if (data.success) {
-        localStorage.setItem('user', JSON.stringify({ ...data.user, loggedInAt: new Date().toISOString() }));
+        // สร้าง session token เพื่อกัน login ซ้อน
+        const sessionToken = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+        localStorage.setItem('user', JSON.stringify({ ...data.user, loggedInAt: new Date().toISOString(), sessionToken }));
+        localStorage.setItem('activeSession', sessionToken);
         if (rememberMe) localStorage.setItem('rememberMe', username);
         else localStorage.removeItem('rememberMe');
         loginSuccess = true;

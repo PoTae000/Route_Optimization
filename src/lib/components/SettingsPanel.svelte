@@ -88,6 +88,7 @@
   function toggleChargingStations() { dispatch('toggleChargingStations'); }
   function loadNearbyChargingStations() { dispatch('loadNearbyChargingStations'); }
   function searchEVAlongRoute() { dispatch('searchEVAlongRoute'); }
+  function searchGasAlongRoute() { dispatch('searchGasAlongRoute'); }
   function clearChargingStations() { dispatch('clearChargingStations'); }
   function exportRouteData() { dispatch('exportRouteData'); }
   function openLogoutConfirm() { show = false; dispatch('logout'); }
@@ -247,24 +248,30 @@
             </div>
           {/if}
 
-          <!-- EV Charging Stations -->
+          <!-- Charging Stations / Gas Stations -->
           <div class="section">
             <div class="section-title-row">
-              <span>⚡ สถานีชาร์จ EV</span>
+              <span>{vehicleType === 'fuel' ? '⛽ ปั๊มน้ำมัน' : '⚡ สถานีชาร์จ EV'}</span>
               <button class="toggle-switch" class:active={showChargingStations} on:click={toggleChargingStations}>
                 <div class="toggle-dot"></div>
               </button>
             </div>
             <div class="ev-actions">
-              <button class="action-btn ev" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
-                {#if isLoadingStations}<div class="spinner-sm"></div>{:else}🔍{/if} ค้นหาใกล้เคียง 100กม.
-              </button>
-              <button class="action-btn ev" on:click={searchEVAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
-                🛣️ ค้นหาตามเส้นทาง
-              </button>
+              {#if vehicleType === 'fuel'}
+                <button class="action-btn ev" on:click={searchGasAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
+                  {#if isLoadingStations}<div class="spinner-sm"></div>{:else}🔍{/if} ค้นหาปั๊มบนเส้นทาง
+                </button>
+              {:else}
+                <button class="action-btn ev" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
+                  {#if isLoadingStations}<div class="spinner-sm"></div>{:else}🔍{/if} ค้นหาใกล้เคียง 100กม.
+                </button>
+                <button class="action-btn ev" on:click={searchEVAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
+                  🛣️ ค้นหาตามเส้นทาง
+                </button>
+              {/if}
               {#if chargingStations.length > 0}
                 <button class="action-btn danger" on:click={clearChargingStations}>
-                  🗑️ ล้างสถานี ({chargingStations.length})
+                  🗑️ ล้าง{vehicleType === 'fuel' ? 'ปั๊ม' : 'สถานี'} ({chargingStations.length})
                 </button>
               {/if}
             </div>

@@ -8,6 +8,12 @@
   export let directDestination = null;
   export let getUserKey = (key) => key;
 
+  // Start Point Search props
+  export let showStartPointPicker = false;
+  export let startPointSearchQuery = '';
+  export let isSearchingStartPoint = false;
+  export let startPointResults = [];
+
   // Internal state
   let searchQuery = '';
   let searchResults = [];
@@ -126,6 +132,46 @@
 
 {#if !isNavigating}
   <div class="map-search-float glass-card">
+    {#if showStartPointPicker}
+      <div class="start-point-section">
+        <div class="start-section-header">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="#00ff88" stroke="none"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>
+          <span>จุดเริ่มต้น</span>
+          <button class="start-section-close" on:click={() => dispatch('closeStartPointSearch')}>✕</button>
+        </div>
+        <div class="start-input-wrapper">
+          <svg class="start-search-icon" viewBox="0 0 24 24" width="16" height="16" fill="#00ff88" stroke="none"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+          <input
+            type="text"
+            class="start-input"
+            placeholder="ค้นหาจุดเริ่มต้น..."
+            bind:value={startPointSearchQuery}
+            on:input={() => dispatch('startPointInput', startPointSearchQuery)}
+          />
+          {#if startPointSearchQuery}
+            <button class="start-clear-btn" on:click={() => { startPointSearchQuery = ''; startPointResults = []; dispatch('startPointInput', ''); }}>×</button>
+          {/if}
+          <button class="start-reload-btn" on:click={() => { if (startPointSearchQuery.trim()) dispatch('startPointInput', startPointSearchQuery); }} title="ค้นหาใหม่">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+          </button>
+        </div>
+        {#if isSearchingStartPoint}
+          <div class="start-loading">กำลังค้นหา...</div>
+        {/if}
+        {#if startPointResults.length > 0}
+          <div class="start-result-list">
+            {#each startPointResults as result}
+              <button class="search-result-item" on:click={() => dispatch('selectStartPoint', result)}>
+                <span class="result-icon" style="color:#00ff88">📍</span>
+                <div class="result-info">
+                  <span class="result-name">{result.name}</span>
+                </div>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     <div class="search-input-wrapper">
       <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
       <input
@@ -179,7 +225,7 @@
           <span class="dest-icon">📍</span>
           <span class="dest-name">{directDestination.name}</span>
         </div>
-        <button class="btn btn-navigate-direct" on:click={() => dispatch('navigate')}>
+        <button class="btn btn-navigate-direct" on:click={() => { searchQuery = ''; searchResults = []; showSearchResults = false; dispatch('navigate'); }}>
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
           ปักหมุด
         </button>
@@ -365,6 +411,59 @@
   .recent-clear-btn:hover {
     background: rgba(239, 68, 68, 0.15);
   }
+
+  /* Start Point Search Section */
+  .start-point-section {
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding: 0 0 8px;
+    margin-bottom: 8px;
+  }
+  .start-section-header {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: #00ff88; font-weight: 500;
+    margin-bottom: 6px; padding: 0 2px;
+  }
+  .start-section-close {
+    background: none; border: none; color: #a1a1aa;
+    cursor: pointer; margin-left: auto; font-size: 14px;
+    padding: 2px 4px; font-family: inherit; line-height: 1;
+  }
+  .start-section-close:hover { color: #ef4444; }
+  .start-input-wrapper {
+    position: relative; display: flex; align-items: center;
+  }
+  .start-search-icon {
+    position: absolute; left: 10px; pointer-events: none; z-index: 1;
+  }
+  .start-input {
+    width: 100%; padding: 10px 60px 10px 34px; font-size: 13px;
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 10px;
+    background: rgba(0, 0, 0, 0.4); color: #e4e4e7;
+    outline: none; font-family: 'Kanit', sans-serif;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+  }
+  .start-input:focus {
+    border-color: #00ff88;
+    background: rgba(0, 0, 0, 0.55);
+    box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1), 0 4px 20px rgba(0, 255, 136, 0.08);
+  }
+  .start-input::placeholder { color: #52525b; }
+  .start-clear-btn {
+    position: absolute; right: 30px;
+    background: none; border: none; color: #71717a;
+    font-size: 18px; cursor: pointer; padding: 2px 4px;
+    font-family: inherit; line-height: 1;
+  }
+  .start-clear-btn:hover { color: #e4e4e7; }
+  .start-reload-btn {
+    position: absolute; right: 8px;
+    background: none; border: none; color: #52525b;
+    cursor: pointer; padding: 3px;
+    border-radius: 6px; transition: all 0.2s; display: flex; align-items: center;
+  }
+  .start-reload-btn:hover { color: #00ff88; background: rgba(0,255,136,0.1); }
+  .start-loading { padding: 6px 4px; font-size: 12px; color: #a1a1aa; }
+  .start-result-list { margin-top: 4px; max-height: 180px; overflow-y: auto; }
 
   /* Glass Card base */
   :global(.glass-card) {
