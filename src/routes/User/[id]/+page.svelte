@@ -6862,41 +6862,42 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.svg({ padding: 5.0 }),  // SVG renderer — ไม่มี memory limit, เส้นไม่ขาดตอนเลื่อน
+        renderer: L.svg({ padding: 5.0 }),
         zoomSnap: 1,
-        wheelDebounceTime: 80,
-        minZoom: 2,  // Allow zoom out for globe view
-        maxZoom: 19,
+        wheelDebounceTime: 40,
+        minZoom: 2,
+        maxZoom: 18,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 1.0,
         fadeAnimation: false,
-        zoomAnimation: true,
-        markerZoomAnimation: true
+        zoomAnimation: false,
+        markerZoomAnimation: false
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layers — OSM ═══
+      // ═══ Tile Layers — OSM + detectRetina (คมชัดบนจอ HiDPI) ═══
       // Layer 1: Safety — zoom ต่ำยืดเต็มจอ (ไม่มีเทาว่าง)
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         subdomains: 'abc',
         maxNativeZoom: 4,
-        maxZoom: 19,
+        maxZoom: 18,
         keepBuffer: 50,
         updateWhenZooming: false,
         updateWhenIdle: true,
         className: 'safety-tiles'
       }).addTo(map);
 
-      // Layer 2: Main — โหลดระหว่างเลื่อนด้วย
+      // Layer 2: Main — detectRetina โหลด tile zoom+1 แล้วย่อ = คม 2 เท่า
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 19,
+        maxZoom: 18,
         keepBuffer: 20,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 0,
+        detectRetina: true,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -9925,12 +9926,12 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.95) contrast(1.1); background: #e5e5e0; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.5) brightness(0.95) contrast(1.25); background: #e5e5e0; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { transition: none; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
-  :global(.leaflet-tile) { transition: none !important; image-rendering: -webkit-optimize-contrast; }
+  :global(.main-tiles) { transition: none; image-rendering: high-quality; }
+  :global(.leaflet-tile) { transition: none !important; image-rendering: high-quality; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
