@@ -5193,6 +5193,10 @@
       const bearing = (map as any).getBearing?.() || 0;
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
+      // Force redraw vector layers (routes) หลัง rotate
+      map.eachLayer((layer: any) => {
+        if (layer.redraw) layer.redraw();
+      });
     });
   }
 
@@ -6876,13 +6880,15 @@ out center body;`;
         );
       });
 
-      const [leafletModule, , , userPos] = await Promise.all([
+      const [leafletModule, , userPos] = await Promise.all([
         import('leaflet'),
         import('leaflet/dist/leaflet.css'),
-        import('leaflet-rotate'),
         gpsPromise
       ]);
       L = leafletModule;
+      // leaflet-rotate ต้องการ global L — patch ก่อน import
+      (window as any).L = L;
+      await import('leaflet-rotate');
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -6892,7 +6898,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.svg({ padding: 5.0 }),
+        renderer: L.canvas({ padding: 5.0 }),
         zoomSnap: 1,
         zoomDelta: 1,
         wheelDebounceTime: 40,
