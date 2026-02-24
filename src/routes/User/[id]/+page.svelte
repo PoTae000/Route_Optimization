@@ -514,9 +514,15 @@
   let globeError = '';
   let globeViewLabel = '';
 
-  // Camera Tilt (perspective view)
-  let mapTilt = 0; // 0 = flat, 45 = tilted
-  let mapTiltEnabled = false;
+  // Camera 3D (perspective tilt + rotation via two-finger gesture)
+  let camTilt = 0;     // rotateX degrees (0-60)
+  let camBearing = 0;  // rotateZ degrees (0-360)
+  let camActive = false;
+  let _camTouchStartAngle = 0;
+  let _camTouchStartDist = 0;
+  let _camTiltStart = 0;
+  let _camBearingStart = 0;
+  let _camGesturing = false;
 
   // Traffic
   let showTraffic = false;
@@ -5171,34 +5177,87 @@
   }
 
 
-  function toggleMapTilt() {
-    mapTiltEnabled = !mapTiltEnabled;
-    mapTilt = mapTiltEnabled ? 45 : 0;
+  // ═══ Camera 3D — Two-finger rotate/tilt ═══
+  function applyCamTransform(animate = false) {
     const mapEl = document.getElementById('map');
-    if (mapEl) {
-      if (mapTiltEnabled) {
-        mapEl.style.perspective = '1200px';
-        mapEl.style.perspectiveOrigin = '50% 50%';
-        const inner = mapEl.querySelector('.leaflet-map-pane') as HTMLElement;
-        if (inner) {
-          inner.style.transformOrigin = '50% 100%';
-          inner.style.transform = `rotateX(${mapTilt}deg)`;
-          inner.style.transition = 'transform 0.5s ease';
-        }
-      } else {
-        mapEl.style.perspective = '';
-        mapEl.style.perspectiveOrigin = '';
-        const inner = mapEl.querySelector('.leaflet-map-pane') as HTMLElement;
-        if (inner) {
-          inner.style.transformOrigin = '';
-          inner.style.transform = '';
-          inner.style.transition = 'transform 0.5s ease';
-          setTimeout(() => { inner.style.transition = ''; }, 600);
-        }
-      }
-      // Leaflet needs to recalculate after transform
-      setTimeout(() => map?.invalidateSize(), 550);
+    if (!mapEl) return;
+    const isFlat = camTilt === 0 && camBearing === 0;
+    camActive = !isFlat;
+    if (isFlat) {
+      mapEl.style.perspective = '';
+      mapEl.style.perspectiveOrigin = '';
+      mapEl.style.transform = animate ? 'perspective(1200px) rotateX(0deg) rotateZ(0deg)' : '';
+      mapEl.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
+      mapEl.style.transformOrigin = '';
+      if (animate) setTimeout(() => { mapEl.style.transform = ''; mapEl.style.transition = ''; }, 550);
+    } else {
+      mapEl.style.perspective = '1200px';
+      mapEl.style.perspectiveOrigin = '50% 60%';
+      mapEl.style.transformOrigin = '50% 50%';
+      mapEl.style.transform = `rotateX(${camTilt}deg) rotateZ(${-camBearing}deg)`;
+      mapEl.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
+      if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 450);
     }
+  }
+
+  function resetCamView() {
+    camTilt = 0;
+    camBearing = 0;
+    applyCamTransform(true);
+  }
+
+  function setupCamGesture() {
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
+
+    function getAngle(t1: Touch, t2: Touch) {
+      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * (180 / Math.PI);
+    }
+    function getDist(t1: Touch, t2: Touch) {
+      const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+    function getMidY(t1: Touch, t2: Touch) {
+      return (t1.clientY + t2.clientY) / 2;
+    }
+
+    let _startMidY = 0;
+
+    mapEl.addEventListener('touchstart', (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        _camGesturing = true;
+        _camTouchStartAngle = getAngle(e.touches[0], e.touches[1]);
+        _camTouchStartDist = getDist(e.touches[0], e.touches[1]);
+        _camTiltStart = camTilt;
+        _camBearingStart = camBearing;
+        _startMidY = getMidY(e.touches[0], e.touches[1]);
+      }
+    }, { passive: true });
+
+    mapEl.addEventListener('touchmove', (e: TouchEvent) => {
+      if (!_camGesturing || e.touches.length !== 2) return;
+      const curAngle = getAngle(e.touches[0], e.touches[1]);
+      const curMidY = getMidY(e.touches[0], e.touches[1]);
+
+      // Rotation (bearing) — angle delta between two fingers
+      let angleDelta = curAngle - _camTouchStartAngle;
+      // Normalize to -180..180
+      if (angleDelta > 180) angleDelta -= 360;
+      if (angleDelta < -180) angleDelta += 360;
+      camBearing = ((_camBearingStart + angleDelta) % 360 + 360) % 360;
+
+      // Tilt — vertical movement of midpoint between fingers
+      const midYDelta = _startMidY - curMidY; // up = positive = more tilt
+      camTilt = Math.max(0, Math.min(60, _camTiltStart + midYDelta * 0.3));
+
+      applyCamTransform(false);
+    }, { passive: true });
+
+    mapEl.addEventListener('touchend', (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        _camGesturing = false;
+      }
+    }, { passive: true });
   }
 
   function centerOnCurrentLocation() {
@@ -6902,7 +6961,7 @@ out center body;`;
         wheelDebounceTime: 40,
         wheelPxPerZoomLevel: 80,
         minZoom: 2,
-        maxZoom: 18,
+        maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 0.8,
@@ -6915,19 +6974,16 @@ out center body;`;
         easeLinearity: 0.25
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM + detectRetina (คมชัด 2x บนจอ HiDPI) ═══
-      // maxZoom 18 + detectRetina → ขอ tile zoom 19 สูงสุด (OSM มีถึง 19)
+      // ═══ Tile Layer — OSM ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 18,
-        tileSize: 256,
+        maxZoom: 19,
         keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 150,
-        detectRetina: true,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -6935,6 +6991,9 @@ out center body;`;
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
       map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 800); });
       setTimeout(() => prefetchTiles(map), 500);
+
+      // ═══ Camera 3D gesture — two-finger rotate/tilt ═══
+      setupCamGesture();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -8041,12 +8100,19 @@ out center body;`;
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
     {/if}
 
-    <!-- My Location + Camera Tilt Buttons (bottom-right) -->
+    <!-- My Location + Camera Reset Buttons (bottom-right) -->
     {#if !isNavigating && !globeMode}
       <div class="map-right-btns">
-        <button class="map-tilt-btn" class:active={mapTiltEnabled} on:click={toggleMapTilt} title={mapTiltEnabled ? 'มุมมองปกติ' : 'มุมกล้อง 3D'}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 20L12 4l10 16"/><path d="M6 16h12" stroke-opacity="0.5"/></svg>
-        </button>
+        {#if camActive}
+          <button class="map-cam-btn active" on:click={resetCamView} title="รีเซ็ตมุมกล้อง">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform: rotate({-camBearing}deg)">
+              <circle cx="12" cy="12" r="9"/>
+              <path d="M12 3v4" stroke-width="3" stroke="#60a5fa"/>
+              <circle cx="12" cy="12" r="2" fill="currentColor"/>
+            </svg>
+            <span class="cam-label">{Math.round(camTilt)}°</span>
+          </button>
+        {/if}
         <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
         </button>
@@ -10094,24 +10160,30 @@ out center body;`;
   :global(.leaflet-control-zoom-in) { border-radius: 10px 10px 0 0 !important; }
   :global(.leaflet-control-zoom-out) { border-radius: 0 0 10px 10px !important; }
 
-  /* Right side map buttons — tilt + my location */
+  /* Right side map buttons — camera + my location */
   .map-right-btns {
     position: absolute; bottom: 110px; right: 10px; z-index: 1001;
     display: flex; flex-direction: column; gap: 8px;
   }
-  .map-myloc-btn, .map-tilt-btn {
+  .map-myloc-btn, .map-cam-btn {
     width: 40px; height: 40px; border-radius: 12px;
     background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255,255,255,0.08);
     color: #a1a1aa; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 4px 24px rgba(0,0,0,0.35);
     transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.15s;
+    position: relative;
   }
-  .map-myloc-btn svg, .map-tilt-btn svg { width: 20px; height: 20px; }
+  .map-myloc-btn svg, .map-cam-btn svg { width: 22px; height: 22px; }
   .map-myloc-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
-  .map-myloc-btn:active, .map-tilt-btn:active { transform: scale(0.92); }
-  .map-tilt-btn:hover { background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.3); color: #60a5fa; }
-  .map-tilt-btn.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: #60a5fa; }
+  .map-myloc-btn:active, .map-cam-btn:active { transform: scale(0.92); }
+  .map-cam-btn.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: #60a5fa; }
+  .map-cam-btn:hover { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.5); color: #60a5fa; }
+  .cam-label {
+    position: absolute; bottom: -16px; left: 50%; transform: translateX(-50%);
+    font-size: 9px; font-weight: 600; color: #60a5fa; white-space: nowrap;
+    font-family: 'JetBrains Mono', monospace;
+  }
 
   :global(.marker-pin) {
     width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
