@@ -514,12 +514,9 @@
   let globeError = '';
   let globeViewLabel = '';
 
-  // Camera rotation (หมุนมุมกล้องรอบตัวเอง — แผนที่อยู่นิ่ง)
-  let camAngle = 0;      // องศาหมุน (0-360)
+  // Camera rotation (leaflet-rotate — สองนิ้วหมุน)
+  let camAngle = 0;
   let camActive = false;
-  let _camGesturing = false;
-  let _camStartAngle = 0;
-  let _camAngleStart = 0;
 
   // Traffic
   let showTraffic = false;
@@ -5180,72 +5177,23 @@
   }
 
 
-  // ═══ Camera rotation — หมุนมุมมอง (wrapper หมุน, map อยู่นิ่ง) ═══
-  function applyCamTransform(animate = false) {
-    const wrapper = document.querySelector('.cam-wrapper') as HTMLElement;
-    if (!wrapper) return;
-    const isFlat = Math.abs(camAngle % 360) < 0.5;
-    camActive = !isFlat;
-    if (isFlat) {
-      camAngle = 0;
-      wrapper.style.transform = '';
-      wrapper.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
-      if (animate) setTimeout(() => { wrapper.style.transition = ''; }, 550);
-    } else {
-      // Scale ชดเชยมุมที่ rotateZ ทำให้ขอบหลุด — ขยายให้ใหญ่กว่าจอ
-      const rad = (camAngle % 360) * Math.PI / 180;
-      const s = Math.abs(Math.cos(rad)) + Math.abs(Math.sin(rad)); // 1.0 ที่ 0°, ~1.414 ที่ 45°
-      wrapper.style.transformOrigin = '50% 50%';
-      wrapper.style.transform = `rotate(${camAngle}deg) scale(${s.toFixed(4)})`;
-      wrapper.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
-      if (animate) setTimeout(() => { wrapper.style.transition = ''; }, 450);
-    }
-  }
-
+  // ═══ Camera rotation — leaflet-rotate จัดการทั้งหมด ═══
   function resetCamView() {
+    if (map && (map as any).setBearing) {
+      (map as any).setBearing(0);
+    }
     camAngle = 0;
-    applyCamTransform(true);
+    camActive = false;
   }
 
-  function setupCamGesture() {
-    const mapEl = document.getElementById('map');
-    if (!mapEl) return;
-
-    // จับมุมระหว่างสองนิ้ว — หมุนตามเข็ม = หมุนขวา, ทวนเข็ม = หมุนซ้าย
-    function twoFingerAngle(t1: Touch, t2: Touch) {
-      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * 180 / Math.PI;
-    }
-
-    // ใช้ capture phase ดักก่อน Leaflet
-    mapEl.addEventListener('touchstart', (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        _camGesturing = true;
-        _camStartAngle = twoFingerAngle(e.touches[0], e.touches[1]);
-        _camAngleStart = camAngle;
-      }
-    }, { passive: true, capture: true });
-
-    mapEl.addEventListener('touchmove', (e: TouchEvent) => {
-      if (!_camGesturing || e.touches.length !== 2) return;
-      const cur = twoFingerAngle(e.touches[0], e.touches[1]);
-      let delta = cur - _camStartAngle;
-      // normalize -180..180
-      if (delta > 180) delta -= 360;
-      if (delta < -180) delta += 360;
-      // threshold — ต้องหมุนนิ้วจริงๆ ไม่ใช่แค่ pinch zoom
-      if (Math.abs(delta) > 2) {
-        camAngle = _camAngleStart + delta;
-        applyCamTransform(false);
-      }
-    }, { passive: true, capture: true });
-
-    mapEl.addEventListener('touchend', () => {
-      _camGesturing = false;
-    }, { passive: true, capture: true });
-
-    mapEl.addEventListener('touchcancel', () => {
-      _camGesturing = false;
-    }, { passive: true, capture: true });
+  function setupCamRotateListener() {
+    if (!map) return;
+    // leaflet-rotate fires 'rotate' event เมื่อ bearing เปลี่ยน
+    map.on('rotate' as any, () => {
+      const bearing = (map as any).getBearing?.() || 0;
+      camAngle = bearing;
+      camActive = Math.abs(bearing) > 0.5;
+    });
   }
 
   function centerOnCurrentLocation() {
@@ -6928,9 +6876,10 @@ out center body;`;
         );
       });
 
-      const [leafletModule, , userPos] = await Promise.all([
+      const [leafletModule, , , userPos] = await Promise.all([
         import('leaflet'),
         import('leaflet/dist/leaflet.css'),
+        import('leaflet-rotate'),
         gpsPromise
       ]);
       L = leafletModule;
@@ -6959,8 +6908,13 @@ out center body;`;
         inertia: true,
         inertiaDeceleration: 3000,
         inertiaMaxSpeed: 2000,
-        easeLinearity: 0.25
-      }).setView([initLat, initLng], initZoom);
+        easeLinearity: 0.25,
+        // leaflet-rotate — สองนิ้วหมุนแผนที่
+        rotate: true,
+        touchRotate: true,
+        rotateControl: false,
+        bearing: 0
+      } as any).setView([initLat, initLng], initZoom);
 
       // ═══ Tile Layer — OSM ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -6980,8 +6934,8 @@ out center body;`;
       map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 800); });
       setTimeout(() => prefetchTiles(map), 500);
 
-      // ═══ Camera 3D gesture — two-finger rotate/tilt ═══
-      setupCamGesture();
+      // ═══ Camera rotation listener (leaflet-rotate) ═══
+      setupCamRotateListener();
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -8026,9 +7980,7 @@ out center body;`;
   {/if}
 
   <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm} class:globe-mode={globeMode}>
-    <div class="cam-wrapper">
-      <div id="map"></div>
-    </div>
+    <div id="map"></div>
     <!-- Three.js 3D Globe -->
     <!-- Three.js 3D Globe -->
     <div id="globe-container" class:active={globeMode}>
@@ -9893,7 +9845,6 @@ out center body;`;
   .nav-btn-share { background: rgba(59, 130, 246, 0.15); color: #60a5fa; flex: 0 0 auto; width: 44px; border: 1px solid rgba(59, 130, 246, 0.2); }
   .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
   .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
-  .cam-wrapper { width: 100%; height: 100%; position: relative; }
   .map-container.fullscreen { width: 100vw; }
   .map-container.settings-open > *:not(#map) { display: none !important; }
   .map-container.addform-open > *:not(#map) { display: none !important; }
