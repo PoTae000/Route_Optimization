@@ -714,34 +714,11 @@
         globeEarth.material.needsUpdate = true;
       }
 
-      // Progressive loading: zoom 2 ก่อน (16 tiles, เร็ว) แล้ว zoom 4 ตาม (ชัด)
-      loadGlobeTexture(THREE, 2).then((lowTex) => {
+      // Progressive loading: zoom 1 ก่อน (4 tiles, ทันที) แล้ว zoom 3 ตาม (ชัด)
+      loadGlobeTexture(THREE, 1).then((lowTex) => {
         applyEarthTexture(lowTex);
-        // เมฆ
-        if (globeClouds) {
-          try {
-            const cw = 512, ch = 256;
-            const cCanvas = document.createElement('canvas');
-            cCanvas.width = cw; cCanvas.height = ch;
-            const cCtx = cCanvas.getContext('2d')!;
-            const cData = cCtx.createImageData(cw, ch);
-            for (let i = 0; i < cData.data.length; i += 4) {
-              const v = Math.random() * 255;
-              cData.data[i] = cData.data[i+1] = cData.data[i+2] = 255;
-              cData.data[i+3] = v < 200 ? 0 : Math.floor((v - 200) * 4.6);
-            }
-            cCtx.putImageData(cData, 0, 0);
-            cCtx.filter = 'blur(6px)';
-            cCtx.drawImage(cCanvas, 0, 0);
-            cCtx.filter = 'none';
-            const cloudTex = new THREE.CanvasTexture(cCanvas);
-            globeClouds.material.alphaMap = cloudTex;
-            globeClouds.material.opacity = 0.18;
-            globeClouds.material.needsUpdate = true;
-          } catch(_) {}
-        }
-        // โหลด HD texture ตามทีหลัง
-        loadGlobeTexture(THREE, 4).then((hdTex) => {
+        // โหลด HD texture ตามทีหลัง (zoom 3 = 64 tiles, เร็วกว่า zoom 4 มาก)
+        loadGlobeTexture(THREE, 3).then((hdTex) => {
           applyEarthTexture(hdTex);
         }).catch(() => {});
       }).catch((e: any) => console.error('[Globe] Texture load error:', e));
@@ -792,30 +769,31 @@
       const n = Math.pow(2, zoom);
       const tileSize = 256;
       const merc = document.createElement('canvas');
-      merc.width = n * tileSize; // 4096
+      merc.width = n * tileSize;
       merc.height = n * tileSize;
       const ctx = merc.getContext('2d')!;
       ctx.fillStyle = '#1d1f20';
       ctx.fillRect(0, 0, merc.width, merc.height);
 
+      // Load tiles in batches of 8 for controlled concurrency
       const subs = 'abcd';
-      const promises: Promise<void>[] = [];
+      const tiles: { tx: number; ty: number }[] = [];
       for (let ty = 0; ty < n; ty++) {
-        for (let tx = 0; tx < n; tx++) {
-          const s = subs[(tx + ty) % 4];
-          const url = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
-          promises.push(new Promise<void>(resolve => {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => { ctx.drawImage(img, tx * tileSize, ty * tileSize); resolve(); };
-            img.onerror = () => resolve();
-            img.src = url;
-          }));
-        }
+        for (let tx = 0; tx < n; tx++) tiles.push({ tx, ty });
       }
-      await Promise.allSettled(promises);
+      const BATCH = 8;
+      for (let i = 0; i < tiles.length; i += BATCH) {
+        const batch = tiles.slice(i, i + BATCH);
+        await Promise.allSettled(batch.map(({ tx, ty }) => new Promise<void>(resolve => {
+          const s = subs[(tx + ty) % 4];
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => { ctx.drawImage(img, tx * tileSize, ty * tileSize); resolve(); };
+          img.onerror = () => resolve();
+          img.src = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
+        })));
+      }
 
-      // Convert Mercator → Equirectangular for proper sphere mapping
       const eq = mercatorToEquirect(merc);
       const texture = new THREE.CanvasTexture(eq);
       texture.colorSpace = THREE.SRGBColorSpace;
@@ -839,23 +817,25 @@
     out.width = outW; out.height = outH;
     const outCtx = out.getContext('2d')!;
     const outData = outCtx.createImageData(outW, outH);
+    // Uint32Array for 4x faster pixel copy
+    const srcU32 = new Uint32Array(srcData.data.buffer);
+    const outU32 = new Uint32Array(outData.data.buffer);
     const MAX_LAT = 85.05112878 * Math.PI / 180;
     const maxMercY = Math.log(Math.tan(Math.PI / 4 + MAX_LAT / 2));
+    // Pre-compute srcY lookup per row
     for (let oy = 0; oy < outH; oy++) {
       const lat = (0.5 - oy / outH) * Math.PI;
       const clamped = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat));
       const mercY = Math.log(Math.tan(Math.PI / 4 + clamped / 2));
-      const srcYNorm = 0.5 - mercY / (2 * maxMercY);
-      const srcY = Math.min(srcH - 1, Math.max(0, Math.round(srcYNorm * srcH)));
-      for (let ox = 0; ox < outW; ox++) {
-        const si = (srcY * srcW + ox) * 4;
-        const di = (oy * outW + ox) * 4;
-        outData.data[di] = srcData.data[si];
-        outData.data[di + 1] = srcData.data[si + 1];
-        outData.data[di + 2] = srcData.data[si + 2];
-        outData.data[di + 3] = 255;
-      }
+      const srcY = Math.min(srcH - 1, Math.max(0, Math.round((0.5 - mercY / (2 * maxMercY)) * srcH)));
+      const srcRow = srcY * srcW;
+      const outRow = oy * outW;
+      // Copy entire row at once (same x mapping)
+      outU32.set(srcU32.subarray(srcRow, srcRow + outW), outRow);
     }
+    // Set alpha to 255 for all pixels
+    const outBytes = outData.data;
+    for (let i = 3; i < outBytes.length; i += 4) outBytes[i] = 255;
     outCtx.putImageData(outData, 0, 0);
     return out;
   }
