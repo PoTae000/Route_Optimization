@@ -6771,6 +6771,11 @@ out center body;`;
 
   // ==================== onMount - เปลี่ยน redirect path ====================
   onMount(async () => {
+    // Register tile cache Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/tile-sw.js').catch(() => {});
+    }
+
     const userStr = localStorage.getItem('user');
     if (!userStr) { goto('/'); return; }
     try {
@@ -9923,7 +9928,7 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.88) contrast(1.15); background: #e5e5e0; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.95) contrast(1.1); background: #e5e5e0; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
