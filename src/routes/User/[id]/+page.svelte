@@ -507,6 +507,7 @@
   let globeCamera: any = null;
   let globeControls: any = null;
   let globeEarth: any = null;
+  let globeClouds: any = null;
   let globeUserMarker: any = null;
   let globeUserPulse: any = null;
   let globeAnimId = 0;
@@ -615,57 +616,157 @@
       camera.position.set(0, isMobile ? 0.15 : 0.3, camZ);
       globeCamera = camera;
 
-      // Renderer
+      // Renderer — tone mapping for realistic HDR feel
       const renderer: any = new THREE.WebGLRenderer({ antialias: true, alpha: false });
       renderer.setSize(w, h);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setClearColor(0x000005, 1);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — bright enough to see map details
-      scene.add(new THREE.AmbientLight(0x8899bb, 5.0));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 2.5);
-      sun.position.set(5, 3, 5);
+      // === LIGHTING — 3-point setup for realistic depth ===
+      // Ambient: dim blue for space feel
+      scene.add(new THREE.AmbientLight(0x334466, 1.5));
+      // Sun: main key light — warm white from upper-right
+      const sun: any = new THREE.DirectionalLight(0xfff4e0, 4.0);
+      sun.position.set(5, 3, 4);
       scene.add(sun);
-      const fill: any = new THREE.DirectionalLight(0x6688cc, 1.2);
-      fill.position.set(-4, -2, -3);
+      // Fill: cool blue from opposite side — subtle shadow fill
+      const fill: any = new THREE.DirectionalLight(0x4488cc, 1.0);
+      fill.position.set(-5, -1, -3);
       scene.add(fill);
+      // Rim light: backlight for 3D edge definition
+      const rim: any = new THREE.DirectionalLight(0x88aaff, 1.5);
+      rim.position.set(-3, 2, -5);
+      scene.add(rim);
 
-      // Stars background
+      // === STARS — multi-size with brightness variation ===
       const starsGeo = new THREE.BufferGeometry();
       const starPos: number[] = [];
-      for (let i = 0; i < 3000; i++) {
-        const r = 40 + Math.random() * 60;
+      const starSizes: number[] = [];
+      const starColors: number[] = [];
+      for (let i = 0; i < 6000; i++) {
+        const r = 30 + Math.random() * 70;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         starPos.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+        // ดาวส่วนใหญ่เล็ก, บางดวงใหญ่สว่าง
+        const bright = Math.random();
+        starSizes.push(bright < 0.95 ? 0.06 + Math.random() * 0.08 : 0.2 + Math.random() * 0.25);
+        // สีดาว: ขาว, ฟ้าอ่อน, เหลืองอ่อน
+        const temp = Math.random();
+        if (temp < 0.6) { starColors.push(1, 1, 1); }
+        else if (temp < 0.8) { starColors.push(0.7, 0.85, 1.0); }
+        else { starColors.push(1.0, 0.95, 0.8); }
       }
       starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
-      scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, sizeAttenuation: true })) as any);
+      starsGeo.setAttribute('size', new THREE.Float32BufferAttribute(starSizes, 1));
+      starsGeo.setAttribute('color', new THREE.Float32BufferAttribute(starColors, 3));
+      const starMat = new THREE.PointsMaterial({
+        size: 0.12, sizeAttenuation: true, vertexColors: true,
+        transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      scene.add(new THREE.Points(starsGeo, starMat) as any);
 
-      // Earth sphere (dark placeholder → real texture loaded async)
-      const earthGeo = new THREE.SphereGeometry(1, 64, 64);
+      // === EARTH — high-detail sphere with realistic material ===
+      const earthGeo = new THREE.SphereGeometry(1, 96, 96);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
-        specular: new THREE.Color(0x111122),
-        shininess: 8
+        specular: new THREE.Color(0x446688),
+        shininess: 25, // specular highlight on oceans
+        emissive: new THREE.Color(0x050510),
+        emissiveIntensity: 0.3
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
       scene.add(earth);
       globeEarth = earth;
 
-      // Atmosphere glow (backside larger sphere)
-      const atmosGeo = new THREE.SphereGeometry(1.02, 64, 64);
-      const atmosMat = new THREE.ShaderMaterial({
-        vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.6) * i; }`,
+      // === CLOUDS — semi-transparent rotating layer ===
+      const cloudGeo = new THREE.SphereGeometry(1.008, 64, 64);
+      const cloudMat = new THREE.MeshPhongMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.0, // จะค่อยๆ เพิ่มเมื่อโหลด texture
+        depthWrite: false,
+        side: THREE.FrontSide
+      });
+      globeClouds = new THREE.Mesh(cloudGeo, cloudMat);
+      scene.add(globeClouds);
+
+      // === ATMOSPHERE — 3-layer glow for realistic depth ===
+      // Layer 1: Inner atmosphere (tight glow on edge)
+      const atmos1Geo = new THREE.SphereGeometry(1.01, 64, 64);
+      const atmos1Mat = new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vNormal;
+          varying vec3 vPosition;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vNormal;
+          varying vec3 vPosition;
+          void main() {
+            float rim = 1.0 - max(0.0, dot(vNormal, vec3(0.0, 0.0, 1.0)));
+            float glow = pow(rim, 3.0) * 1.2;
+            vec3 col = mix(vec3(0.2, 0.5, 1.0), vec3(0.4, 0.8, 1.0), rim);
+            gl_FragColor = vec4(col, glow * 0.6);
+          }`,
+        side: THREE.FrontSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false
+      });
+      scene.add(new THREE.Mesh(atmos1Geo, atmos1Mat) as any);
+
+      // Layer 2: Outer atmosphere halo (wide soft glow)
+      const atmos2Geo = new THREE.SphereGeometry(1.15, 64, 64);
+      const atmos2Mat = new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vNormal;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vNormal;
+          void main() {
+            float i = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.5);
+            gl_FragColor = vec4(0.3, 0.6, 1.0, 0.35) * i;
+          }`,
         side: THREE.BackSide,
         blending: THREE.AdditiveBlending,
         transparent: true,
         depthWrite: false
       });
-      scene.add(new THREE.Mesh(atmosGeo, atmosMat) as any);
+      scene.add(new THREE.Mesh(atmos2Geo, atmos2Mat) as any);
+
+      // Layer 3: Fresnel rim — bright blue edge for spherical definition
+      const atmos3Geo = new THREE.SphereGeometry(1.005, 64, 64);
+      const atmos3Mat = new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vNormal;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vNormal;
+          void main() {
+            float rim = 1.0 - max(0.0, dot(vNormal, vec3(0.0, 0.0, 1.0)));
+            float edge = pow(rim, 5.0) * 2.0;
+            gl_FragColor = vec4(0.4, 0.7, 1.0, edge * 0.8);
+          }`,
+        side: THREE.FrontSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false
+      });
+      scene.add(new THREE.Mesh(atmos3Geo, atmos3Mat) as any);
 
       // OrbitControls (drag to rotate globe)
       const controls = new OrbitControls(camera, renderer.domElement as HTMLElement);
@@ -713,8 +814,55 @@
         if (tex && globeEarth) {
           globeEarth.material.map = tex;
           globeEarth.material.color.set(0xffffff);
+          globeEarth.material.specular.set(0x446688);
+          globeEarth.material.shininess = 30;
           globeEarth.material.needsUpdate = true;
-          console.log('[Globe] Earth texture loaded');
+          // สร้าง specular map จาก texture — น้ำ (สีเข้ม) สะท้อนแสง, แผ่นดิน (สีสว่าง) ด้าน
+          try {
+            const specCanvas = document.createElement('canvas');
+            const texImg = tex.image;
+            specCanvas.width = texImg.width;
+            specCanvas.height = texImg.height;
+            const sCtx = specCanvas.getContext('2d')!;
+            sCtx.drawImage(texImg, 0, 0);
+            const sData = sCtx.getImageData(0, 0, specCanvas.width, specCanvas.height);
+            for (let i = 0; i < sData.data.length; i += 4) {
+              // พื้นที่มืด (น้ำ) → specular สูง, พื้นที่สว่าง (แผ่นดิน) → specular ต่ำ
+              const brightness = (sData.data[i] + sData.data[i+1] + sData.data[i+2]) / 3;
+              const spec = Math.max(0, 180 - brightness * 2);
+              sData.data[i] = sData.data[i+1] = sData.data[i+2] = spec;
+            }
+            sCtx.putImageData(sData, 0, 0);
+            const specTex = new THREE.CanvasTexture(specCanvas);
+            globeEarth.material.specularMap = specTex;
+            globeEarth.material.needsUpdate = true;
+          } catch(_) {}
+          // เมฆ — procedural cloud texture
+          if (globeClouds) {
+            try {
+              const cw = 512, ch = 256;
+              const cCanvas = document.createElement('canvas');
+              cCanvas.width = cw; cCanvas.height = ch;
+              const cCtx = cCanvas.getContext('2d')!;
+              // สร้างเมฆแบบ random noise blurred
+              const cData = cCtx.createImageData(cw, ch);
+              for (let i = 0; i < cData.data.length; i += 4) {
+                const v = Math.random() * 255;
+                cData.data[i] = cData.data[i+1] = cData.data[i+2] = 255;
+                cData.data[i+3] = v < 200 ? 0 : Math.floor((v - 200) * 4.6);
+              }
+              cCtx.putImageData(cData, 0, 0);
+              // Blur เพื่อให้เมฆดูนุ่ม
+              cCtx.filter = 'blur(6px)';
+              cCtx.drawImage(cCanvas, 0, 0);
+              cCtx.filter = 'none';
+              const cloudTex = new THREE.CanvasTexture(cCanvas);
+              globeClouds.material.alphaMap = cloudTex;
+              globeClouds.material.opacity = 0.18;
+              globeClouds.material.needsUpdate = true;
+            } catch(_) {}
+          }
+          console.log('[Globe] Earth texture + effects loaded');
         }
       }).catch((e: any) => console.error('[Globe] Texture load error:', e));
     } catch(e: any) {
@@ -729,13 +877,18 @@
     if (!globeReady || !globeMode) return;
     globeAnimId = requestAnimationFrame(animateGlobe);
     globeControls?.update();
+
+    // หมุนเมฆช้าๆ
+    if (globeClouds) {
+      globeClouds.rotation.y += 0.0001;
+    }
+
     // Pulse user marker (green glow effect)
     if (globeUserPulse) {
       const t = Date.now() * 0.003;
       const s = 1 + 0.4 * Math.sin(t);
       globeUserPulse.scale.set(s, s, s);
       globeUserPulse.material.opacity = 0.25 + 0.25 * Math.sin(t);
-      // Outer ring counter-pulse
       const outer = globeUserPulse.children[0];
       if (outer) {
         const s2 = 1 + 0.5 * Math.sin(t * 0.7 + 1);
@@ -1001,6 +1154,7 @@
     globeControls = null;
     globeRenderer = null;
     globeEarth = null;
+    globeClouds = null;
     globeInitializing = false;
     const rh = (window as any).__globeResizeHandler;
     if (rh) { window.removeEventListener('resize', rh); delete (window as any).__globeResizeHandler; }
@@ -9692,14 +9846,14 @@ out center body;`;
   .map-container.addform-open > *:not(#map) { display: none !important; }
 
   /* ═══ Globe Mode: Three.js 3D Earth ═══ */
-  .map-container.globe-mode { background: #000005 !important; }
+  .map-container.globe-mode { background: #000003 !important; }
   .map-container.globe-mode #map { opacity: 0; pointer-events: none; transition: opacity 0.4s ease; }
 
   #globe-container {
     position: absolute; inset: 0; z-index: 1100;
     opacity: 0; pointer-events: none;
     transition: opacity 0.5s ease;
-    background: #000005;
+    background: radial-gradient(ellipse at center, #050510 0%, #000003 70%);
   }
   #globe-container.active {
     opacity: 1; pointer-events: auto;
