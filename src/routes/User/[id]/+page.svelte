@@ -619,9 +619,9 @@
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — 2 lights เท่านั้น
-      scene.add(new THREE.AmbientLight(0xccccdd, 4.5));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 3.0);
+      // Lighting — 2 lights โทนเขียว
+      scene.add(new THREE.AmbientLight(0x88ddaa, 4.5));
+      const sun: any = new THREE.DirectionalLight(0xccffdd, 3.0);
       sun.position.set(5, 3, 5);
       scene.add(sun);
 
@@ -641,9 +641,9 @@
       const earthGeo = new THREE.SphereGeometry(1, 48, 48);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
-        specular: new THREE.Color(0x334455),
+        specular: new THREE.Color(0x335544),
         shininess: 15,
-        emissive: new THREE.Color(0x111122),
+        emissive: new THREE.Color(0x0a1a0f),
         emissiveIntensity: 0.5
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
@@ -654,7 +654,7 @@
       const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
       const atmosMat = new THREE.ShaderMaterial({
         vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.5) * i; }`,
+        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.0, 1.0, 0.53, 0.5) * i; }`,
         side: THREE.BackSide,
         blending: THREE.AdditiveBlending,
         transparent: true,
@@ -708,7 +708,7 @@
         if (!tex || !globeEarth) return;
         globeEarth.material.map = tex;
         globeEarth.material.color.set(0xffffff);
-        globeEarth.material.emissive.set(0x222233);
+        globeEarth.material.emissive.set(0x112218);
         globeEarth.material.emissiveIntensity = 0.6;
         globeEarth.material.emissiveMap = tex;
         globeEarth.material.needsUpdate = true;
@@ -5862,6 +5862,61 @@ out center body;`;
     _mapPOITimer = setTimeout(loadMapPOIs, 300);
   }
 
+  // ==================== TILE PREFETCH ====================
+  let _prefetchAbort: AbortController | null = null;
+  function prefetchTiles(mapRef: any) {
+    if (!mapRef) return;
+    _prefetchAbort?.abort();
+    _prefetchAbort = new AbortController();
+    const signal = _prefetchAbort.signal;
+    const center = mapRef.getCenter();
+    const curZoom = mapRef.getZoom();
+    const subs = 'abc';
+    const retina = window.devicePixelRatio > 1;
+    const queue: string[] = [];
+
+    function latLngToTile(lat: number, lng: number, z: number) {
+      const n = Math.pow(2, z);
+      const x = Math.floor((lng + 180) / 360 * n);
+      const latRad = lat * Math.PI / 180;
+      const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+      return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
+    }
+
+    // Prefetch current zoom ± 2 levels, surrounding 7x7 tile grid
+    const zooms = [curZoom, curZoom - 1, curZoom + 1, curZoom - 2, curZoom + 2].filter(z => z >= 2 && z <= 19);
+    for (const z of zooms) {
+      const effectiveZ = retina ? Math.min(z + 1, 19) : z;
+      const ct = latLngToTile(center.lat, center.lng, effectiveZ);
+      const radius = z === curZoom ? 4 : 3;
+      const n = Math.pow(2, effectiveZ);
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const tx = ((ct.x + dx) % n + n) % n;
+          const ty = ct.y + dy;
+          if (ty < 0 || ty >= n) continue;
+          const s = subs[(tx + ty) % 3];
+          queue.push(`https://${s}.tile.openstreetmap.org/${effectiveZ}/${tx}/${ty}.png`);
+        }
+      }
+    }
+
+    // Load tiles slowly in background (batch 4, 100ms gap)
+    let idx = 0;
+    function loadBatch() {
+      if (signal.aborted || idx >= queue.length) return;
+      const batch = queue.slice(idx, idx + 4);
+      idx += 4;
+      batch.forEach(url => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = url;
+      });
+      setTimeout(loadBatch, 100);
+    }
+    loadBatch();
+  }
+
   // ==================== SHARE ROUTE QR ====================
   function openShareQR() {
     if (!optimizedRoute?.optimized_order || optimizedRoute.optimized_order.length < 2) {
@@ -6734,7 +6789,7 @@ out center body;`;
         subdomains: 'abc',
         maxNativeZoom: 8,
         maxZoom: 20,
-        keepBuffer: 12,
+        keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 0,
@@ -6748,13 +6803,16 @@ out center body;`;
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 20,
-        keepBuffer: 6,
+        keepBuffer: 15,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 50,
         className: 'main-tiles',
         detectRetina: true
       }).addTo(map);
+
+      // ═══ Background tile prefetch — โหลด tiles รอไว้ใน browser cache ═══
+      setTimeout(() => prefetchTiles(map), 2000);
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
