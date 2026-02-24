@@ -514,15 +514,16 @@
   let globeError = '';
   let globeViewLabel = '';
 
-  // Camera 3D (perspective tilt + rotation via two-finger gesture)
-  let camTilt = 0;     // rotateX degrees (0-60)
-  let camBearing = 0;  // rotateZ degrees (0-360)
+  // Camera 3D (perspective orbit via two-finger gesture — map stays north-up)
+  let camTilt = 0;     // rotateX degrees (0-60) — มองจากบนลงล่าง
+  let camYaw = 0;      // rotateY degrees (-60..60) — หันมองซ้าย-ขวา
   let camActive = false;
   let _camTouchStartAngle = 0;
-  let _camTouchStartDist = 0;
   let _camTiltStart = 0;
-  let _camBearingStart = 0;
+  let _camYawStart = 0;
   let _camGesturing = false;
+  let _camStartMidX = 0;
+  let _camStartMidY = 0;
 
   // Traffic
   let showTraffic = false;
@@ -5177,24 +5178,18 @@
   }
 
 
-  // ═══ Camera 3D — Two-finger rotate/tilt ═══
+  // ═══ Camera 3D — Two-finger orbit (แผนที่อยู่กับที่ กล้องหมุนรอบ) ═══
   function applyCamTransform(animate = false) {
     const mapEl = document.getElementById('map');
     if (!mapEl) return;
-    const isFlat = camTilt === 0 && camBearing === 0;
+    const isFlat = camTilt === 0 && camYaw === 0;
     camActive = !isFlat;
     if (isFlat) {
-      mapEl.style.perspective = '';
-      mapEl.style.perspectiveOrigin = '';
-      mapEl.style.transform = animate ? 'perspective(1200px) rotateX(0deg) rotateZ(0deg)' : '';
+      mapEl.style.transform = animate ? 'perspective(1200px) rotateX(0deg) rotateY(0deg)' : '';
       mapEl.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
-      mapEl.style.transformOrigin = '';
       if (animate) setTimeout(() => { mapEl.style.transform = ''; mapEl.style.transition = ''; }, 550);
     } else {
-      mapEl.style.perspective = '1200px';
-      mapEl.style.perspectiveOrigin = '50% 60%';
-      mapEl.style.transformOrigin = '50% 50%';
-      mapEl.style.transform = `rotateX(${camTilt}deg) rotateZ(${-camBearing}deg)`;
+      mapEl.style.transform = `perspective(1200px) rotateX(${camTilt}deg) rotateY(${camYaw}deg)`;
       mapEl.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
       if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 450);
     }
@@ -5202,7 +5197,7 @@
 
   function resetCamView() {
     camTilt = 0;
-    camBearing = 0;
+    camYaw = 0;
     applyCamTransform(true);
   }
 
@@ -5210,45 +5205,28 @@
     const mapEl = document.getElementById('map');
     if (!mapEl) return;
 
-    function getAngle(t1: Touch, t2: Touch) {
-      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * (180 / Math.PI);
-    }
-    function getDist(t1: Touch, t2: Touch) {
-      const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
-      return Math.sqrt(dx * dx + dy * dy);
-    }
-    function getMidY(t1: Touch, t2: Touch) {
-      return (t1.clientY + t2.clientY) / 2;
-    }
-
-    let _startMidY = 0;
-
     mapEl.addEventListener('touchstart', (e: TouchEvent) => {
       if (e.touches.length === 2) {
         _camGesturing = true;
-        _camTouchStartAngle = getAngle(e.touches[0], e.touches[1]);
-        _camTouchStartDist = getDist(e.touches[0], e.touches[1]);
         _camTiltStart = camTilt;
-        _camBearingStart = camBearing;
-        _startMidY = getMidY(e.touches[0], e.touches[1]);
+        _camYawStart = camYaw;
+        _camStartMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        _camStartMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
       }
     }, { passive: true });
 
     mapEl.addEventListener('touchmove', (e: TouchEvent) => {
       if (!_camGesturing || e.touches.length !== 2) return;
-      const curAngle = getAngle(e.touches[0], e.touches[1]);
-      const curMidY = getMidY(e.touches[0], e.touches[1]);
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
 
-      // Rotation (bearing) — angle delta between two fingers
-      let angleDelta = curAngle - _camTouchStartAngle;
-      // Normalize to -180..180
-      if (angleDelta > 180) angleDelta -= 360;
-      if (angleDelta < -180) angleDelta += 360;
-      camBearing = ((_camBearingStart + angleDelta) % 360 + 360) % 360;
+      // สองนิ้วเลื่อนขึ้น/ลง → tilt (มองจากบนลงล่าง)
+      const dy = _camStartMidY - midY; // ขึ้น = เอียงมากขึ้น
+      camTilt = Math.max(0, Math.min(60, _camTiltStart + dy * 0.25));
 
-      // Tilt — vertical movement of midpoint between fingers
-      const midYDelta = _startMidY - curMidY; // up = positive = more tilt
-      camTilt = Math.max(0, Math.min(60, _camTiltStart + midYDelta * 0.3));
+      // สองนิ้วเลื่อนซ้าย/ขวา → yaw (หันมองซ้าย-ขวา)
+      const dx = midX - _camStartMidX;
+      camYaw = Math.max(-60, Math.min(60, _camYawStart + dx * 0.2));
 
       applyCamTransform(false);
     }, { passive: true });
@@ -8105,12 +8083,11 @@ out center body;`;
       <div class="map-right-btns">
         {#if camActive}
           <button class="map-cam-btn active" on:click={resetCamView} title="รีเซ็ตมุมกล้อง">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform: rotate({-camBearing}deg)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="9"/>
               <path d="M12 3v4" stroke-width="3" stroke="#60a5fa"/>
               <circle cx="12" cy="12" r="2" fill="currentColor"/>
             </svg>
-            <span class="cam-label">{Math.round(camTilt)}°</span>
           </button>
         {/if}
         <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
