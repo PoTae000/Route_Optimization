@@ -6863,12 +6863,12 @@ out center body;`;
         zoomControl: false,
         attributionControl: false,
         renderer: L.svg({ padding: 5.0 }),
-        zoomSnap: 0.5,
+        zoomSnap: 1,
         zoomDelta: 1,
         wheelDebounceTime: 40,
-        wheelPxPerZoomLevel: 90,
+        wheelPxPerZoomLevel: 80,
         minZoom: 2,
-        maxZoom: 18,
+        maxZoom: 19,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 0.8,
@@ -6881,29 +6881,16 @@ out center body;`;
         easeLinearity: 0.25
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layers — OSM + detectRetina (คมชัดบนจอ HiDPI) ═══
-      // Layer 1: Safety — zoom ต่ำยืดเต็มจอ (ไม่มีเทาว่าง)
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        subdomains: 'abc',
-        maxNativeZoom: 4,
-        maxZoom: 18,
-        keepBuffer: 50,
-        updateWhenZooming: false,
-        updateWhenIdle: true,
-        className: 'safety-tiles'
-      }).addTo(map);
-
-      // Layer 2: Main — detectRetina โหลด tile zoom+1 แล้วย่อ = คม 2 เท่า
+      // ═══ Tile Layer — OSM ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 18,
-        keepBuffer: 20,
+        maxZoom: 19,
+        keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 0,
-        detectRetina: true,
+        updateInterval: 150,
         className: 'main-tiles'
       }).addTo(map);
 
