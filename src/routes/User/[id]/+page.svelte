@@ -611,17 +611,17 @@
       camera.position.set(0, isMobile ? 0.15 : 0.3, camZ);
       globeCamera = camera;
 
-      // Renderer — เบาที่สุด
-      const renderer: any = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'low-power' });
+      // Renderer
+      const renderer: any = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'default' });
       renderer.setSize(w, h);
-      renderer.setPixelRatio(1); // ไม่ใช้ retina — ลด GPU load 4x
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setClearColor(0x000005, 1);
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — 2 lights
-      scene.add(new THREE.AmbientLight(0xccccdd, 4.5));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 3.0);
+      // Lighting — ลดแสงลง ให้เห็นความลึก
+      scene.add(new THREE.AmbientLight(0x8899aa, 1.8));
+      const sun: any = new THREE.DirectionalLight(0xffffff, 2.2);
       sun.position.set(5, 3, 5);
       scene.add(sun);
 
@@ -637,14 +637,14 @@
       starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
       scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.1, sizeAttenuation: true })) as any);
 
-      // Earth — 48 segments (เบา แต่ยังดูกลม)
-      const earthGeo = new THREE.SphereGeometry(1, 48, 48);
+      // Earth — 64 segments (smooth)
+      const earthGeo = new THREE.SphereGeometry(1, 64, 64);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
-        specular: new THREE.Color(0x334455),
-        shininess: 15,
+        specular: new THREE.Color(0x556677),
+        shininess: 25,
         emissive: new THREE.Color(0x111122),
-        emissiveIntensity: 0.5
+        emissiveIntensity: 0.4
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
       scene.add(earth);
@@ -684,16 +684,21 @@
         }
       });
 
-      // Resize handler
+      // Resize handler — ทั้ง window resize และ container resize (sidebar toggle)
       const onGlobeResize = () => {
         if (!container || !globeCamera || !globeRenderer) return;
         const nw = container.clientWidth, nh = container.clientHeight;
+        if (nw <= 0 || nh <= 0) return;
         globeCamera.aspect = nw / nh;
         globeCamera.updateProjectionMatrix();
         globeRenderer.setSize(nw, nh);
       };
       (window as any).__globeResizeHandler = onGlobeResize;
       window.addEventListener('resize', onGlobeResize);
+      // ResizeObserver จับ sidebar toggle ที่ไม่ trigger window resize
+      const globeRO = new ResizeObserver(() => onGlobeResize());
+      globeRO.observe(container);
+      (window as any).__globeResizeObserver = globeRO;
 
       // Place user location marker on globe
       updateGlobeUserMarker(THREE);
@@ -1020,6 +1025,8 @@
     globeInitializing = false;
     const rh = (window as any).__globeResizeHandler;
     if (rh) { window.removeEventListener('resize', rh); delete (window as any).__globeResizeHandler; }
+    const ro = (window as any).__globeResizeObserver;
+    if (ro) { ro.disconnect(); delete (window as any).__globeResizeObserver; }
   }
 
   // Turn-by-Turn Navigation
@@ -5872,7 +5879,6 @@ out center body;`;
     const center = mapRef.getCenter();
     const curZoom = mapRef.getZoom();
     const subs = 'abc';
-    const retina = window.devicePixelRatio > 1;
     const queue: string[] = [];
 
     function latLngToTile(lat: number, lng: number, z: number) {
@@ -5883,36 +5889,35 @@ out center body;`;
       return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
     }
 
-    // Prefetch current zoom ± 2 levels, surrounding 7x7 tile grid
-    const zooms = [curZoom, curZoom - 1, curZoom + 1, curZoom - 2, curZoom + 2].filter(z => z >= 2 && z <= 19);
+    // Prefetch current zoom ± 1, surrounding 5x5 tile grid (ไม่เยอะเกิน)
+    const zooms = [curZoom, curZoom - 1, curZoom + 1].filter(z => z >= 2 && z <= 19);
     for (const z of zooms) {
-      const effectiveZ = retina ? Math.min(z + 1, 19) : z;
-      const ct = latLngToTile(center.lat, center.lng, effectiveZ);
-      const radius = z === curZoom ? 4 : 3;
-      const n = Math.pow(2, effectiveZ);
+      const ct = latLngToTile(center.lat, center.lng, z);
+      const radius = z === curZoom ? 3 : 2;
+      const n = Math.pow(2, z);
       for (let dy = -radius; dy <= radius; dy++) {
         for (let dx = -radius; dx <= radius; dx++) {
           const tx = ((ct.x + dx) % n + n) % n;
           const ty = ct.y + dy;
           if (ty < 0 || ty >= n) continue;
           const s = subs[(tx + ty) % 3];
-          queue.push(`https://${s}.tile.openstreetmap.org/${effectiveZ}/${tx}/${ty}.png`);
+          queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
         }
       }
     }
 
-    // Load tiles slowly in background (batch 4, 100ms gap)
+    // Load tiles slowly in background (batch 2, 200ms gap — เบาๆ ไม่โดน rate limit)
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 4);
-      idx += 4;
+      const batch = queue.slice(idx, idx + 2);
+      idx += 2;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 100);
+      setTimeout(loadBatch, 200);
     }
     loadBatch();
   }
@@ -6788,13 +6793,12 @@ out center body;`;
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         subdomains: 'abc',
         maxNativeZoom: 8,
-        maxZoom: 20,
+        maxZoom: 19,
         keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 0,
-        className: 'safety-tiles',
-        detectRetina: true
+        className: 'safety-tiles'
       }).addTo(map);
 
       // Layer 2: OSM tiles — ร้านค้า/ร้านอาหาร/สถานที่ครบสุด + CSS invert = ธีมมืด
@@ -6802,16 +6806,18 @@ out center body;`;
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 20,
+        maxZoom: 19,
         keepBuffer: 15,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 50,
-        className: 'main-tiles',
-        detectRetina: true
+        className: 'main-tiles'
       }).addTo(map);
 
       // ═══ Background tile prefetch — โหลด tiles รอไว้ใน browser cache ═══
+      // หยุด prefetch เมื่อ user เลื่อน/ซูม เพื่อไม่แย่ง bandwidth
+      map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
+      map.on('moveend', () => { setTimeout(() => prefetchTiles(map), 3000); });
       setTimeout(() => prefetchTiles(map), 2000);
 
       // Set current location immediately if GPS succeeded
