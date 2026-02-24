@@ -3493,6 +3493,7 @@
 
   function displayOptimizedRoute() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
+    lockRotation();
     if (routeLayer) routeLayer.remove();
     clearTrafficLayers();
     const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
@@ -3556,6 +3557,7 @@
     currentTargetIndex = 0;
     clearRouteState();
     displayPoints();
+    unlockRotation();
   }
 
   function startNavigation() {
@@ -5186,28 +5188,26 @@
     camActive = false;
   }
 
-  let _rotateEndTimer: any = null;
   function setupCamRotateListener() {
     if (!map) return;
-    // leaflet-rotate registers rotate→Canvas._update which does full clear+redraw every frame
-    // This causes visible flickering. Remove it — CSS rotation on rotatePane keeps visuals correct.
-    const renderer = (map as any)._renderer;
-    if (renderer) {
-      map.off('rotate' as any, renderer._update, renderer);
-    }
-    // Only track bearing + debounced full redraw when rotation pauses
     map.on('rotate' as any, () => {
       const bearing = (map as any).getBearing?.() || 0;
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
-      // Debounce: full canvas redraw only when rotation pauses 150ms
-      clearTimeout(_rotateEndTimer);
-      _rotateEndTimer = setTimeout(() => {
-        if (renderer) {
-          renderer._update();
-        }
-      }, 150);
     });
+  }
+
+  // ล็อค/ปลดล็อค rotation ตามสถานะเส้นทาง
+  function lockRotation() {
+    resetCamView();
+    if (map && (map as any).touchRotate) {
+      (map as any).touchRotate.disable();
+    }
+  }
+  function unlockRotation() {
+    if (map && (map as any).touchRotate) {
+      (map as any).touchRotate.enable();
+    }
   }
 
   function centerOnCurrentLocation() {
@@ -6908,7 +6908,6 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.canvas({ padding: 1.0 }),
         zoomSnap: 1,
         zoomDelta: 1,
         wheelDebounceTime: 40,
