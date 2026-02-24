@@ -714,11 +714,11 @@
         globeEarth.material.needsUpdate = true;
       }
 
-      // Progressive loading: zoom 1 ก่อน (4 tiles, ทันที) แล้ว zoom 3 ตาม (ชัด)
-      loadGlobeTexture(THREE, 1).then((lowTex) => {
+      // Progressive loading: zoom 2 ก่อน (16 tiles, เร็ว) แล้ว zoom 4 ตาม (คมชัด)
+      loadGlobeTexture(THREE, 2).then((lowTex) => {
         applyEarthTexture(lowTex);
-        // โหลด HD texture ตามทีหลัง (zoom 3 = 64 tiles, เร็วกว่า zoom 4 มาก)
-        loadGlobeTexture(THREE, 3).then((hdTex) => {
+        // โหลด HD texture ตามทีหลัง (zoom 4 = 256 tiles, คมชัด + Uint32Array เร็ว)
+        loadGlobeTexture(THREE, 4).then((hdTex) => {
           applyEarthTexture(hdTex);
         }).catch(() => {});
       }).catch((e: any) => console.error('[Globe] Texture load error:', e));
@@ -6738,7 +6738,8 @@ out center body;`;
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 0,
-        className: 'safety-tiles'
+        className: 'safety-tiles',
+        detectRetina: true
       }).addTo(map);
 
       // Layer 2: OSM tiles — ร้านค้า/ร้านอาหาร/สถานที่ครบสุด + CSS invert = ธีมมืด
@@ -6751,7 +6752,8 @@ out center body;`;
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 50,
-        className: 'main-tiles'
+        className: 'main-tiles',
+        detectRetina: true
       }).addTo(map);
 
       // Set current location immediately if GPS succeeded
