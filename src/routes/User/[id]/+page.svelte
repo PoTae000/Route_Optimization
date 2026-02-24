@@ -6881,9 +6881,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      // leaflet-rotate ต้องการ global L — patch ก่อน import
+      // leaflet-rotate ต้องการ global L — patch ก่อน import (ไม่ block ถ้า fail)
       (window as any).L = L;
-      await import('leaflet-rotate');
+      try { await import('leaflet-rotate'); } catch(_) { console.warn('leaflet-rotate not loaded'); }
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
