@@ -5958,15 +5958,15 @@ out center body;`;
     const subs = 'abc';
     const queue: string[] = [];
 
-    // โหลด zoom ปัจจุบัน (กว้าง) + zoom ±1,±2,±3 (แคบลง)
+    // โหลด zoom ±1 กว้างมาก (ซูมเข้า/ออกไม่เห็นโหลด) + ±2,±3 พอประมาณ
     const zoomConfigs = [
-      { z: curZoom,     radius: 6 },  // 13x13 = 169 tiles
-      { z: curZoom - 1, radius: 4 },  // 9x9 = 81
-      { z: curZoom + 1, radius: 4 },  // 9x9 = 81
-      { z: curZoom - 2, radius: 3 },  // 7x7 = 49
-      { z: curZoom + 2, radius: 3 },  // 7x7 = 49
-      { z: curZoom - 3, radius: 2 },  // 5x5 = 25
-      { z: curZoom + 3, radius: 2 },  // 5x5 = 25
+      { z: curZoom - 1, radius: 7 },  // ซูมออก 1 ระดับ — โหลดเยอะ
+      { z: curZoom + 1, radius: 7 },  // ซูมเข้า 1 ระดับ — โหลดเยอะ
+      { z: curZoom,     radius: 6 },  // ปัจจุบัน
+      { z: curZoom - 2, radius: 5 },
+      { z: curZoom + 2, radius: 5 },
+      { z: curZoom - 3, radius: 3 },
+      { z: curZoom + 3, radius: 3 },
     ];
 
     for (const { z, radius } of zoomConfigs) {
@@ -5988,18 +5988,18 @@ out center body;`;
 
     if (queue.length === 0) return;
 
-    // โหลดเบื้องหลัง batch 2 ทุก 200ms (ช้าแต่ต่อเนื่อง ไม่โดน rate limit)
+    // โหลดเบื้องหลัง batch 3 ทุก 120ms
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 2);
-      idx += 2;
+      const batch = queue.slice(idx, idx + 3);
+      idx += 3;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 200);
+      setTimeout(loadBatch, 120);
     }
     loadBatch();
   }
@@ -6902,8 +6902,8 @@ out center body;`;
 
       // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      map.on('moveend', () => { setTimeout(() => prefetchTiles(map), 2000); });
-      setTimeout(() => prefetchTiles(map), 1500);
+      map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 800); });
+      setTimeout(() => prefetchTiles(map), 500);
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -9929,8 +9929,8 @@ out center body;`;
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { transition: none; }
-  :global(.leaflet-tile) { transition: none !important; }
+  :global(.main-tiles) { transition: none; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
+  :global(.leaflet-tile) { transition: none !important; image-rendering: -webkit-optimize-contrast; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
