@@ -93,6 +93,8 @@
     deliveryHistory = [];
     alongRoutePOIs = [];
     poiMarkers = [];
+    mapPOIMarkers = [];
+    _poiCache.clear();
     oilPriceData = null;
     currentLocation = null;
     currentLocationMarker = null;
@@ -355,9 +357,6 @@
   let showSettings = false;
   let showLogoutConfirm = false;
 
-  // Night mode (manual toggle, default dark)
-  let nightMode = true;
-
   // Multi-select
   let selectedPoints: number[] = [];
   let isMultiSelectMode = false;
@@ -372,6 +371,27 @@
   let isLoadingStations = false;
   let selectedChargingStation: ChargingStation | null = null;
   let routeChargingStops: ChargingStation[] = [];
+
+  // ==================== MAP POI (สถานที่บนแผนที่) ====================
+  let mapPOIMarkers: any[] = [];
+  let mapPOIAbortController: AbortController | null = null;
+  let _mapPOITimer: any = null;
+  let _lastPOIBounds = '';
+  let isLoadingMapPOIs = false;
+  const _poiCache = new Map<string, any[]>(); // grid-cell key → elements
+  const _poiFetchingCells = new Set<string>(); // cells currently being fetched
+  const OVERPASS_SERVERS = [
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass-api.de/api/interpreter',
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+  ];
+  let _overpassServerIdx = 0;
+  // Grid cell size ตาม zoom — zoom ต่ำใช้ grid ใหญ่ (fetch น้อยรอบ), zoom สูงใช้ grid เล็ก (ละเอียด)
+  function getGridSize(zoom: number): number {
+    if (zoom <= 14) return 0.02;  // ~2.2km
+    if (zoom <= 15) return 0.01;  // ~1.1km
+    return 0.005;                  // ~550m
+  }
 
   // ==================== ALONG-ROUTE POI ====================
   let alongRoutePOIs: RoutePOI[] = [];
@@ -5424,7 +5444,7 @@ out center body;`;
     }
   }
 
-  function getPoiMinZoom(totalCount: number): number {
+  function getAlongRoutePoiMinZoom(totalCount: number): number {
     if (totalCount <= 5) return 12;
     if (totalCount <= 15) return 14;
     if (totalCount <= 30) return 15;
@@ -5486,6 +5506,396 @@ out center body;`;
     clearSelectedPOI();
     alongRoutePOIs = [];
     showPOIModal = false;
+  }
+
+  // ==================== MAP POI — สถานที่บนแผนที่ (ซูมใกล้แล้วกดดูได้) ====================
+
+  // Importance: 1=landmark (ห้าง,โรงพยาบาล,มหาวิท), 2=major (ธนาคาร,วัด,ปั๊ม,โรงเรียน), 3=medium (ร้านอาหาร,เซเว่น), 4=small (ร้านค้าเล็ก,ATM,อาคาร)
+  // Min zoom ที่แสดง: 1→14, 2→15, 3→16, 4→17
+  function getPoiMinZoom(tags: any): number {
+    // Landmark — เห็นตั้งแต่ไกล
+    if (tags.amenity === 'hospital') return 14;
+    if (tags.amenity === 'university' || tags.amenity === 'college') return 14;
+    if (tags.shop === 'mall' || tags.shop === 'department_store') return 14;
+    if (tags.tourism === 'attraction' || tags.tourism === 'museum') return 14;
+    if (tags.amenity === 'marketplace') return 14;
+    if (tags.leisure === 'park') return 14;
+    if (tags.amenity === 'bus_station') return 14;
+    // Brand ดังๆ — เห็นระดับกลาง
+    const bn = (tags.brand || tags.name || '').toLowerCase();
+    if (bn.includes('big c') || bn.includes('บิ๊กซี') || bn.includes('lotus') || bn.includes('โลตัส') || bn.includes('makro') || bn.includes('แม็คโคร') || bn.includes('central') || bn.includes('เซ็นทรัล') || bn.includes('tesco')) return 14;
+    // Major — เห็น zoom 15
+    if (tags.amenity === 'fuel') return 15;
+    if (tags.amenity === 'school' || tags.amenity === 'kindergarten') return 15;
+    if (tags.amenity === 'bank') return 15;
+    if (tags.amenity === 'place_of_worship') return 15;
+    if (tags.amenity === 'police' || tags.amenity === 'fire_station') return 15;
+    if (tags.tourism === 'hotel' || tags.building === 'hotel') return 15;
+    if (tags.amenity === 'cinema') return 15;
+    if (tags.amenity === 'charging_station') return 15;
+    if (tags.amenity === 'post_office') return 15;
+    if (bn.includes('ptt') || bn.includes('shell') || bn.includes('caltex') || bn.includes('bangchak') || bn.includes('บางจาก')) return 15;
+    // Medium — เห็น zoom 16
+    if (tags.amenity === 'restaurant' || tags.amenity === 'food_court' || tags.amenity === 'fast_food') return 16;
+    if (tags.amenity === 'cafe') return 16;
+    if (tags.shop === 'convenience' || tags.shop === 'supermarket') return 16;
+    if (tags.amenity === 'pharmacy' || tags.amenity === 'clinic') return 16;
+    if (tags.amenity === 'library') return 16;
+    if (bn.includes('7-eleven') || bn.includes('เซเว่น') || bn.includes('starbucks') || bn.includes('mcdonald') || bn.includes('kfc') || bn.includes('family mart') || bn.includes('แฟมิลี่มาร์ท')) return 16;
+    // Small — ต้องซูมใกล้
+    return 17;
+  }
+
+  // showIcon: true = แสดง emoji/logo เต็มตัว (สถานที่สำคัญ), false = จุดกลมสีเฉยๆ (สถานที่เล็ก)
+  function getMapPOIIcon(tags: any): { icon: string; color: string; brandLogo?: string; showIcon: boolean } {
+    const bn = (tags.brand || tags.name || '').toLowerCase();
+
+    // ร้านดังๆ — ใช้ตัวอักษร logo + สีร้าน (แสดง icon เสมอ)
+    if (bn.includes('7-eleven') || bn.includes('เซเว่น')) return { icon: '🏪', color: '#00875f', brandLogo: '7', showIcon: true };
+    if (bn.includes('family mart') || bn.includes('แฟมิลี่มาร์ท')) return { icon: '🏪', color: '#00a651', brandLogo: 'FM', showIcon: true };
+    if (bn.includes('lotus') || bn.includes('โลตัส')) return { icon: '🛒', color: '#e31837', brandLogo: 'L', showIcon: true };
+    if (bn.includes('big c') || bn.includes('บิ๊กซี')) return { icon: '🛒', color: '#e31837', brandLogo: 'BC', showIcon: true };
+    if (bn.includes('makro') || bn.includes('แม็คโคร')) return { icon: '🛒', color: '#003399', brandLogo: 'M', showIcon: true };
+    if (bn.includes('tops') || bn.includes('ท็อปส์')) return { icon: '🛒', color: '#00a94f', brandLogo: 'T', showIcon: true };
+    if (bn.includes('central') || bn.includes('เซ็นทรัล')) return { icon: '🛍️', color: '#c8102e', brandLogo: 'CW', showIcon: true };
+    if (bn.includes('starbucks') || bn.includes('สตาร์บัคส์')) return { icon: '☕', color: '#00704A', brandLogo: 'SB', showIcon: true };
+    if (bn.includes('mcdonald') || bn.includes('แมคโดนัลด์')) return { icon: '🍔', color: '#FFC72C', brandLogo: 'Mc', showIcon: true };
+    if (bn.includes('kfc')) return { icon: '🍗', color: '#e4002b', brandLogo: 'KFC', showIcon: true };
+    if (bn.includes('pizza company') || bn.includes('เดอะ พิซซ่า')) return { icon: '🍕', color: '#d4213d', brandLogo: 'PC', showIcon: true };
+    if (bn.includes('pizza hut')) return { icon: '🍕', color: '#ee3a23', brandLogo: 'PH', showIcon: true };
+    if (bn.includes('burger king')) return { icon: '🍔', color: '#ff8732', brandLogo: 'BK', showIcon: true };
+    if (bn.includes('ptt') || bn.includes('ปตท')) return { icon: '⛽', color: '#00529b', brandLogo: 'PTT', showIcon: true };
+    if (bn.includes('shell') || bn.includes('เชลล์')) return { icon: '⛽', color: '#fbce07', brandLogo: 'SH', showIcon: true };
+    if (bn.includes('caltex') || bn.includes('คาลเท็กซ์')) return { icon: '⛽', color: '#e31937', brandLogo: 'CT', showIcon: true };
+    if (bn.includes('bangchak') || bn.includes('บางจาก')) return { icon: '⛽', color: '#006838', brandLogo: 'BJ', showIcon: true };
+    if (bn.includes('cafe amazon') || bn.includes('คาเฟ่อเมซอน')) return { icon: '☕', color: '#006633', brandLogo: 'CA', showIcon: true };
+    if (bn.includes('robinson') || bn.includes('โรบินสัน')) return { icon: '🛍️', color: '#1a1a1a', brandLogo: 'RB', showIcon: true };
+    if (bn.includes('the mall') || bn.includes('เดอะมอลล์')) return { icon: '🛍️', color: '#8B0000', brandLogo: 'TM', showIcon: true };
+
+    // สถานที่สำคัญ — แสดง emoji icon (showIcon: true)
+    if (tags.amenity === 'fuel') return { icon: '⛽', color: '#f97316', showIcon: true };
+    if (tags.amenity === 'hospital') return { icon: '🏥', color: '#dc2626', showIcon: true };
+    if (tags.amenity === 'school' || tags.amenity === 'kindergarten') return { icon: '🏫', color: '#2563eb', showIcon: true };
+    if (tags.amenity === 'university' || tags.amenity === 'college') return { icon: '🎓', color: '#1e40af', showIcon: true };
+    if (tags.amenity === 'restaurant' || tags.amenity === 'food_court') return { icon: '🍜', color: '#ef4444', showIcon: true };
+    if (tags.amenity === 'fast_food') return { icon: '🍔', color: '#f97316', showIcon: true };
+    if (tags.amenity === 'cafe') return { icon: '☕', color: '#92400e', showIcon: true };
+    if (tags.amenity === 'bank') return { icon: '🏦', color: '#4a148c', showIcon: true };
+    if (tags.amenity === 'pharmacy') return { icon: '💊', color: '#16a34a', showIcon: true };
+    if (tags.amenity === 'clinic' || tags.amenity === 'doctors') return { icon: '🩺', color: '#ef4444', showIcon: true };
+    if (tags.amenity === 'place_of_worship') return { icon: tags.religion === 'buddhist' ? '🛕' : '⛪', color: '#d97706', showIcon: true };
+    if (tags.amenity === 'police') return { icon: '👮', color: '#1e3a5f', showIcon: true };
+    if (tags.amenity === 'fire_station') return { icon: '🚒', color: '#dc2626', showIcon: true };
+    if (tags.amenity === 'cinema') return { icon: '🎬', color: '#7c3aed', showIcon: true };
+    if (tags.amenity === 'marketplace') return { icon: '🏬', color: '#ea580c', showIcon: true };
+    if (tags.amenity === 'bus_station') return { icon: '🚌', color: '#0284c7', showIcon: true };
+    if (tags.amenity === 'charging_station') return { icon: '⚡', color: '#3b82f6', showIcon: true };
+    if (tags.amenity === 'post_office') return { icon: '📮', color: '#dc2626', showIcon: true };
+    if (tags.shop === 'convenience') return { icon: '🏪', color: '#22c55e', showIcon: true };
+    if (tags.shop === 'supermarket') return { icon: '🛒', color: '#16a34a', showIcon: true };
+    if (tags.shop === 'mall' || tags.shop === 'department_store') return { icon: '🛍️', color: '#c026d3', showIcon: true };
+    if (tags.tourism === 'hotel' || tags.building === 'hotel') return { icon: '🏨', color: '#7c3aed', showIcon: true };
+    if (tags.tourism === 'attraction') return { icon: '🏛️', color: '#d97706', showIcon: true };
+    if (tags.tourism === 'museum') return { icon: '🎨', color: '#6366f1', showIcon: true };
+    if (tags.leisure === 'park' || tags.leisure === 'garden') return { icon: '🌳', color: '#16a34a', showIcon: true };
+
+    // สถานที่เล็ก — จุดกลมสีเฉยๆ (showIcon: false)
+    if (tags.amenity === 'bar' || tags.amenity === 'pub') return { icon: '🍺', color: '#a16207', showIcon: false };
+    if (tags.amenity === 'atm') return { icon: '💳', color: '#7c3aed', showIcon: false };
+    if (tags.amenity === 'library') return { icon: '📚', color: '#059669', showIcon: false };
+    if (tags.amenity === 'parking') return { icon: '🅿️', color: '#2563eb', showIcon: false };
+    if (tags.amenity === 'toilets') return { icon: '🚻', color: '#6b7280', showIcon: false };
+    if (tags.tourism === 'guest_house' || tags.tourism === 'hostel') return { icon: '🛏️', color: '#8b5cf6', showIcon: false };
+    if (tags.tourism === 'viewpoint') return { icon: '📸', color: '#ec4899', showIcon: false };
+    if (tags.tourism === 'information') return { icon: 'ℹ️', color: '#0ea5e9', showIcon: false };
+    if (tags.leisure === 'sports_centre' || tags.leisure === 'fitness_centre') return { icon: '🏋️', color: '#0d9488', showIcon: false };
+    if (tags.leisure === 'swimming_pool') return { icon: '🏊', color: '#0ea5e9', showIcon: false };
+    if (tags.leisure === 'playground') return { icon: '🎠', color: '#f59e0b', showIcon: false };
+    if (tags.shop === 'clothes' || tags.shop === 'fashion') return { icon: '👗', color: '#ec4899', showIcon: false };
+    if (tags.shop === 'electronics') return { icon: '📱', color: '#3b82f6', showIcon: false };
+    if (tags.shop === 'hardware') return { icon: '🔧', color: '#78716c', showIcon: false };
+    if (tags.shop === 'bakery') return { icon: '🥖', color: '#d97706', showIcon: false };
+    if (tags.shop === 'hairdresser' || tags.shop === 'beauty') return { icon: '💇', color: '#ec4899', showIcon: false };
+    if (tags.shop === 'car_repair' || tags.shop === 'car') return { icon: '🚗', color: '#6b7280', showIcon: false };
+    if (tags.shop === 'motorcycle') return { icon: '🏍️', color: '#78716c', showIcon: false };
+    if (tags.shop === 'laundry') return { icon: '🧺', color: '#60a5fa', showIcon: false };
+    if (tags.shop) return { icon: '🛒', color: '#6b7280', showIcon: false };
+    if (tags.office === 'government') return { icon: '🏛️', color: '#1e3a5f', showIcon: false };
+    if (tags.office) return { icon: '🏢', color: '#6b7280', showIcon: false };
+    if (tags.building === 'apartments' || tags.building === 'residential') return { icon: '🏠', color: '#78716c', showIcon: false };
+    if (tags.building === 'commercial' || tags.building === 'retail') return { icon: '🏬', color: '#6b7280', showIcon: false };
+    if (tags.building === 'industrial') return { icon: '🏭', color: '#52525b', showIcon: false };
+    if (tags.building) return { icon: '🏗️', color: '#6b7280', showIcon: false };
+    return { icon: '📍', color: '#6b7280', showIcon: false };
+  }
+
+  function getMapPOIType(tags: any): string {
+    if (tags.amenity === 'fuel') return 'ปั๊มน้ำมัน';
+    if (tags.shop === 'convenience') return 'ร้านสะดวกซื้อ';
+    if (tags.shop === 'supermarket') return 'ซูเปอร์มาร์เก็ต';
+    if (tags.amenity === 'restaurant') return 'ร้านอาหาร';
+    if (tags.amenity === 'fast_food') return 'ฟาสต์ฟู้ด';
+    if (tags.amenity === 'food_court') return 'ศูนย์อาหาร';
+    if (tags.amenity === 'cafe') return 'คาเฟ่';
+    if (tags.amenity === 'bar' || tags.amenity === 'pub') return 'บาร์';
+    if (tags.amenity === 'charging_station') return 'สถานีชาร์จ EV';
+    if (tags.amenity === 'bank') return 'ธนาคาร';
+    if (tags.amenity === 'atm') return 'ตู้ ATM';
+    if (tags.amenity === 'hospital') return 'โรงพยาบาล';
+    if (tags.amenity === 'clinic' || tags.amenity === 'doctors') return 'คลินิก';
+    if (tags.amenity === 'pharmacy') return 'ร้านยา';
+    if (tags.amenity === 'school') return 'โรงเรียน';
+    if (tags.amenity === 'kindergarten') return 'โรงเรียนอนุบาล';
+    if (tags.amenity === 'university') return 'มหาวิทยาลัย';
+    if (tags.amenity === 'college') return 'วิทยาลัย';
+    if (tags.amenity === 'place_of_worship') return tags.religion === 'buddhist' ? 'วัด' : 'ศาสนสถาน';
+    if (tags.amenity === 'cinema') return 'โรงหนัง';
+    if (tags.amenity === 'library') return 'ห้องสมุด';
+    if (tags.amenity === 'marketplace') return 'ตลาด';
+    if (tags.amenity === 'bus_station') return 'สถานีขนส่ง';
+    if (tags.amenity === 'fire_station') return 'สถานีดับเพลิง';
+    if (tags.amenity === 'post_office') return 'ไปรษณีย์';
+    if (tags.amenity === 'police') return 'สถานีตำรวจ';
+    if (tags.amenity === 'parking') return 'ที่จอดรถ';
+    if (tags.tourism === 'hotel' || tags.building === 'hotel') return 'โรงแรม';
+    if (tags.tourism === 'guest_house') return 'เกสต์เฮาส์';
+    if (tags.tourism === 'hostel') return 'โฮสเทล';
+    if (tags.tourism === 'attraction') return 'สถานที่ท่องเที่ยว';
+    if (tags.tourism === 'museum') return 'พิพิธภัณฑ์';
+    if (tags.tourism === 'viewpoint') return 'จุดชมวิว';
+    if (tags.tourism === 'information') return 'จุดข้อมูลท่องเที่ยว';
+    if (tags.leisure === 'park') return 'สวนสาธารณะ';
+    if (tags.leisure === 'sports_centre') return 'ศูนย์กีฬา';
+    if (tags.leisure === 'fitness_centre') return 'ฟิตเนส';
+    if (tags.shop === 'mall' || tags.shop === 'department_store') return 'ห้างสรรพสินค้า';
+    if (tags.shop === 'clothes' || tags.shop === 'fashion') return 'ร้านเสื้อผ้า';
+    if (tags.shop === 'electronics') return 'ร้านอิเล็กทรอนิกส์';
+    if (tags.shop === 'hardware') return 'ร้านวัสดุก่อสร้าง';
+    if (tags.shop === 'bakery') return 'ร้านเบเกอรี่';
+    if (tags.shop === 'hairdresser' || tags.shop === 'beauty') return 'ร้านเสริมสวย';
+    if (tags.shop === 'car_repair') return 'อู่ซ่อมรถ';
+    if (tags.shop === 'car') return 'ร้านขายรถ';
+    if (tags.shop === 'motorcycle') return 'ร้านมอเตอร์ไซค์';
+    if (tags.shop === 'laundry') return 'ร้านซักผ้า';
+    if (tags.shop) return 'ร้านค้า';
+    if (tags.office === 'government') return 'หน่วยงานราชการ';
+    if (tags.office) return 'สำนักงาน';
+    return 'สถานที่';
+  }
+
+  function buildPOIPopupHTML(tags: any): string {
+    const name = escapeHtml(tags['name:th'] || tags.name || tags.alt_name || tags.brand || '');
+    const type = getMapPOIType(tags);
+    const { icon, color, brandLogo } = getMapPOIIcon(tags);
+    const addr = escapeHtml([tags['addr:housenumber'], tags['addr:street'], tags['addr:city']].filter(Boolean).join(' ') || '');
+    const phone = escapeHtml(tags.phone || tags['contact:phone'] || '');
+    const hours = escapeHtml(tags.opening_hours || '');
+    const website = tags.website || tags['contact:website'] || '';
+    const cuisine = escapeHtml(tags.cuisine || '');
+
+    const iconHtml = brandLogo
+      ? `<span class="mpoi-icon" style="background:${color};color:#fff;font-weight:800;font-size:12px;">${escapeHtml(brandLogo)}</span>`
+      : `<span class="mpoi-icon" style="background:${color}22;">${icon}</span>`;
+
+    let html = `<div class="map-poi-popup">`;
+    html += `<div class="mpoi-header">${iconHtml}<div class="mpoi-info"><strong class="mpoi-name">${name || type}</strong><span class="mpoi-type">${type}</span></div></div>`;
+    if (addr) html += `<div class="mpoi-row">📍 ${addr}</div>`;
+    if (phone) html += `<div class="mpoi-row"><a href="tel:${escapeHtml(phone)}">📞 ${phone}</a></div>`;
+    if (hours) html += `<div class="mpoi-row">🕐 ${hours}</div>`;
+    if (cuisine) html += `<div class="mpoi-row">🍽️ ${cuisine}</div>`;
+    if (website) html += `<div class="mpoi-row"><a href="${escapeHtml(website)}" target="_blank" rel="noopener">🌐 เว็บไซต์</a></div>`;
+    html += `</div>`;
+    return html;
+  }
+
+  function clearMapPOIs() {
+    mapPOIMarkers.forEach(m => { try { map.removeLayer(m); } catch(_) {} });
+    mapPOIMarkers = [];
+  }
+
+  // หา grid cells ที่ครอบ bounds (+ padding cells สำหรับ prefetch)
+  function getGridCells(bounds: any, padding = 0, gridSize = 0.005): string[] {
+    const s = bounds.getSouth() - padding * gridSize;
+    const w = bounds.getWest() - padding * gridSize;
+    const n = bounds.getNorth() + padding * gridSize;
+    const e = bounds.getEast() + padding * gridSize;
+    const cells: string[] = [];
+    for (let lat = Math.floor(s / gridSize) * gridSize; lat <= n; lat += gridSize) {
+      for (let lon = Math.floor(w / gridSize) * gridSize; lon <= e; lon += gridSize) {
+        cells.push(`${gridSize.toFixed(4)}:${lat.toFixed(4)},${lon.toFixed(4)}`);
+      }
+    }
+    return cells;
+  }
+
+  // Fetch single grid cell จาก Overpass
+  async function fetchGridCell(cellKey: string, signal: AbortSignal): Promise<any[] | null> {
+    if (_poiCache.has(cellKey) || _poiFetchingCells.has(cellKey)) return _poiCache.get(cellKey) || null;
+    _poiFetchingCells.add(cellKey);
+
+    // cellKey format: "gridSize:lat,lon"
+    const [gsStr, coordStr] = cellKey.split(':');
+    const gridSize = parseFloat(gsStr);
+    const [latStr, lonStr] = coordStr.split(',');
+    const lat = parseFloat(latStr);
+    const lon = parseFloat(lonStr);
+    const bbox = `${lat},${lon},${(lat + gridSize).toFixed(4)},${(lon + gridSize).toFixed(4)}`;
+    const query = `[out:json][timeout:10];nwr["name"](${bbox});out center body 500;`;
+
+    for (let attempt = 0; attempt < OVERPASS_SERVERS.length; attempt++) {
+      const url = OVERPASS_SERVERS[(_overpassServerIdx + attempt) % OVERPASS_SERVERS.length];
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `data=${encodeURIComponent(query)}`,
+          signal
+        });
+        if (signal.aborted) { _poiFetchingCells.delete(cellKey); return null; }
+        if (res.status === 429) {
+          _overpassServerIdx = (_overpassServerIdx + attempt + 1) % OVERPASS_SERVERS.length;
+          continue;
+        }
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (signal.aborted) { _poiFetchingCells.delete(cellKey); return null; }
+        const elements = data.elements || [];
+        _poiCache.set(cellKey, elements);
+        _poiFetchingCells.delete(cellKey);
+        // Prune cache ถ้าเกิน 200 cells
+        if (_poiCache.size > 200) {
+          const firstKey = _poiCache.keys().next().value;
+          if (firstKey) _poiCache.delete(firstKey);
+        }
+        return elements;
+      } catch (err: any) {
+        if (err.name === 'AbortError') { _poiFetchingCells.delete(cellKey); return null; }
+        continue;
+      }
+    }
+    _poiFetchingCells.delete(cellKey);
+    return null;
+  }
+
+  // แสดง POI markers จาก cached grid cells ที่อยู่ใน viewport (กรองตาม zoom importance)
+  function renderPOIMarkersFromCache(visibleCells: string[]) {
+    clearMapPOIs();
+    const bounds = map.getBounds();
+    const zoom = map.getZoom();
+    for (const cellKey of visibleCells) {
+      const elements = _poiCache.get(cellKey);
+      if (!elements) continue;
+      for (const el of elements) {
+        const lat = el.lat || el.center?.lat;
+        const lon = el.lon || el.center?.lon;
+        if (!lat || !lon || !el.tags) continue;
+        if (!bounds.contains([lat, lon])) continue;
+        const tags = el.tags;
+        // กรองตาม importance — สถานที่เล็กไม่แสดงที่ zoom ต่ำ
+        const minZoom = getPoiMinZoom(tags);
+        if (zoom < minZoom) continue;
+
+        const name = tags['name:th'] || tags.name || tags.brand || tags.operator || '';
+        const { icon, color, brandLogo, showIcon } = getMapPOIIcon(tags);
+        const displayName = escapeHtml(name || getMapPOIType(tags));
+        const shortName = displayName.length > 14 ? displayName.substring(0, 12) + '…' : displayName;
+
+        let markerHtml: string;
+        if (brandLogo) {
+          // ร้านดัง — วงกลมสีร้าน + ตัวอักษร logo
+          markerHtml = `<div class="mpoi-circle mpoi-brand" style="background:${color};"><span class="mpoi-c-brand">${escapeHtml(brandLogo)}</span></div>`;
+        } else if (showIcon) {
+          // สถานที่สำคัญ — วงกลมขาว + emoji icon
+          markerHtml = `<div class="mpoi-circle mpoi-important"><span class="mpoi-c-icon">${icon}</span></div>`;
+        } else {
+          // สถานที่เล็ก — วงกลมเล็ก + emoji icon
+          markerHtml = `<div class="mpoi-circle mpoi-small"><span class="mpoi-c-icon">${icon}</span></div>`;
+        }
+        // ชื่อแสดงเมื่อ zoom >= 17
+        if (zoom >= 17 && name) {
+          markerHtml += `<span class="mpoi-c-name">${shortName}</span>`;
+        }
+
+        const marker = L.marker([lat, lon], {
+          icon: L.divIcon({
+            className: 'map-poi-pin-wrap',
+            html: `<div class="mpoi-dot-wrap">${markerHtml}</div>`,
+            iconSize: [0, 0],
+            iconAnchor: [14, 14]
+          }),
+          zIndexOffset: 500
+        }).addTo(map);
+        marker.bindPopup(buildPOIPopupHTML(tags), { maxWidth: 280, className: 'map-poi-popup-container' });
+        mapPOIMarkers.push(marker);
+      }
+    }
+  }
+
+  async function loadMapPOIs() {
+    if (!map || !L) return;
+    const zoom = map.getZoom();
+
+    // ซูมไกลมาก — ลบ markers + หยุด
+    if (zoom < 13) {
+      clearMapPOIs();
+      _lastPOIBounds = '';
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const boundsKey = `${bounds.getSouth().toFixed(4)},${bounds.getWest().toFixed(4)},${bounds.getNorth().toFixed(4)},${bounds.getEast().toFixed(4)}`;
+    if (boundsKey === _lastPOIBounds) return;
+    _lastPOIBounds = boundsKey;
+
+    if (mapPOIAbortController) mapPOIAbortController.abort();
+    mapPOIAbortController = new AbortController();
+    const signal = mapPOIAbortController.signal;
+
+    // หา grid cells ที่อยู่ใน viewport (grid size ตาม zoom)
+    const gridSize = getGridSize(zoom);
+    const visibleCells = getGridCells(bounds, 0, gridSize);
+    // + 1 cell padding รอบข้างสำหรับ prefetch
+    const prefetchCells = getGridCells(bounds, 1, gridSize);
+
+    // แสดง cached data ทันที (ก่อนรอ fetch) — ตั้งแต่ zoom >= 14
+    if (zoom >= 14) {
+      const cachedVisible = visibleCells.filter(c => _poiCache.has(c));
+      if (cachedVisible.length > 0) {
+        renderPOIMarkersFromCache(cachedVisible);
+      }
+    }
+
+    // หา cells ที่ยังไม่มี cache
+    const missingCells = prefetchCells.filter(c => !_poiCache.has(c) && !_poiFetchingCells.has(c));
+
+    if (missingCells.length > 0) {
+      isLoadingMapPOIs = true;
+      // Fetch missing cells พร้อมกัน (max 4 concurrent)
+      const batchSize = 4;
+      for (let i = 0; i < missingCells.length; i += batchSize) {
+        if (signal.aborted) break;
+        const batch = missingCells.slice(i, i + batchSize);
+        await Promise.allSettled(batch.map(cell => fetchGridCell(cell, signal)));
+        if (signal.aborted) break;
+        // อัปเดต markers ทันทีที่ fetch เสร็จแต่ละ batch — ตั้งแต่ zoom >= 14
+        if (zoom >= 14) {
+          renderPOIMarkersFromCache(visibleCells);
+        }
+      }
+      if (!signal.aborted) isLoadingMapPOIs = false;
+    }
+
+    // Final render
+    if (!signal.aborted && zoom >= 14) {
+      renderPOIMarkersFromCache(visibleCells);
+    } else if (!signal.aborted && zoom < 14) {
+      clearMapPOIs(); // zoom 13 = prefetch only
+    }
+  }
+
+  function onMapMoveForPOI() {
+    if (_mapPOITimer) clearTimeout(_mapPOITimer);
+    _mapPOITimer = setTimeout(loadMapPOIs, 80);
   }
 
   // ==================== SHARE ROUTE QR ====================
@@ -5711,13 +6121,6 @@ out center body;`;
   function toggleVoice() {
     voiceEnabled = !voiceEnabled;
     showNotification(voiceEnabled ? 'เปิดเสียงนำทาง' : 'ปิดเสียงนำทาง', 'success');
-  }
-
-  // ==================== NIGHT MODE (manual toggle) ====================
-  function toggleNightMode() {
-    nightMode = !nightMode;
-    localStorage.setItem(getUserKey('nightMode'), nightMode ? 'dark' : 'light');
-    showNotification(nightMode ? 'โหมดกลางคืน' : 'โหมดกลางวัน', 'success');
   }
 
   // ==================== KEYBOARD SHORTCUTS ====================
@@ -6147,10 +6550,6 @@ out center body;`;
         e.preventDefault();
         toggleTraffic();
         break;
-      case 'd': // โหมดกลางวัน/กลางคืน
-        e.preventDefault();
-        toggleNightMode();
-        break;
       case 'a': // เพิ่มจุดแวะ
         if (!optimizedRoute && !isNavigating) {
           e.preventDefault();
@@ -6318,9 +6717,6 @@ out center body;`;
     if (savedSpeedAlert !== null) speedAlertEnabled = savedSpeedAlert === 'true';
     const savedTraffic = localStorage.getItem(getUserKey('showTraffic'));
     if (savedTraffic !== null) showTraffic = savedTraffic === 'true';
-    const savedNightMode = localStorage.getItem(getUserKey('nightMode'));
-    if (savedNightMode === 'light') nightMode = false;
-    else nightMode = true;
     loadSavedRoutes();
 
     // URL ไม่ตรง → แก้ URL เงียบ ๆ (ไม่ goto, ไม่ remount)
@@ -6367,43 +6763,31 @@ out center body;`;
         zoomAnimation: true,
         markerZoomAnimation: true
       }).setView([initLat, initLng], initZoom);
-      L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // ═══ 2-Layer Tile System: ไม่มีทางเห็นขาวอีก ═══════════════════
-      //
-      // Layer 1 (ล่าง): "Safety net" — โหลด tile zoom 11 แล้วยืดขยาย
-      //   → ที่ zoom 16 ต้องการแค่ ~4 tiles ครอบคลุมทั้งจอ → โหลดทันที
-      //   → ภาพอาจเบลอนิดหน่อย แต่เป็นสีเข้มของแผนที่ ไม่ใช่ขาว
-      //
-      // Layer 2 (บน): tile คมชัดตาม zoom จริง
-      //   → โหลดทับ layer 1 เมื่อพร้อม → เห็นภาพคม
-      //
-      // ผลลัพธ์: ขยับ/หมุนเร็วแค่ไหน ก็เห็นแผนที่เสมอ (อาจเบลอชั่วครู่แล้วคมขึ้น)
-
-      // Layer 1: Safety net — tile zoom ต่ำยืดขยาย (โหลดไวมาก น้อย tiles)
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
-        subdomains: 'abcd',
-        maxNativeZoom: 8,    // โหลด tile zoom 8 → น้อย tiles, ครอบคลุมพื้นที่ใหญ่มาก
-        maxZoom: 20,         // ยืดให้แสดงได้ทุก zoom level
-        keepBuffer: 12,      // โหลดรอบๆ viewport มากขึ้น → ไม่เห็นเทาตอนซูม
+      // ═══ 2-Layer Tile: Safety (เบลอ) + Main (คม) — ไม่เห็นขาวตอนซูม ═══
+      // Layer 1: Safety net — tile zoom ต่ำยืดขยาย (โหลดทันที)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        subdomains: 'abc',
+        maxNativeZoom: 8,
+        maxZoom: 20,
+        keepBuffer: 12,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 50,
-        noWrap: false,
-        className: 'dark-tiles-safety'
+        updateInterval: 0,
+        className: 'safety-tiles'
       }).addTo(map);
 
-      // Layer 2: Main crisp tiles — ภาพคมชัดจริงตาม zoom
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-        subdomains: 'abcd',
+      // Layer 2: OSM tiles — ร้านค้า/ร้านอาหาร/สถานที่ครบสุด + CSS invert = ธีมมืด
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        subdomains: 'abc',
+        maxNativeZoom: 19,
         maxZoom: 20,
-        keepBuffer: 8,
+        keepBuffer: 6,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 50,
-        noWrap: false,
-        className: 'dark-tiles'
+        className: 'main-tiles'
       }).addTo(map);
 
       // Set current location immediately if GPS succeeded
@@ -6469,6 +6853,10 @@ out center body;`;
       };
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
+
+      // Map POI — โหลดสถานที่เมื่อซูมใกล้ + เลื่อนแผนที่
+      map.on('moveend', onMapMoveForPOI);
+      map.on('zoomend', onMapMoveForPOI);
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
@@ -6583,7 +6971,11 @@ out center body;`;
     if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
     if (routeAbortController) { routeAbortController.abort(); routeAbortController = null; }
     if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    if (_mapPOITimer) clearTimeout(_mapPOITimer);
+    if (mapPOIAbortController) mapPOIAbortController.abort();
+    clearMapPOIs();
     if (map) {
+      map.off('moveend', onMapMoveForPOI);
       if ((window as any).__onZoomEnd) { map.off('zoomend', (window as any).__onZoomEnd); (window as any).__onZoomEnd = null; }
       map.remove(); map = null;
     }
@@ -6598,14 +6990,13 @@ out center body;`;
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </svelte:head>
 
-<div class="app-container" class:day-mode={!nightMode}>
+<div class="app-container">
   <!-- Settings Panel -->
   <SettingsPanel
     bind:show={showSettings}
     {userInfo}
     bind:vehicleType
     {voiceEnabled}
-    bind:nightMode
     bind:KM_PER_LITER
     bind:ELECTRICITY_PRICE_PER_KWH
     bind:KWH_PER_100KM
@@ -7029,7 +7420,6 @@ out center body;`;
         {/if}
         <div class="header-actions">
           <button class="icon-btn keyboard-help-btn" on:click={() => showKeyboardHelp = true} title="คีย์ลัด [?]">⌨️</button>
-          <button class="icon-btn" on:click={toggleNightMode} title={nightMode ? 'เปลี่ยนเป็นโหมดสว่าง [D]' : 'เปลี่ยนเป็นโหมดมืด [D]'}>{nightMode ? '🌙' : '☀️'}</button>
           <button class="icon-btn" on:click={() => showAlerts = !showAlerts} title="การแจ้งเตือน">🔔{#if alerts.length > 0}<span class="badge">{alerts.length}</span>{/if}</button>
           <button class="icon-btn" on:click={() => { showSettings = true; smoothMapResize(); }} title="ตั้งค่า">⚙️</button>
         </div>
@@ -8158,354 +8548,6 @@ out center body;`;
   border-color: rgba(0, 255, 136, 0.3);
   color: #00ff88;
 }
-
-/* ==================== DAY MODE OVERRIDES ==================== */
-/* โทนครีมอุ่น — สบายตา + contrast ชัด */
-/* ═══════════════════════════════════════════════════════════════
-   DAY MODE — White/Blue Theme (ธีมขาว-น้ำเงิน)
-   Dark mode = black/green | Light mode = white/blue
-   ═══════════════════════════════════════════════════════════════ */
-.app-container.day-mode {
-  background: linear-gradient(135deg, #edf2f7, #e2e8f0, #dbeafe) !important;
-  transition: background 0.3s ease;
-}
-
-.day-mode .sidebar {
-  background: rgba(255, 255, 255, 0.97) !important;
-  border-color: rgba(59, 130, 246, 0.1) !important;
-  box-shadow: 2px 0 20px rgba(30, 64, 175, 0.08) !important;
-}
-
-.day-mode :global(.leaflet-tile-pane) {
-  filter: brightness(1.15) saturate(1.15) !important;
-}
-
-.day-mode :global(.leaflet-container) {
-  background: #dbeafe !important;
-}
-
-.day-mode .glass-card {
-  background: rgba(255, 255, 255, 0.95) !important;
-  border-color: rgba(59, 130, 246, 0.12) !important;
-  color: #1e293b !important;
-}
-
-.day-mode .point-card {
-  background: rgba(248, 250, 252, 0.95) !important;
-  border-color: rgba(59, 130, 246, 0.08) !important;
-  color: #1e293b !important;
-  box-shadow: 0 1px 4px rgba(30, 64, 175, 0.06) !important;
-}
-
-.day-mode .point-card:hover {
-  background: rgba(255, 255, 255, 0.98) !important;
-  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.12) !important;
-}
-
-.day-mode .point-card.active {
-  border-color: rgba(59, 130, 246, 0.5) !important;
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2), 0 2px 8px rgba(30, 64, 175, 0.1) !important;
-}
-
-.day-mode .sidebar-header,
-.day-mode .logo-text h1 {
-  color: #1e293b !important;
-}
-
-.day-mode .logo-text span {
-  color: #64748b !important;
-}
-
-.day-mode .point-name {
-  color: #1e293b !important;
-}
-
-.day-mode .point-address {
-  color: #64748b !important;
-}
-
-.day-mode .tab {
-  color: #64748b !important;
-  border-color: transparent !important;
-}
-
-.day-mode .tab.active {
-  color: #2563eb !important;
-  border-color: #2563eb !important;
-  background: rgba(59, 130, 246, 0.08) !important;
-}
-
-.day-mode .btn-ghost {
-  background: rgba(248, 250, 252, 0.9) !important;
-  color: #334155 !important;
-  border-color: rgba(59, 130, 246, 0.12) !important;
-}
-
-.day-mode .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.98) !important;
-  border-color: rgba(59, 130, 246, 0.25) !important;
-}
-
-.day-mode .btn-secondary {
-  background: rgba(59, 130, 246, 0.1) !important;
-  color: #1d4ed8 !important;
-  border-color: rgba(59, 130, 246, 0.25) !important;
-}
-
-.day-mode .btn-primary {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
-  color: #fff !important;
-  box-shadow: 0 2px 10px rgba(37, 99, 235, 0.3) !important;
-}
-
-.day-mode .action-buttons {
-  border-color: rgba(59, 130, 246, 0.08) !important;
-}
-
-.day-mode .content-area {
-  color: #1e293b !important;
-}
-
-.day-mode .settings-panel {
-  background: rgba(255, 255, 255, 0.98) !important;
-  color: #1e293b !important;
-}
-
-.day-mode .settings-section h4 {
-  color: #1e293b !important;
-}
-
-.day-mode .settings-overlay {
-  background: rgba(15, 23, 42, 0.3) !important;
-}
-
-.day-mode .icon-btn {
-  background: rgba(248, 250, 252, 0.9) !important;
-  color: #334155 !important;
-}
-
-.day-mode .icon-btn:hover {
-  background: rgba(255, 255, 255, 0.98) !important;
-  color: #2563eb !important;
-}
-
-.day-mode .sidebar-toggle {
-  background: rgba(255, 255, 255, 0.95) !important;
-  color: #334155 !important;
-  border-color: rgba(59, 130, 246, 0.12) !important;
-}
-
-.day-mode .notification {
-  background: rgba(255, 255, 255, 0.97) !important;
-  color: #1e293b !important;
-  border-color: rgba(59, 130, 246, 0.12) !important;
-  box-shadow: 0 4px 20px rgba(30, 64, 175, 0.1) !important;
-}
-
-.day-mode .empty-state h4 {
-  color: #334155 !important;
-}
-.day-mode .empty-state p {
-  color: #64748b !important;
-}
-
-.day-mode .stat-card {
-  background: rgba(248, 250, 252, 0.95) !important;
-  border-color: rgba(59, 130, 246, 0.08) !important;
-  color: #1e293b !important;
-  box-shadow: 0 1px 4px rgba(30, 64, 175, 0.06) !important;
-}
-
-.day-mode .stat-value {
-  color: #1e293b !important;
-}
-
-.day-mode .stat-label {
-  color: #64748b !important;
-}
-
-.day-mode .multi-select-toolbar {
-  background: linear-gradient(135deg, rgba(59,130,246,0.08) 0%, rgba(99,102,241,0.05) 100%) !important;
-  border-color: rgba(59,130,246,0.2) !important;
-}
-.day-mode .mst-label { color: #2563eb !important; }
-.day-mode .mst-count { background: rgba(59,130,246,0.1) !important; border-color: rgba(59,130,246,0.25) !important; }
-.day-mode .mst-count.has-selected { background: linear-gradient(135deg, #2563eb, #3b82f6) !important; }
-.day-mode .mst-num { color: #2563eb !important; }
-.day-mode .mst-count.has-selected .mst-num { color: #fff !important; }
-.day-mode .mst-btn { background: rgba(59,130,246,0.06) !important; color: #2563eb !important; }
-.day-mode .mst-btn:hover { background: rgba(59,130,246,0.15) !important; }
-.day-mode .mst-btn.delete { color: #9ca3af !important; }
-.day-mode .mst-btn.delete:hover:not(:disabled) { background: rgba(239,68,68,0.1) !important; color: #ef4444 !important; }
-.day-mode .mst-btn.close { color: #9ca3af !important; }
-.day-mode .mst-btn.close:hover { background: rgba(0,0,0,0.06) !important; color: #334155 !important; }
-.day-mode .mst-divider { background: rgba(59,130,246,0.15) !important; }
-.day-mode .checkbox { background: rgba(0,0,0,0.03) !important; border-color: rgba(59,130,246,0.25) !important; }
-.day-mode .checkbox.checked { background: linear-gradient(135deg, #2563eb, #3b82f6) !important; border-color: transparent !important; }
-.day-mode .point-card.selected { background: rgba(59,130,246,0.05) !important; border-color: rgba(59,130,246,0.2) !important; }
-
-.day-mode .sidebar-scroll {
-  scrollbar-color: rgba(59, 130, 246, 0.2) transparent;
-}
-
-.day-mode .night-mode-btn {
-  color: #64748b;
-  border-color: rgba(59, 130, 246, 0.12);
-  background: rgba(248, 250, 252, 0.8);
-}
-
-.day-mode .night-mode-btn:hover {
-  background: rgba(255, 255, 255, 0.95);
-  color: #334155;
-}
-
-.day-mode .night-mode-btn.active {
-  background: rgba(59, 130, 246, 0.1);
-  border-color: rgba(59, 130, 246, 0.4);
-  color: #1d4ed8;
-}
-
-.day-mode .vehicle-type-btn {
-  background: rgba(248, 250, 252, 0.8) !important;
-  color: #64748b !important;
-  border-color: rgba(59, 130, 246, 0.1) !important;
-}
-
-.day-mode .vehicle-type-btn.active {
-  background: rgba(59, 130, 246, 0.1) !important;
-  border-color: rgba(59, 130, 246, 0.4) !important;
-  color: #1d4ed8 !important;
-}
-
-.day-mode .toggle-setting span {
-  color: #334155 !important;
-}
-
-.day-mode .toggle-btn {
-  background: rgba(100, 116, 139, 0.2) !important;
-}
-
-.day-mode .toggle-btn.active {
-  background: #2563eb !important;
-}
-
-.day-mode .map-stats {
-  background: rgba(255, 255, 255, 0.95) !important;
-  color: #1e293b !important;
-  border-color: rgba(59, 130, 246, 0.1) !important;
-}
-.day-mode .map-route-summary {
-  background: rgba(255, 255, 255, 0.95) !important;
-  border-color: rgba(59, 130, 246, 0.1) !important;
-}
-.day-mode .mrs-value { color: #2563eb !important; }
-.day-mode .mrs-value.cost { color: #d97706 !important; }
-.day-mode .mrs-unit { color: #64748b !important; }
-.day-mode .mrs-divider { background: rgba(59, 130, 246, 0.12) !important; }
-.day-mode .mrs-btn.clear { background: rgba(0,0,0,0.04) !important; color: #94a3b8 !important; }
-
-.day-mode .search-panel {
-  background: rgba(255, 255, 255, 0.97) !important;
-  color: #1e293b !important;
-}
-
-.day-mode .search-panel input {
-  background: rgba(248, 250, 252, 0.95) !important;
-  color: #1e293b !important;
-  border-color: rgba(59, 130, 246, 0.15) !important;
-}
-
-.day-mode .search-panel input::placeholder {
-  color: #94a3b8 !important;
-}
-
-.day-mode .delete-btn {
-  color: #94a3b8 !important;
-}
-
-.day-mode .delete-btn:hover {
-  color: #dc2626 !important;
-  background: rgba(220, 38, 38, 0.08) !important;
-}
-
-.day-mode .priority-tag {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
-}
-
-.day-mode .distance-tag {
-  color: #64748b !important;
-}
-
-.day-mode .add-form .glass-card,
-.day-mode .add-form-overlay .glass-card {
-  background: rgba(255, 255, 255, 0.98) !important;
-  color: #1e293b !important;
-}
-
-.day-mode input, .day-mode textarea, .day-mode select {
-  background: rgba(248, 250, 252, 0.95) !important;
-  color: #1e293b !important;
-  border-color: rgba(59, 130, 246, 0.15) !important;
-}
-
-.day-mode .driver-card {
-  background: rgba(248, 250, 252, 0.9) !important;
-  color: #1e293b !important;
-}
-
-.day-mode .vehicle-info-card {
-  background: rgba(248, 250, 252, 0.9) !important;
-  color: #1e293b !important;
-  border-color: rgba(59, 130, 246, 0.1) !important;
-}
-.day-mode .vehicle-info-card.fuel { background: linear-gradient(135deg, rgba(34,197,94,0.06) 0%, rgba(255,255,255,0.9) 100%) !important; border-color: rgba(34,197,94,0.18) !important; }
-.day-mode .vehicle-info-card.ev { background: linear-gradient(135deg, rgba(59,130,246,0.06) 0%, rgba(255,255,255,0.9) 100%) !important; border-color: rgba(59,130,246,0.18) !important; }
-.day-mode .vic-header-title { color: #1e293b; }
-.day-mode .vic-header-sub { color: #64748b; }
-.day-mode .fuel-header .vic-header-sub { color: #16a34a; }
-.day-mode .ev-header .vic-header-sub { color: #2563eb; }
-.day-mode .vic-inline-val { color: #2563eb; }
-.day-mode .vic-inline-unit { color: #64748b; }
-.day-mode .vic-label, .day-mode .vic-label-compact { color: #64748b; }
-.day-mode .vic-label strong { color: #1e293b !important; }
-.day-mode .vehicle-info-card.fuel .vic-label strong { color: #16a34a !important; }
-.day-mode .vehicle-info-card.ev .vic-label strong { color: #2563eb !important; }
-.day-mode .vic-range { background: rgba(59,130,246,0.08); }
-.day-mode .vic-range-hint { color: rgba(0,0,0,0.12); }
-.day-mode .vic-mini-stats { background: rgba(59,130,246,0.04); }
-.day-mode .vic-mini-divider { background: rgba(59,130,246,0.1); }
-.day-mode .vic-mini-unit { color: #94a3b8; }
-.day-mode .vic-slider-row { border-top-color: rgba(59,130,246,0.08); }
-.day-mode .vic-grid-sliders { border-top-color: rgba(59,130,246,0.08); }
-.day-mode .vic-slider-cell { border-color: rgba(59,130,246,0.06) !important; }
-.day-mode .vic-chip small { color: #94a3b8; }
-
-.day-mode .route-summary h3,
-.day-mode .summary-header h3 {
-  color: #1e293b !important;
-}
-
-/* Day mode — Leaflet controls */
-.day-mode :global(.leaflet-control-zoom) { box-shadow: 0 4px 20px rgba(30,64,175,0.1) !important; }
-.day-mode :global(.leaflet-control-zoom a) { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
-.day-mode :global(.leaflet-control-zoom a:hover) { background: rgba(59,130,246,0.08) !important; color: #2563eb !important; }
-
-/* Day mode — Map buttons */
-.day-mode .map-myloc-btn { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; box-shadow: 0 4px 20px rgba(30,64,175,0.1) !important; }
-.day-mode .map-myloc-btn:hover { background: rgba(59,130,246,0.08) !important; color: #2563eb !important; }
-.day-mode .add-point-toggle { background: rgba(255,255,255,0.95) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
-.day-mode .add-point-toggle.active { background: rgba(59,130,246,0.1) !important; color: #2563eb !important; border-color: rgba(59,130,246,0.3) !important; }
-.day-mode .map-nav-btn { background: linear-gradient(135deg, #2563eb, #1d4ed8) !important; color: #fff !important; }
-
-/* Day mode — Route buttons */
-.day-mode .btn-navigate { background: linear-gradient(135deg, #2563eb, #1d4ed8) !important; color: #fff !important; }
-.day-mode .btn-save-route { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
-.day-mode .btn-share { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
-.day-mode .btn-alt-routes { background: rgba(248,250,252,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.12) !important; }
-
-/* Day mode — Desktop sidebar toggle */
-.day-mode .desktop-sidebar-toggle { background: rgba(255,255,255,0.9) !important; color: #334155 !important; border-color: rgba(59,130,246,0.1) !important; }
-.day-mode .desktop-sidebar-toggle:hover { color: #2563eb !important; }
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
@@ -9765,14 +9807,15 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; background: #1d1f20 !important; }
-  :global(.leaflet-container) { background: #1d1f20 !important; }
-  :global(.leaflet-tile-pane) { image-rendering: crisp-edges; -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1d1f20; }
+  #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; }
+  :global(.leaflet-container) { background: #1a1a2e !important; }
+  :global(.leaflet-control-zoom) { display: none !important; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.75) contrast(1.2); }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.dark-tiles-safety) { image-rendering: auto; }
-  :global(.dark-tiles) { transition: none; }
-  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; background: #1d1f20 !important; transition: none !important; }
+  :global(.safety-tiles) { image-rendering: auto; }
+  :global(.main-tiles) { transition: none; }
+  :global(.leaflet-tile) { transition: none !important; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
@@ -9890,7 +9933,7 @@ out center body;`;
   .undo-btn { background: rgba(255, 255, 255, 0.15); color: inherit; border: 1px solid rgba(255, 255, 255, 0.25); padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: 'Kanit', sans-serif; transition: background 0.2s; margin-left: 4px; }
   .undo-btn:hover { background: rgba(255, 255, 255, 0.25); }
 
-  :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #1d1f20; }
+  :global(.leaflet-container) { height: 100% !important; width: 100% !important; background: #1a1a2e; }
   :global(.leaflet-control-zoom) { border: none !important; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35) !important; border-radius: 12px !important; overflow: hidden; }
   :global(.leaflet-control-zoom a) { background: rgba(15, 15, 25, 0.95) !important; color: #a1a1aa !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; transition: background 0.25s ease, color 0.25s ease !important; }
   :global(.leaflet-control-zoom a:hover) { background: rgba(0, 255, 136, 0.15) !important; color: #00ff88 !important; }
@@ -11866,17 +11909,6 @@ out center body;`;
 .cost-row.total .cost-label { font-size: 0.88rem; font-weight: 600; color: rgba(255,255,255,0.95); }
 .cost-row.total .cost-value { font-size: 1.05rem; font-weight: 700; color: #00ff88; }
 
-/* Day mode - Trip Cost */
-.day-mode .trip-cost-card { background: rgba(248,250,252,0.95); border-color: rgba(59,130,246,0.1); }
-.day-mode .trip-cost-card h4 { color: #1e293b; }
-.day-mode .cost-label { color: #64748b; }
-.day-mode .cost-value { color: #2563eb; }
-.day-mode .cost-value.no-toll { color: #94a3b8; }
-.day-mode .cost-row.sub span { color: #94a3b8; }
-.day-mode .cost-divider { border-color: rgba(59,130,246,0.12); }
-.day-mode .cost-row.total .cost-label { color: #1e293b; }
-.day-mode .cost-row.total .cost-value { color: #1d4ed8; }
-
 /* Turn Preview in Route Summary */
 .turn-preview-section {
   margin-bottom: 20px;
@@ -12530,6 +12562,118 @@ out center body;`;
 :global(.poi-popup-meta) { padding: 8px 14px 12px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 :global(.poi-popup-meta p) { margin: 2px 0; font-size: 12px; color: #d4d4d8; }
 
+/* ==================== MAP POI PINS & POPUPS ==================== */
+:global(.map-poi-pin-wrap) { background: none !important; border: none !important; }
+:global(.mpoi-dot-wrap) {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  cursor: pointer; white-space: nowrap;
+  transition: transform 0.15s ease;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,0.4));
+}
+:global(.mpoi-dot-wrap:hover) {
+  transform: scale(1.3);
+  filter: drop-shadow(0 3px 8px rgba(0,0,0,0.5));
+}
+/* วงกลมสำหรับสถานที่สำคัญ — ขาว + emoji */
+:global(.mpoi-circle) {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid rgba(255,255,255,0.9);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+  flex-shrink: 0;
+}
+:global(.mpoi-important) {
+  background: rgba(30, 30, 50, 0.9);
+}
+/* วงกลมแบรนด์ — สีร้าน + ตัวอักษรขาว */
+:global(.mpoi-brand) {
+  color: #fff;
+}
+:global(.mpoi-c-icon) {
+  font-size: 15px; line-height: 1;
+}
+:global(.mpoi-c-brand) {
+  font-size: 9px; font-weight: 800; line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: -0.5px; color: #fff;
+}
+/* สถานที่เล็ก — วงกลมเล็กกว่า + emoji */
+:global(.mpoi-small) {
+  width: 22px; height: 22px;
+  background: rgba(30, 30, 50, 0.85);
+  border-width: 1.5px;
+}
+:global(.mpoi-small .mpoi-c-icon) {
+  font-size: 12px;
+}
+/* ชื่อสถานที่ */
+:global(.mpoi-c-name) {
+  font-size: 9px; font-weight: 600; color: #e4e4e7;
+  font-family: 'Kanit', sans-serif;
+  background: rgba(0,0,0,0.75);
+  padding: 1px 5px; border-radius: 3px;
+  max-width: 80px; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.3; text-align: center;
+  pointer-events: none;
+}
+:global(.map-poi-popup-container .leaflet-popup-content-wrapper) {
+  background: rgba(15, 15, 30, 0.95) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+  color: #e4e4e7 !important;
+  padding: 0 !important;
+}
+:global(.map-poi-popup-container .leaflet-popup-tip) {
+  background: rgba(15, 15, 30, 0.95) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+:global(.map-poi-popup-container .leaflet-popup-close-btn) {
+  color: #a1a1aa !important;
+  font-size: 18px !important;
+  top: 6px !important;
+  right: 8px !important;
+}
+:global(.map-poi-popup) {
+  font-family: 'Kanit', sans-serif;
+  padding: 12px 14px;
+  min-width: 180px;
+}
+:global(.mpoi-header) {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px;
+}
+:global(.mpoi-icon) {
+  font-size: 22px; width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 10px; flex-shrink: 0;
+}
+:global(.mpoi-info) {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0;
+}
+:global(.mpoi-name) {
+  font-size: 14px; font-weight: 600; color: #f4f4f5;
+  line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+:global(.mpoi-type) {
+  font-size: 11px; color: #00ff88; font-weight: 500;
+}
+:global(.mpoi-row) {
+  font-size: 12px; color: #a1a1aa;
+  padding: 2px 0;
+  line-height: 1.4;
+}
+:global(.mpoi-row a) {
+  color: #60a5fa; text-decoration: none;
+}
+:global(.mpoi-row a:hover) {
+  text-decoration: underline;
+}
+
 /* ==================== RESPONSIVE - FLOATING PANELS ==================== */
 @media (max-width: 1024px) {
   .map-search-float { width: 340px; top: 12px; right: 12px; }
@@ -12565,7 +12709,7 @@ out center body;`;
     bottom: 8px;
     left: 8px;
     right: 8px;
-    max-width: 370px;
+    max-width: calc(100% - 16px);
     padding: 4px 6px;
     overflow-x: auto;
   }

@@ -8,7 +8,6 @@
   export let userInfo = { name: '', avatar: '', role: '' };
   export let vehicleType = 'fuel';
   export let voiceEnabled = false;
-  export let nightMode = true;
   export let KM_PER_LITER = 12;
   export let ELECTRICITY_PRICE_PER_KWH = 4.2;
   export let KWH_PER_100KM = 15;
@@ -282,18 +281,6 @@
           <div class="section">
             <div class="section-title">การแสดงผล</div>
             <div class="pref-list">
-              <div class="pref-item">
-                <div class="pref-info">
-                  <span class="pref-icon">{nightMode ? '🌙' : '☀️'}</span>
-                  <div>
-                    <span class="pref-name">โหมดกลางคืน</span>
-                    <span class="pref-desc">ปรับสีแผนที่และ UI</span>
-                  </div>
-                </div>
-                <button class="toggle-switch" class:active={nightMode} on:click={() => { nightMode = !nightMode; try { localStorage.setItem(getUserKey('nightMode'), nightMode ? 'dark' : 'light'); } catch(e) {} }}>
-                  <div class="toggle-dot"></div>
-                </button>
-              </div>
               <div class="pref-item">
                 <div class="pref-info">
                   <span class="pref-icon">🔊</span>
