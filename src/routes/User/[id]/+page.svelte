@@ -5180,32 +5180,12 @@
 
 
   // ═══ Camera rotation — leaflet-rotate จัดการทั้งหมด ═══
-  let _resetAnimFrame: any = null;
   function resetCamView() {
-    if (!map || !(map as any).setBearing) return;
-    // Animate bearing → 0 แบบ smooth (ease-out)
-    cancelAnimationFrame(_resetAnimFrame);
-    const startBearing = (map as any).getBearing?.() || 0;
-    if (Math.abs(startBearing) < 0.5) { camAngle = 0; camActive = false; return; }
-    const startTime = performance.now();
-    const duration = 350; // ms
-    // หมุนทางสั้นที่สุด: normalize -180..180
-    let delta = -startBearing;
-    if (delta > 180) delta -= 360;
-    if (delta < -180) delta += 360;
-    function step(now: number) {
-      const t = Math.min((now - startTime) / duration, 1);
-      const ease = 1 - (1 - t) * (1 - t); // ease-out quad
-      (map as any).setBearing(startBearing + delta * ease);
-      if (t < 1) {
-        _resetAnimFrame = requestAnimationFrame(step);
-      } else {
-        (map as any).setBearing(0);
-        camAngle = 0;
-        camActive = false;
-      }
+    if (map && (map as any).setBearing) {
+      (map as any).setBearing(0);
     }
-    _resetAnimFrame = requestAnimationFrame(step);
+    camAngle = 0;
+    camActive = false;
   }
 
   function setupCamRotateListener() {

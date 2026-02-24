@@ -28,7 +28,8 @@
       "Bash(git push:*)",
       "WebSearch",
       "Bash(timeout 15 npx vite dev:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(npm run dev:*)"
     ]
   }
 }
