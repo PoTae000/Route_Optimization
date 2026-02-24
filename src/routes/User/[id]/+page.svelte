@@ -459,8 +459,8 @@
   let selectedRouteIndex = 0;
   let showRouteSelector = false;
   let alternativeRouteLayers: any[] = [];
-  const routeColors = ['#00ff88', '#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899'];
-  const altRouteColors = ['#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#f97316', '#ec4899'];
+  const routeColors = ['#22c55e', '#60a5fa', '#fbbf24', '#c084fc', '#f87171', '#2dd4bf', '#fb923c', '#f472b6'];
+  const altRouteColors = ['#60a5fa', '#fbbf24', '#c084fc', '#f87171', '#2dd4bf', '#fb923c', '#f472b6'];
   const routeLabels = ['เส้นทางที่เร็วที่สุด', 'เส้นทางทางเลือก', 'เส้นทาง 3', 'เส้นทาง 4', 'เส้นทาง 5', 'เส้นทาง 6', 'เส้นทาง 7', 'เส้นทาง 8', 'เส้นทาง 9', 'เส้นทาง 10', 'เส้นทาง 11', 'เส้นทาง 12'];
 
   // Toll & Expressway Options
@@ -1723,13 +1723,13 @@
   // ขนาดเส้นตาม zoom — บางลงเมื่อซูมออก
   function getRouteWeight(zoom?: number): { main: number; mainSel: number } {
     const z = zoom ?? map?.getZoom?.() ?? 14;
-    if (z >= 16) return { main: 5, mainSel: 6 };
-    if (z >= 14) return { main: 4, mainSel: 5 };
-    if (z >= 13) return { main: 3.5, mainSel: 4.5 };
-    if (z >= 12) return { main: 3, mainSel: 4 };
-    if (z >= 10) return { main: 2, mainSel: 3 };
-    if (z >= 7)  return { main: 1.5, mainSel: 2 };
-    return { main: 1, mainSel: 1.5 };
+    if (z >= 16) return { main: 3.5, mainSel: 4.5 };
+    if (z >= 14) return { main: 3, mainSel: 4 };
+    if (z >= 13) return { main: 2.5, mainSel: 3.5 };
+    if (z >= 12) return { main: 2, mainSel: 3 };
+    if (z >= 10) return { main: 1.5, mainSel: 2 };
+    if (z >= 7)  return { main: 1, mainSel: 1.5 };
+    return { main: 0.8, mainSel: 1 };
   }
 
   function updateRouteWeights() {
@@ -1832,10 +1832,10 @@
     altLabelMarkers.forEach(marker => {
       const el = marker.getElement?.();
       if (!el) return;
-      if (zoom >= 13) {
+      if (zoom >= 15) {
         el.style.opacity = '1';
         el.style.pointerEvents = 'auto';
-      } else if (zoom >= 12) {
+      } else if (zoom >= 14) {
         el.style.opacity = '0.6';
         el.style.pointerEvents = 'auto';
       } else {
@@ -2787,8 +2787,6 @@
       // Clear destination marker + state
       if (destinationMarker) { destinationMarker.remove(); destinationMarker = null; }
       directDestination = null;
-      // Recalculate route with new point included
-      await calculateRouteWithAlternatives();
     } catch (err) {
       showNotification('ไม่สามารถนำทางได้', 'error');
     }
@@ -8736,8 +8734,8 @@ out center body;`;
   }
   .start-pin { filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
 
-  .action-buttons { padding: 10px 14px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-  .action-buttons .btn { flex: 1 1 calc(50% - 3px); min-width: 0; }
+  .action-buttons { padding: 10px 14px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 5px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .action-buttons .btn { flex: 1 1 calc(33.3% - 4px); min-width: 0; }
 
   .btn {
     display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -10186,8 +10184,8 @@ out center body;`;
     }
     .action-buttons::-webkit-scrollbar { display: none; }
     .action-buttons .btn {
-      flex: 0 0 auto; min-width: 120px; justify-content: center;
-      padding: 9px 14px; font-size: 12px; gap: 6px; border-radius: 12px;
+      flex: 0 0 auto; min-width: 0; justify-content: center;
+      padding: 8px 10px; font-size: 11px; gap: 4px; border-radius: 10px;
       background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07);
       white-space: nowrap; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
       font-weight: 500;
