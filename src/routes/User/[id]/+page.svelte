@@ -5188,15 +5188,10 @@
 
   function setupCamRotateListener() {
     if (!map) return;
-    // leaflet-rotate fires 'rotate' event เมื่อ bearing เปลี่ยน
     map.on('rotate' as any, () => {
       const bearing = (map as any).getBearing?.() || 0;
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
-      // Force redraw vector layers (routes) หลัง rotate
-      map.eachLayer((layer: any) => {
-        if (layer.redraw) layer.redraw();
-      });
     });
   }
 
@@ -6898,7 +6893,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.canvas({ padding: 5.0 }),
+        renderer: L.svg({ padding: 5.0 }),
         zoomSnap: 1,
         zoomDelta: 1,
         wheelDebounceTime: 40,
