@@ -5926,6 +5926,28 @@ out center body;`;
 
   // ==================== TILE PREFETCH ====================
   let _prefetchAbort: AbortController | null = null;
+  const _prefetchedTiles = new Set<string>();
+
+  function latLngToTile(lat: number, lng: number, z: number) {
+    const n = Math.pow(2, z);
+    const x = Math.floor((lng + 180) / 360 * n);
+    const latRad = lat * Math.PI / 180;
+    const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+    return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
+  }
+
+  // สร้าง tile queue แบบ spiral (กลาง→ขอบ) — โหลดที่ใกล้ก่อน
+  function spiralTiles(cx: number, cy: number, radius: number): {dx: number, dy: number}[] {
+    const result: {dx: number, dy: number}[] = [{dx: 0, dy: 0}];
+    for (let r = 1; r <= radius; r++) {
+      for (let i = -r; i < r; i++) result.push({dx: i, dy: -r});   // top
+      for (let i = -r; i < r; i++) result.push({dx: r, dy: i});    // right
+      for (let i = r; i > -r; i--) result.push({dx: i, dy: r});    // bottom
+      for (let i = r; i > -r; i--) result.push({dx: -r, dy: i});   // left
+    }
+    return result;
+  }
+
   function prefetchTiles(mapRef: any) {
     if (!mapRef) return;
     _prefetchAbort?.abort();
@@ -5936,32 +5958,37 @@ out center body;`;
     const subs = 'abc';
     const queue: string[] = [];
 
-    function latLngToTile(lat: number, lng: number, z: number) {
-      const n = Math.pow(2, z);
-      const x = Math.floor((lng + 180) / 360 * n);
-      const latRad = lat * Math.PI / 180;
-      const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
-      return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
-    }
+    // โหลด zoom ปัจจุบัน (กว้าง) + zoom ±1,±2,±3 (แคบลง)
+    const zoomConfigs = [
+      { z: curZoom,     radius: 6 },  // 13x13 = 169 tiles
+      { z: curZoom - 1, radius: 4 },  // 9x9 = 81
+      { z: curZoom + 1, radius: 4 },  // 9x9 = 81
+      { z: curZoom - 2, radius: 3 },  // 7x7 = 49
+      { z: curZoom + 2, radius: 3 },  // 7x7 = 49
+      { z: curZoom - 3, radius: 2 },  // 5x5 = 25
+      { z: curZoom + 3, radius: 2 },  // 5x5 = 25
+    ];
 
-    // Prefetch current zoom ± 1, surrounding 5x5 tile grid
-    const zooms = [curZoom, curZoom - 1, curZoom + 1].filter(z => z >= 2 && z <= 19);
-    for (const z of zooms) {
+    for (const { z, radius } of zoomConfigs) {
+      if (z < 2 || z > 19) continue;
       const ct = latLngToTile(center.lat, center.lng, z);
-      const radius = z === curZoom ? 3 : 2;
       const n = Math.pow(2, z);
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const tx = ((ct.x + dx) % n + n) % n;
-          const ty = ct.y + dy;
-          if (ty < 0 || ty >= n) continue;
-          const s = subs[(tx + ty) % 3];
-          queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
-        }
+      const spiral = spiralTiles(ct.x, ct.y, radius);
+      for (const { dx, dy } of spiral) {
+        const tx = ((ct.x + dx) % n + n) % n;
+        const ty = ct.y + dy;
+        if (ty < 0 || ty >= n) continue;
+        const key = `${z}/${tx}/${ty}`;
+        if (_prefetchedTiles.has(key)) continue;
+        _prefetchedTiles.add(key);
+        const s = subs[(tx + ty) % 3];
+        queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
       }
     }
 
-    // Load tiles in background (batch 2, 150ms gap)
+    if (queue.length === 0) return;
+
+    // โหลดเบื้องหลัง batch 2 ทุก 200ms (ช้าแต่ต่อเนื่อง ไม่โดน rate limit)
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
@@ -5972,7 +5999,7 @@ out center body;`;
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 150);
+      setTimeout(loadBatch, 200);
     }
     loadBatch();
   }
@@ -6868,9 +6895,13 @@ out center body;`;
         className: 'main-tiles'
       }).addTo(map);
 
-      // ═══ Background tile prefetch — โหลดครั้งเดียวตอนเริ่ม ═══
+      // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
+      // หยุดตอนเลื่อน (ให้ bandwidth แก่ tile ที่ต้องแสดง)
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      setTimeout(() => prefetchTiles(map), 2000);
+      // เลื่อนเสร็จ → รอ 2 วิ แล้วโหลดรอบตำแหน่งใหม่
+      map.on('moveend', () => { setTimeout(() => prefetchTiles(map), 2000); });
+      // เริ่มโหลดทันทีหลัง map พร้อม
+      setTimeout(() => prefetchTiles(map), 1500);
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
