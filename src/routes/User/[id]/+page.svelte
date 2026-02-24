@@ -95,6 +95,8 @@
     poiMarkers = [];
     mapPOIMarkers = [];
     _poiElements.clear();
+    _fetchedRegions.clear();
+    _visibleMarkers.clear();
     oilPriceData = null;
     currentLocation = null;
     currentLocationMarker = null;
@@ -619,10 +621,10 @@
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — ลดแสงลง ให้เห็นความลึก
-      scene.add(new THREE.AmbientLight(0x8899aa, 1.8));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 2.2);
-      sun.position.set(5, 3, 5);
+      // Lighting — ใช้เงาดำแทนแสงจ้า
+      scene.add(new THREE.AmbientLight(0xffffff, 2.5));
+      const sun: any = new THREE.DirectionalLight(0xffffff, 0.8);
+      sun.position.set(3, 2, 5);
       scene.add(sun);
 
       // Stars — 2000 ดวง (เบา)
@@ -641,10 +643,10 @@
       const earthGeo = new THREE.SphereGeometry(1, 64, 64);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
-        specular: new THREE.Color(0x556677),
-        shininess: 25,
-        emissive: new THREE.Color(0x111122),
-        emissiveIntensity: 0.4
+        specular: new THREE.Color(0x000000),
+        shininess: 0,
+        emissive: new THREE.Color(0x000000),
+        emissiveIntensity: 0
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
       scene.add(earth);
@@ -654,13 +656,24 @@
       const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
       const atmosMat = new THREE.ShaderMaterial({
         vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.5) * i; }`,
+        fragmentShader: `varying vec3 vNormal; void main() { float rim = 1.0 - dot(vNormal, vec3(0,0,1)); float i = pow(rim, 3.0); gl_FragColor = vec4(0.0, 0.0, 0.0, smoothstep(0.0, 1.0, i) * 0.9); }`,
         side: THREE.BackSide,
-        blending: THREE.AdditiveBlending,
+        blending: THREE.NormalBlending,
         transparent: true,
         depthWrite: false
       });
       scene.add(new THREE.Mesh(atmosGeo, atmosMat) as any);
+
+      // Rim edge — เส้นขอบชัดรอบลูกโลก
+      const rimGeo = new THREE.SphereGeometry(1.015, 64, 64);
+      const rimMat = new THREE.ShaderMaterial({
+        vertexShader: `varying vec3 vNormal; varying vec3 vViewDir; void main() { vNormal = normalize(normalMatrix * normal); vec4 mvPos = modelViewMatrix * vec4(position, 1.0); vViewDir = normalize(-mvPos.xyz); gl_Position = projectionMatrix * mvPos; }`,
+        fragmentShader: `varying vec3 vNormal; varying vec3 vViewDir; void main() { float rim = 1.0 - max(dot(vNormal, vViewDir), 0.0); float edge = smoothstep(0.8, 1.0, rim); gl_FragColor = vec4(0.15, 0.18, 0.22, edge * 0.15); }`,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.FrontSide
+      });
+      scene.add(new THREE.Mesh(rimGeo, rimMat) as any);
 
       // OrbitControls (drag to rotate globe)
       const controls = new OrbitControls(camera, renderer.domElement as HTMLElement);
@@ -713,9 +726,6 @@
         if (!tex || !globeEarth) return;
         globeEarth.material.map = tex;
         globeEarth.material.color.set(0xffffff);
-        globeEarth.material.emissive.set(0x222233);
-        globeEarth.material.emissiveIntensity = 0.6;
-        globeEarth.material.emissiveMap = tex;
         globeEarth.material.needsUpdate = true;
       }
 
@@ -5737,12 +5747,20 @@ out center body;`;
   }
 
   // Fetch POI สำหรับ bbox จาก Overpass (1 request ต่อ viewport)
+  // จำ bbox ที่เคย fetch แล้ว (ไม่ซ้ำ) — key = bbox rounded to 0.01°
+  const _fetchedRegions = new Set<string>();
+  // เก็บ marker ที่แสดงอยู่ — key = element id
+  const _visibleMarkers = new Map<number, any>();
+
   async function fetchPOIForBounds(bbox: string, signal: AbortSignal): Promise<boolean> {
     if (_poiFetching) return false;
     _poiFetching = true;
-    const query = `[out:json][timeout:12];nwr["name"](${bbox});out center body 800;`;
+    const query = `[out:json][timeout:8];nwr["name"](${bbox});out center body 500;`;
     for (let attempt = 0; attempt < OVERPASS_SERVERS.length; attempt++) {
+      if (signal.aborted) { _poiFetching = false; return false; }
       const url = OVERPASS_SERVERS[(_overpassServerIdx + attempt) % OVERPASS_SERVERS.length];
+      // Fetch with 8s timeout
+      const timeoutId = setTimeout(() => { if (!signal.aborted) mapPOIAbortController?.abort(); }, 8000);
       try {
         const res = await fetch(url, {
           method: 'POST',
@@ -5750,20 +5768,18 @@ out center body;`;
           body: `data=${encodeURIComponent(query)}`,
           signal
         });
+        clearTimeout(timeoutId);
         if (signal.aborted) { _poiFetching = false; return false; }
-        if (res.status === 429) {
-          _overpassServerIdx = (_overpassServerIdx + attempt + 1) % OVERPASS_SERVERS.length;
+        if (!res.ok) {
+          _overpassServerIdx = (_overpassServerIdx + 1) % OVERPASS_SERVERS.length;
           continue;
         }
-        if (!res.ok) continue;
         const data = await res.json();
         if (signal.aborted) { _poiFetching = false; return false; }
         const elements = data.elements || [];
-        // เก็บลง global cache (dedupe by id)
         for (const el of elements) {
           if (el.id && el.tags) _poiElements.set(el.id, el);
         }
-        // จำกัด cache ไม่เกิน 15000 elements
         if (_poiElements.size > 15000) {
           const keys = [..._poiElements.keys()];
           for (let i = 0; i < keys.length - 12000; i++) _poiElements.delete(keys[i]);
@@ -5771,7 +5787,9 @@ out center body;`;
         _poiFetching = false;
         return true;
       } catch (err: any) {
+        clearTimeout(timeoutId);
         if (err.name === 'AbortError') { _poiFetching = false; return false; }
+        _overpassServerIdx = (_overpassServerIdx + 1) % OVERPASS_SERVERS.length;
         continue;
       }
     }
@@ -5779,23 +5797,45 @@ out center body;`;
     return false;
   }
 
-  // แสดง POI markers จาก cached elements ที่อยู่ใน viewport
+  // Smart render — เฉพาะ add/remove ที่เปลี่ยน (ไม่กระพริบ)
   function renderVisiblePOIs() {
-    clearMapPOIs();
     if (!map || !L) return;
     const bounds = map.getBounds();
     const zoom = map.getZoom();
-    if (zoom < 14) return;
+    if (zoom < 14) {
+      clearMapPOIs();
+      _visibleMarkers.clear();
+      return;
+    }
 
+    const shouldShow = new Set<number>();
     for (const el of _poiElements.values()) {
       const lat = el.lat || el.center?.lat;
       const lon = el.lon || el.center?.lon;
       if (!lat || !lon || !el.tags) continue;
       if (!bounds.contains([lat, lon])) continue;
-      const tags = el.tags;
-      const minZoom = getPoiMinZoom(tags);
-      if (zoom < minZoom) continue;
+      if (zoom < getPoiMinZoom(el.tags)) continue;
+      shouldShow.add(el.id);
+    }
 
+    // Remove markers ที่ไม่ควรแสดงแล้ว
+    for (const [id, marker] of _visibleMarkers) {
+      if (!shouldShow.has(id)) {
+        map.removeLayer(marker);
+        _visibleMarkers.delete(id);
+        const idx = mapPOIMarkers.indexOf(marker);
+        if (idx >= 0) mapPOIMarkers.splice(idx, 1);
+      }
+    }
+
+    // Add markers ใหม่ที่ยังไม่มี
+    for (const id of shouldShow) {
+      if (_visibleMarkers.has(id)) continue;
+      const el = _poiElements.get(id);
+      if (!el) continue;
+      const lat = el.lat || el.center?.lat;
+      const lon = el.lon || el.center?.lon;
+      const tags = el.tags;
       const name = tags['name:th'] || tags.name || tags.brand || tags.operator || '';
       const { icon, color, brandLogo, showIcon } = getMapPOIIcon(tags);
       const displayName = escapeHtml(name || getMapPOIType(tags));
@@ -5824,7 +5864,13 @@ out center body;`;
       }).addTo(map);
       marker.bindPopup(buildPOIPopupHTML(tags), { maxWidth: 280, className: 'map-poi-popup-container' });
       mapPOIMarkers.push(marker);
+      _visibleMarkers.set(id, marker);
     }
+  }
+
+  function getBoundsRegionKey(bounds: any): string {
+    // Round to 0.01° grid (~1km) — ถ้าเคย fetch แล้วไม่ fetch ซ้ำ
+    return `${Math.floor(bounds.getSouth()*100)},${Math.floor(bounds.getWest()*100)},${Math.ceil(bounds.getNorth()*100)},${Math.ceil(bounds.getEast()*100)}`;
   }
 
   async function loadMapPOIs() {
@@ -5833,40 +5879,49 @@ out center body;`;
 
     if (zoom < 14) {
       clearMapPOIs();
+      _visibleMarkers.clear();
       _lastPOIBounds = '';
       return;
     }
 
     const bounds = map.getBounds();
-    const boundsKey = `${bounds.getSouth().toFixed(3)},${bounds.getWest().toFixed(3)},${bounds.getNorth().toFixed(3)},${bounds.getEast().toFixed(3)}`;
-    if (boundsKey === _lastPOIBounds) return;
-    _lastPOIBounds = boundsKey;
+    const regionKey = getBoundsRegionKey(bounds);
 
     // แสดง cached data ทันที
     renderVisiblePOIs();
 
-    // Fetch ข้อมูลใหม่ (1 request, bbox ขยาย 20% สำหรับ prefetch)
+    // ถ้า region นี้เคย fetch แล้ว → ไม่ต้อง fetch อีก
+    if (_fetchedRegions.has(regionKey)) return;
+
+    // Abort fetch เก่า
     if (mapPOIAbortController) mapPOIAbortController.abort();
     mapPOIAbortController = new AbortController();
     const signal = mapPOIAbortController.signal;
 
-    const padLat = (bounds.getNorth() - bounds.getSouth()) * 0.2;
-    const padLng = (bounds.getEast() - bounds.getWest()) * 0.2;
+    const padLat = (bounds.getNorth() - bounds.getSouth()) * 0.15;
+    const padLng = (bounds.getEast() - bounds.getWest()) * 0.15;
     const bbox = `${(bounds.getSouth() - padLat).toFixed(5)},${(bounds.getWest() - padLng).toFixed(5)},${(bounds.getNorth() + padLat).toFixed(5)},${(bounds.getEast() + padLng).toFixed(5)}`;
 
     isLoadingMapPOIs = true;
     const ok = await fetchPOIForBounds(bbox, signal);
     if (!signal.aborted) {
       isLoadingMapPOIs = false;
-      if (ok) renderVisiblePOIs();
+      if (ok) {
+        _fetchedRegions.add(regionKey);
+        // จำกัด regions cache ไม่เกิน 200
+        if (_fetchedRegions.size > 200) {
+          const first = _fetchedRegions.values().next().value;
+          if (first) _fetchedRegions.delete(first);
+        }
+        renderVisiblePOIs();
+      }
     }
   }
 
   function onMapMoveForPOI() {
     if (_mapPOITimer) clearTimeout(_mapPOITimer);
-    // แสดง cached ทันที + fetch ใหม่หลัง debounce
-    renderVisiblePOIs();
-    _mapPOITimer = setTimeout(loadMapPOIs, 300);
+    renderVisiblePOIs(); // cached ทันที
+    _mapPOITimer = setTimeout(loadMapPOIs, 500); // fetch หลัง 500ms
   }
 
   // ==================== TILE PREFETCH ====================
@@ -6788,37 +6843,22 @@ out center body;`;
         markerZoomAnimation: true
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ 2-Layer Tile: Safety (เบลอ) + Main (คม) — ไม่เห็นขาวตอนซูม ═══
-      // Layer 1: Safety net — tile zoom ต่ำยืดขยาย (โหลดทันที)
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        subdomains: 'abc',
-        maxNativeZoom: 8,
-        maxZoom: 19,
-        keepBuffer: 25,
-        updateWhenZooming: true,
-        updateWhenIdle: false,
-        updateInterval: 0,
-        className: 'safety-tiles'
-      }).addTo(map);
-
-      // Layer 2: OSM tiles — ร้านค้า/ร้านอาหาร/สถานที่ครบสุด + CSS invert = ธีมมืด
+      // ═══ OSM Tile Layer — 1 layer เท่านั้น (ลด requests, ไม่โดน rate limit) ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 15,
+        keepBuffer: 8,
         updateWhenZooming: true,
-        updateWhenIdle: false,
-        updateInterval: 50,
+        updateWhenIdle: true,
+        updateInterval: 150,
         className: 'main-tiles'
       }).addTo(map);
 
-      // ═══ Background tile prefetch — โหลด tiles รอไว้ใน browser cache ═══
-      // หยุด prefetch เมื่อ user เลื่อน/ซูม เพื่อไม่แย่ง bandwidth
+      // ═══ Background tile prefetch — โหลดครั้งเดียวตอนเริ่ม ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      map.on('moveend', () => { setTimeout(() => prefetchTiles(map), 3000); });
-      setTimeout(() => prefetchTiles(map), 2000);
+      setTimeout(() => prefetchTiles(map), 3000);
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -9843,7 +9883,6 @@ out center body;`;
   :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.88) contrast(1.15); }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.safety-tiles) { image-rendering: auto; }
   :global(.main-tiles) { transition: none; }
   :global(.leaflet-tile) { transition: none !important; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
