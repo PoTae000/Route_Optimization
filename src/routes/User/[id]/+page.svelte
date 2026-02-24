@@ -5208,33 +5208,44 @@
   }
 
   function setupCamGesture() {
-    const wrapper = document.querySelector('.cam-wrapper') as HTMLElement;
-    if (!wrapper) return;
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
 
-    function fingerAngle(t1: Touch, t2: Touch) {
+    // จับมุมระหว่างสองนิ้ว — หมุนตามเข็ม = หมุนขวา, ทวนเข็ม = หมุนซ้าย
+    function twoFingerAngle(t1: Touch, t2: Touch) {
       return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * 180 / Math.PI;
     }
 
-    wrapper.addEventListener('touchstart', (e: TouchEvent) => {
+    // ใช้ capture phase ดักก่อน Leaflet
+    mapEl.addEventListener('touchstart', (e: TouchEvent) => {
       if (e.touches.length === 2) {
         _camGesturing = true;
-        _camStartAngle = fingerAngle(e.touches[0], e.touches[1]);
+        _camStartAngle = twoFingerAngle(e.touches[0], e.touches[1]);
         _camAngleStart = camAngle;
       }
-    }, { passive: true });
+    }, { passive: true, capture: true });
 
-    wrapper.addEventListener('touchmove', (e: TouchEvent) => {
+    mapEl.addEventListener('touchmove', (e: TouchEvent) => {
       if (!_camGesturing || e.touches.length !== 2) return;
-      let delta = fingerAngle(e.touches[0], e.touches[1]) - _camStartAngle;
+      const cur = twoFingerAngle(e.touches[0], e.touches[1]);
+      let delta = cur - _camStartAngle;
+      // normalize -180..180
       if (delta > 180) delta -= 360;
       if (delta < -180) delta += 360;
-      camAngle = _camAngleStart + delta;
-      applyCamTransform(false);
-    }, { passive: true });
+      // threshold — ต้องหมุนนิ้วจริงๆ ไม่ใช่แค่ pinch zoom
+      if (Math.abs(delta) > 2) {
+        camAngle = _camAngleStart + delta;
+        applyCamTransform(false);
+      }
+    }, { passive: true, capture: true });
 
-    wrapper.addEventListener('touchend', (e: TouchEvent) => {
-      if (e.touches.length < 2) _camGesturing = false;
-    }, { passive: true });
+    mapEl.addEventListener('touchend', () => {
+      _camGesturing = false;
+    }, { passive: true, capture: true });
+
+    mapEl.addEventListener('touchcancel', () => {
+      _camGesturing = false;
+    }, { passive: true, capture: true });
   }
 
   function centerOnCurrentLocation() {
