@@ -6843,22 +6843,35 @@ out center body;`;
         markerZoomAnimation: true
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ OSM Tile Layer — 1 layer เท่านั้น (ลด requests, ไม่โดน rate limit) ═══
+      // ═══ Tile Layers ═══
+      // Layer 1: Safety — zoom 3 ยืดเต็มจอ (โหลดครั้งเดียว แคชตลอด ไม่มีเทาว่าง)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        subdomains: 'abc',
+        maxNativeZoom: 4,
+        maxZoom: 19,
+        keepBuffer: 50,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        updateInterval: 0,
+        className: 'safety-tiles'
+      }).addTo(map);
+
+      // Layer 2: Main — รายละเอียดสูง โหลดตามจริง
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 8,
+        keepBuffer: 10,
         updateWhenZooming: true,
         updateWhenIdle: true,
-        updateInterval: 150,
+        updateInterval: 100,
         className: 'main-tiles'
       }).addTo(map);
 
       // ═══ Background tile prefetch — โหลดครั้งเดียวตอนเริ่ม ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      setTimeout(() => prefetchTiles(map), 3000);
+      setTimeout(() => prefetchTiles(map), 2000);
 
       // Set current location immediately if GPS succeeded
       if (userPos) {
@@ -9880,7 +9893,8 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.88) contrast(1.15); }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.88) contrast(1.15); background: #e5e5e0; }
+  :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
   :global(.main-tiles) { transition: none; }
