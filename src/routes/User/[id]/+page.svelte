@@ -6863,16 +6863,22 @@ out center body;`;
         zoomControl: false,
         attributionControl: false,
         renderer: L.svg({ padding: 5.0 }),
-        zoomSnap: 1,
+        zoomSnap: 0.5,
+        zoomDelta: 1,
         wheelDebounceTime: 40,
+        wheelPxPerZoomLevel: 90,
         minZoom: 2,
         maxZoom: 18,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
-        maxBoundsViscosity: 1.0,
-        fadeAnimation: false,
-        zoomAnimation: false,
-        markerZoomAnimation: false
+        maxBoundsViscosity: 0.8,
+        fadeAnimation: true,
+        zoomAnimation: true,
+        markerZoomAnimation: true,
+        inertia: true,
+        inertiaDeceleration: 3000,
+        inertiaMaxSpeed: 2000,
+        easeLinearity: 0.25
       }).setView([initLat, initLng], initZoom);
 
       // ═══ Tile Layers — OSM + detectRetina (คมชัดบนจอ HiDPI) ═══
@@ -9923,19 +9929,21 @@ out center body;`;
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
   .map-stat.weather .map-stat-value { font-size: 16px; }
-  #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; }
+  #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; will-change: transform; -webkit-transform: translateZ(0); transform: translateZ(0); }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
   :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.5) brightness(0.95) contrast(1.25); background: #e5e5e0; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { transition: none; image-rendering: high-quality; }
-  :global(.leaflet-tile) { transition: none !important; image-rendering: high-quality; }
+  :global(.main-tiles) { image-rendering: high-quality; }
+  :global(.leaflet-tile) { image-rendering: high-quality; will-change: transform, opacity; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
+  :global(.leaflet-map-pane) { will-change: transform; }
+  :global(.leaflet-tile-container) { will-change: transform; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
-  :global(.leaflet-fade-anim .leaflet-tile) { will-change: auto; transition: none !important; }
+  :global(.leaflet-fade-anim .leaflet-tile) { will-change: transform, opacity; transition: opacity 0.15s linear !important; }
   :global(.leaflet-fade-anim .leaflet-popup) { transition: none !important; }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
