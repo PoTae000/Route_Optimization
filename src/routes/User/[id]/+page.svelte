@@ -6893,10 +6893,10 @@ out center body;`;
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 15,
+        keepBuffer: 20,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 80,
+        updateInterval: 0,
         className: 'main-tiles'
       }).addTo(map);
 
