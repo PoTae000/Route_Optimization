@@ -5933,8 +5933,7 @@ out center body;`;
     const signal = _prefetchAbort.signal;
     const center = mapRef.getCenter();
     const curZoom = mapRef.getZoom();
-    const subs = 'abcd';
-    const retina = window.devicePixelRatio > 1 ? '@2x' : '';
+    const subs = 'abc';
     const queue: string[] = [];
 
     function latLngToTile(lat: number, lng: number, z: number) {
@@ -5956,24 +5955,24 @@ out center body;`;
           const tx = ((ct.x + dx) % n + n) % n;
           const ty = ct.y + dy;
           if (ty < 0 || ty >= n) continue;
-          const s = subs[(tx + ty) % 4];
-          queue.push(`https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${tx}/${ty}${retina}.png`);
+          const s = subs[(tx + ty) % 3];
+          queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
         }
       }
     }
 
-    // Load tiles in background (batch 4, 100ms gap — CDN รับได้เร็ว)
+    // Load tiles in background (batch 2, 150ms gap)
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 4);
-      idx += 4;
+      const batch = queue.slice(idx, idx + 2);
+      idx += 2;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 100);
+      setTimeout(loadBatch, 150);
     }
     loadBatch();
   }
@@ -6844,29 +6843,28 @@ out center body;`;
         markerZoomAnimation: true
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layers — CartoDB CDN (เร็วกว่า OSM มาก, มี edge server เอเชีย) ═══
-      // Layer 1: Safety — zoom 3 ยืดเต็มจอ (โหลดครั้งเดียว ไม่มีเทาว่าง)
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        subdomains: 'abcd',
+      // ═══ Tile Layers — OSM ═══
+      // Layer 1: Safety — zoom ต่ำยืดเต็มจอ (ไม่มีเทาว่าง)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        subdomains: 'abc',
         maxNativeZoom: 4,
         maxZoom: 19,
         keepBuffer: 50,
         updateWhenZooming: false,
         updateWhenIdle: true,
-        updateInterval: 0,
         className: 'safety-tiles'
       }).addTo(map);
 
-      // Layer 2: Main — รายละเอียดสูง, CDN 4 subdomains = 4x parallel
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
-        subdomains: 'abcd',
+      // Layer 2: Main
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 15,
+        keepBuffer: 12,
         updateWhenZooming: true,
         updateWhenIdle: true,
-        updateInterval: 80,
+        updateInterval: 100,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -7068,10 +7066,7 @@ out center body;`;
 
 <svelte:head>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://a.basemaps.cartocdn.com">
-  <link rel="preconnect" href="https://b.basemaps.cartocdn.com">
-  <link rel="preconnect" href="https://c.basemaps.cartocdn.com">
-  <link rel="preconnect" href="https://d.basemaps.cartocdn.com">
+  <link rel="preconnect" href="https://tile.openstreetmap.org">
   <title>ผู้ใช้ทั่วไป | Route Optimization</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
