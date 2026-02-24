@@ -619,9 +619,9 @@
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — 2 lights โทนเขียว
-      scene.add(new THREE.AmbientLight(0x88ddaa, 4.5));
-      const sun: any = new THREE.DirectionalLight(0xccffdd, 3.0);
+      // Lighting — 2 lights
+      scene.add(new THREE.AmbientLight(0xccccdd, 4.5));
+      const sun: any = new THREE.DirectionalLight(0xffffff, 3.0);
       sun.position.set(5, 3, 5);
       scene.add(sun);
 
@@ -641,9 +641,9 @@
       const earthGeo = new THREE.SphereGeometry(1, 48, 48);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
-        specular: new THREE.Color(0x335544),
+        specular: new THREE.Color(0x334455),
         shininess: 15,
-        emissive: new THREE.Color(0x0a1a0f),
+        emissive: new THREE.Color(0x111122),
         emissiveIntensity: 0.5
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
@@ -654,7 +654,7 @@
       const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
       const atmosMat = new THREE.ShaderMaterial({
         vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.0, 1.0, 0.53, 0.5) * i; }`,
+        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.5) * i; }`,
         side: THREE.BackSide,
         blending: THREE.AdditiveBlending,
         transparent: true,
@@ -708,7 +708,7 @@
         if (!tex || !globeEarth) return;
         globeEarth.material.map = tex;
         globeEarth.material.color.set(0xffffff);
-        globeEarth.material.emissive.set(0x112218);
+        globeEarth.material.emissive.set(0x222233);
         globeEarth.material.emissiveIntensity = 0.6;
         globeEarth.material.emissiveMap = tex;
         globeEarth.material.needsUpdate = true;
