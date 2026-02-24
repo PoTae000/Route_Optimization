@@ -6893,19 +6893,16 @@ out center body;`;
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 12,
+        keepBuffer: 15,
         updateWhenZooming: true,
         updateWhenIdle: true,
-        updateInterval: 100,
+        updateInterval: 80,
         className: 'main-tiles'
       }).addTo(map);
 
       // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
-      // หยุดตอนเลื่อน (ให้ bandwidth แก่ tile ที่ต้องแสดง)
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      // เลื่อนเสร็จ → รอ 2 วิ แล้วโหลดรอบตำแหน่งใหม่
       map.on('moveend', () => { setTimeout(() => prefetchTiles(map), 2000); });
-      // เริ่มโหลดทันทีหลัง map พร้อม
       setTimeout(() => prefetchTiles(map), 1500);
 
       // Set current location immediately if GPS succeeded
@@ -6972,9 +6969,9 @@ out center body;`;
       map.on('zoomend', onZoomEnd);
       (window as any).__onZoomEnd = onZoomEnd;
 
-      // Map POI — โหลดสถานที่เมื่อซูมใกล้ + เลื่อนแผนที่
-      map.on('moveend', onMapMoveForPOI);
-      map.on('zoomend', onMapMoveForPOI);
+      // Map POI — ปิดไว้ (ลด network requests ให้ map โหลดเร็วขึ้น)
+      // map.on('moveend', onMapMoveForPOI);
+      // map.on('zoomend', onMapMoveForPOI);
 
       map.on('click', (e: any) => {
         if (isNavigating) return;
