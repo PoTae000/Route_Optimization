@@ -6887,7 +6887,7 @@ out center body;`;
         className: 'safety-tiles'
       }).addTo(map);
 
-      // Layer 2: Main
+      // Layer 2: Main — โหลดระหว่างเลื่อนด้วย
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
@@ -6895,7 +6895,7 @@ out center body;`;
         maxZoom: 19,
         keepBuffer: 15,
         updateWhenZooming: true,
-        updateWhenIdle: true,
+        updateWhenIdle: false,
         updateInterval: 80,
         className: 'main-tiles'
       }).addTo(map);
