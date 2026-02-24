@@ -5185,11 +5185,15 @@
     const isFlat = camTilt === 0 && camYaw === 0;
     camActive = !isFlat;
     if (isFlat) {
-      mapEl.style.transform = animate ? 'perspective(1200px) rotateX(0deg) rotateY(0deg)' : '';
+      mapEl.style.transform = '';
       mapEl.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
-      if (animate) setTimeout(() => { mapEl.style.transform = ''; mapEl.style.transition = ''; }, 550);
+      mapEl.style.transformOrigin = '';
+      if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 550);
     } else {
-      mapEl.style.transform = `perspective(1200px) rotateX(${camTilt}deg) rotateY(${camYaw}deg)`;
+      // Scale ขยายให้ใหญ่พอเต็มจอเสมอ — parent overflow:hidden ตัดส่วนเกิน
+      const s = 2.0;
+      mapEl.style.transformOrigin = '50% 50%';
+      mapEl.style.transform = `perspective(1500px) scale(${s}) rotateX(${camTilt}deg) rotateY(${camYaw}deg)`;
       mapEl.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
       if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 450);
     }
