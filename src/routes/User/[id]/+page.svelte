@@ -6893,7 +6893,7 @@ out center body;`;
       map = L.map('map', {
         zoomControl: false,
         attributionControl: false,
-        renderer: L.svg({ padding: 5.0 }),
+        renderer: L.canvas({ padding: 0.5 }),
         zoomSnap: 1,
         zoomDelta: 1,
         wheelDebounceTime: 40,
