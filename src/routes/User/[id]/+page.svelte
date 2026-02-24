@@ -514,16 +514,12 @@
   let globeError = '';
   let globeViewLabel = '';
 
-  // Camera 3D (perspective orbit via two-finger gesture — map stays north-up)
-  let camTilt = 0;     // rotateX degrees (0-60) — มองจากบนลงล่าง
-  let camYaw = 0;      // rotateY degrees (-60..60) — หันมองซ้าย-ขวา
+  // Camera rotation (หมุนมุมกล้องรอบตัวเอง — แผนที่อยู่นิ่ง)
+  let camAngle = 0;      // องศาหมุน (0-360)
   let camActive = false;
-  let _camTouchStartAngle = 0;
-  let _camTiltStart = 0;
-  let _camYawStart = 0;
   let _camGesturing = false;
-  let _camStartMidX = 0;
-  let _camStartMidY = 0;
+  let _camStartAngle = 0;
+  let _camAngleStart = 0;
 
   // Traffic
   let showTraffic = false;
@@ -740,11 +736,10 @@
         globeEarth.material.needsUpdate = true;
       }
 
-      // Progressive loading: zoom 2 ก่อน (16 tiles, เร็ว) แล้ว zoom 4 ตาม (คมชัด)
-      loadGlobeTexture(THREE, 2).then((lowTex) => {
+      // Progressive: zoom 1 ก่อน (4 tiles, ทันที) → zoom 3 ตาม (64 tiles, คมชัด)
+      loadGlobeTexture(THREE, 1).then((lowTex) => {
         applyEarthTexture(lowTex);
-        // โหลด HD texture ตามทีหลัง (zoom 4 = 256 tiles, คมชัด + Uint32Array เร็ว)
-        loadGlobeTexture(THREE, 4).then((hdTex) => {
+        loadGlobeTexture(THREE, 3).then((hdTex) => {
           applyEarthTexture(hdTex);
         }).catch(() => {});
       }).catch((e: any) => console.error('[Globe] Texture load error:', e));
@@ -801,25 +796,32 @@
       ctx.fillStyle = '#1d1f20';
       ctx.fillRect(0, 0, merc.width, merc.height);
 
-      // Load tiles in batches of 8 for controlled concurrency
       const subs = 'abcd';
       const tiles: { tx: number; ty: number }[] = [];
       for (let ty = 0; ty < n; ty++) {
         for (let tx = 0; tx < n; tx++) tiles.push({ tx, ty });
       }
-      const BATCH = 8;
-      for (let i = 0; i < tiles.length; i += BATCH) {
-        const batch = tiles.slice(i, i + BATCH);
-        await Promise.allSettled(batch.map(({ tx, ty }) => new Promise<void>(resolve => {
-          const s = subs[(tx + ty) % 4];
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => { ctx.drawImage(img, tx * tileSize, ty * tileSize); resolve(); };
-          img.onerror = () => resolve();
-          img.src = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
-        })));
+      // โหลดทุก tile พร้อมกัน (browser จัดคิว HTTP เอง) + yield ให้ UI ไม่ค้าง
+      const loaded = await Promise.allSettled(tiles.map(({ tx, ty }) => new Promise<{tx: number, ty: number, img: HTMLImageElement}>((resolve, reject) => {
+        const s = subs[(tx + ty) % 4];
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve({ tx, ty, img });
+        img.onerror = () => reject();
+        img.src = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
+      })));
+
+      // วาดลง canvas เป็น batch + yield ทุก 16 tiles ไม่ให้ block animation
+      let drawn = 0;
+      for (const r of loaded) {
+        if (r.status === 'fulfilled') {
+          ctx.drawImage(r.value.img, r.value.tx * tileSize, r.value.ty * tileSize);
+          if (++drawn % 16 === 0) await new Promise(r => setTimeout(r, 0));
+        }
       }
 
+      // yield ก่อน mercator conversion (heavy)
+      await new Promise(r => setTimeout(r, 0));
       const eq = mercatorToEquirect(merc);
       const texture = new THREE.CanvasTexture(eq);
       texture.colorSpace = THREE.SRGBColorSpace;
@@ -5178,67 +5180,60 @@
   }
 
 
-  // ═══ Camera 3D — Two-finger orbit (แผนที่อยู่กับที่ กล้องหมุนรอบ) ═══
+  // ═══ Camera rotation — หมุนมุมมอง (wrapper หมุน, map อยู่นิ่ง) ═══
   function applyCamTransform(animate = false) {
-    const mapEl = document.getElementById('map');
-    if (!mapEl) return;
-    const isFlat = camTilt === 0 && camYaw === 0;
+    const wrapper = document.querySelector('.cam-wrapper') as HTMLElement;
+    if (!wrapper) return;
+    const isFlat = Math.abs(camAngle % 360) < 0.5;
     camActive = !isFlat;
     if (isFlat) {
-      mapEl.style.transform = '';
-      mapEl.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
-      mapEl.style.transformOrigin = '';
-      if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 550);
+      camAngle = 0;
+      wrapper.style.transform = '';
+      wrapper.style.transition = animate ? 'transform 0.5s cubic-bezier(.4,0,.2,1)' : '';
+      if (animate) setTimeout(() => { wrapper.style.transition = ''; }, 550);
     } else {
-      // Scale ขยายให้ใหญ่พอเต็มจอเสมอ — parent overflow:hidden ตัดส่วนเกิน
-      const s = 2.0;
-      mapEl.style.transformOrigin = '50% 50%';
-      mapEl.style.transform = `perspective(1500px) scale(${s}) rotateX(${camTilt}deg) rotateY(${camYaw}deg)`;
-      mapEl.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
-      if (animate) setTimeout(() => { mapEl.style.transition = ''; }, 450);
+      // Scale ชดเชยมุมที่ rotateZ ทำให้ขอบหลุด — ขยายให้ใหญ่กว่าจอ
+      const rad = (camAngle % 360) * Math.PI / 180;
+      const s = Math.abs(Math.cos(rad)) + Math.abs(Math.sin(rad)); // 1.0 ที่ 0°, ~1.414 ที่ 45°
+      wrapper.style.transformOrigin = '50% 50%';
+      wrapper.style.transform = `rotate(${camAngle}deg) scale(${s.toFixed(4)})`;
+      wrapper.style.transition = animate ? 'transform 0.4s cubic-bezier(.4,0,.2,1)' : '';
+      if (animate) setTimeout(() => { wrapper.style.transition = ''; }, 450);
     }
   }
 
   function resetCamView() {
-    camTilt = 0;
-    camYaw = 0;
+    camAngle = 0;
     applyCamTransform(true);
   }
 
   function setupCamGesture() {
-    const mapEl = document.getElementById('map');
-    if (!mapEl) return;
+    const wrapper = document.querySelector('.cam-wrapper') as HTMLElement;
+    if (!wrapper) return;
 
-    mapEl.addEventListener('touchstart', (e: TouchEvent) => {
+    function fingerAngle(t1: Touch, t2: Touch) {
+      return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) * 180 / Math.PI;
+    }
+
+    wrapper.addEventListener('touchstart', (e: TouchEvent) => {
       if (e.touches.length === 2) {
         _camGesturing = true;
-        _camTiltStart = camTilt;
-        _camYawStart = camYaw;
-        _camStartMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-        _camStartMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        _camStartAngle = fingerAngle(e.touches[0], e.touches[1]);
+        _camAngleStart = camAngle;
       }
     }, { passive: true });
 
-    mapEl.addEventListener('touchmove', (e: TouchEvent) => {
+    wrapper.addEventListener('touchmove', (e: TouchEvent) => {
       if (!_camGesturing || e.touches.length !== 2) return;
-      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-
-      // สองนิ้วเลื่อนขึ้น/ลง → tilt (มองจากบนลงล่าง)
-      const dy = _camStartMidY - midY; // ขึ้น = เอียงมากขึ้น
-      camTilt = Math.max(0, Math.min(60, _camTiltStart + dy * 0.25));
-
-      // สองนิ้วเลื่อนซ้าย/ขวา → yaw (หันมองซ้าย-ขวา)
-      const dx = midX - _camStartMidX;
-      camYaw = Math.max(-60, Math.min(60, _camYawStart + dx * 0.2));
-
+      let delta = fingerAngle(e.touches[0], e.touches[1]) - _camStartAngle;
+      if (delta > 180) delta -= 360;
+      if (delta < -180) delta += 360;
+      camAngle = _camAngleStart + delta;
       applyCamTransform(false);
     }, { passive: true });
 
-    mapEl.addEventListener('touchend', (e: TouchEvent) => {
-      if (e.touches.length < 2) {
-        _camGesturing = false;
-      }
+    wrapper.addEventListener('touchend', (e: TouchEvent) => {
+      if (e.touches.length < 2) _camGesturing = false;
     }, { passive: true });
   }
 
@@ -8020,7 +8015,9 @@ out center body;`;
   {/if}
 
   <div class="map-container" class:fullscreen={isNavigating} class:settings-open={showSettings} class:addform-open={showAddForm} class:globe-mode={globeMode}>
-    <div id="map"></div>
+    <div class="cam-wrapper">
+      <div id="map"></div>
+    </div>
     <!-- Three.js 3D Globe -->
     <!-- Three.js 3D Globe -->
     <div id="globe-container" class:active={globeMode}>
@@ -8086,11 +8083,11 @@ out center body;`;
     {#if !isNavigating && !globeMode}
       <div class="map-right-btns">
         {#if camActive}
-          <button class="map-cam-btn active" on:click={resetCamView} title="รีเซ็ตมุมกล้อง">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="9"/>
-              <path d="M12 3v4" stroke-width="3" stroke="#60a5fa"/>
-              <circle cx="12" cy="12" r="2" fill="currentColor"/>
+          <button class="map-cam-btn active" on:click={resetCamView} title="รีเซ็ตมุมกล้อง (กลับทิศเหนือ)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform: rotate({-camAngle}deg)">
+              <circle cx="12" cy="12" r="9" stroke-opacity="0.3"/>
+              <polygon points="12,3 9,13 12,11 15,13" fill="#ef4444" stroke="none"/>
+              <polygon points="12,21 9,11 12,13 15,11" fill="#a1a1aa" stroke="none"/>
             </svg>
           </button>
         {/if}
@@ -9885,6 +9882,7 @@ out center body;`;
   .nav-btn-share { background: rgba(59, 130, 246, 0.15); color: #60a5fa; flex: 0 0 auto; width: 44px; border: 1px solid rgba(59, 130, 246, 0.2); }
   .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
   .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .cam-wrapper { width: 100%; height: 100%; position: relative; }
   .map-container.fullscreen { width: 100vw; }
   .map-container.settings-open > *:not(#map) { display: none !important; }
   .map-container.addform-open > *:not(#map) { display: none !important; }
