@@ -611,157 +611,56 @@
       camera.position.set(0, isMobile ? 0.15 : 0.3, camZ);
       globeCamera = camera;
 
-      // Renderer — tone mapping for realistic HDR feel
-      const renderer: any = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      // Renderer — เบาที่สุด
+      const renderer: any = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'low-power' });
       renderer.setSize(w, h);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(1); // ไม่ใช้ retina — ลด GPU load 4x
       renderer.setClearColor(0x000005, 1);
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.6;
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // === LIGHTING — สว่างพอเห็นแผนที่ชัด + ยังมีมิติ 3D ===
-      // Ambient: สว่างเพียงพอเห็นแผนที่ทุกด้าน
-      scene.add(new THREE.AmbientLight(0xccccdd, 4.0));
-      // Sun: key light — warm white จากด้านหน้า-บน
+      // Lighting — 2 lights เท่านั้น
+      scene.add(new THREE.AmbientLight(0xccccdd, 4.5));
       const sun: any = new THREE.DirectionalLight(0xffffff, 3.0);
-      sun.position.set(4, 3, 5);
+      sun.position.set(5, 3, 5);
       scene.add(sun);
-      // Fill: เติมด้านตรงข้ามไม่ให้มืดเกินไป
-      const fill: any = new THREE.DirectionalLight(0x8899bb, 2.0);
-      fill.position.set(-4, -1, -3);
-      scene.add(fill);
-      // Rim light: backlight ให้เห็นขอบโลก 3D
-      const rim: any = new THREE.DirectionalLight(0x88aaff, 1.5);
-      rim.position.set(-3, 2, -5);
-      scene.add(rim);
 
-      // === STARS — multi-size with brightness variation ===
+      // Stars — 2000 ดวง (เบา)
       const starsGeo = new THREE.BufferGeometry();
       const starPos: number[] = [];
-      const starSizes: number[] = [];
-      const starColors: number[] = [];
-      for (let i = 0; i < 6000; i++) {
-        const r = 30 + Math.random() * 70;
+      for (let i = 0; i < 2000; i++) {
+        const r = 50;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         starPos.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
-        // ดาวส่วนใหญ่เล็ก, บางดวงใหญ่สว่าง
-        const bright = Math.random();
-        starSizes.push(bright < 0.95 ? 0.06 + Math.random() * 0.08 : 0.2 + Math.random() * 0.25);
-        // สีดาว: ขาว, ฟ้าอ่อน, เหลืองอ่อน
-        const temp = Math.random();
-        if (temp < 0.6) { starColors.push(1, 1, 1); }
-        else if (temp < 0.8) { starColors.push(0.7, 0.85, 1.0); }
-        else { starColors.push(1.0, 0.95, 0.8); }
       }
       starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
-      starsGeo.setAttribute('size', new THREE.Float32BufferAttribute(starSizes, 1));
-      starsGeo.setAttribute('color', new THREE.Float32BufferAttribute(starColors, 3));
-      const starMat = new THREE.PointsMaterial({
-        size: 0.12, sizeAttenuation: true, vertexColors: true,
-        transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false
-      });
-      scene.add(new THREE.Points(starsGeo, starMat) as any);
+      scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.1, sizeAttenuation: true })) as any);
 
-      // === EARTH — high-detail sphere ===
-      const earthGeo = new THREE.SphereGeometry(1, 96, 96);
+      // Earth — 48 segments (เบา แต่ยังดูกลม)
+      const earthGeo = new THREE.SphereGeometry(1, 48, 48);
       const earthMat = new THREE.MeshPhongMaterial({
         color: 0x1a1a2e,
         specular: new THREE.Color(0x334455),
         shininess: 15,
         emissive: new THREE.Color(0x111122),
-        emissiveIntensity: 0.5 // ส่องจากตัวเองให้เห็นแผนที่แม้ด้านมืด
+        emissiveIntensity: 0.5
       });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
       scene.add(earth);
       globeEarth = earth;
 
-      // === CLOUDS — semi-transparent rotating layer ===
-      const cloudGeo = new THREE.SphereGeometry(1.008, 64, 64);
-      const cloudMat = new THREE.MeshPhongMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.0, // จะค่อยๆ เพิ่มเมื่อโหลด texture
-        depthWrite: false,
-        side: THREE.FrontSide
-      });
-      globeClouds = new THREE.Mesh(cloudGeo, cloudMat);
-      scene.add(globeClouds);
-
-      // === ATMOSPHERE — 3-layer glow for realistic depth ===
-      // Layer 1: Inner atmosphere (tight glow on edge)
-      const atmos1Geo = new THREE.SphereGeometry(1.01, 64, 64);
-      const atmos1Mat = new THREE.ShaderMaterial({
-        vertexShader: `
-          varying vec3 vNormal;
-          varying vec3 vPosition;
-          void main() {
-            vNormal = normalize(normalMatrix * normal);
-            vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }`,
-        fragmentShader: `
-          varying vec3 vNormal;
-          varying vec3 vPosition;
-          void main() {
-            float rim = 1.0 - max(0.0, dot(vNormal, vec3(0.0, 0.0, 1.0)));
-            float glow = pow(rim, 3.0) * 1.2;
-            vec3 col = mix(vec3(0.2, 0.5, 1.0), vec3(0.4, 0.8, 1.0), rim);
-            gl_FragColor = vec4(col, glow * 0.6);
-          }`,
-        side: THREE.FrontSide,
-        blending: THREE.AdditiveBlending,
-        transparent: true,
-        depthWrite: false
-      });
-      scene.add(new THREE.Mesh(atmos1Geo, atmos1Mat) as any);
-
-      // Layer 2: Outer atmosphere halo (wide soft glow)
-      const atmos2Geo = new THREE.SphereGeometry(1.15, 64, 64);
-      const atmos2Mat = new THREE.ShaderMaterial({
-        vertexShader: `
-          varying vec3 vNormal;
-          void main() {
-            vNormal = normalize(normalMatrix * normal);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }`,
-        fragmentShader: `
-          varying vec3 vNormal;
-          void main() {
-            float i = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.5);
-            gl_FragColor = vec4(0.3, 0.6, 1.0, 0.35) * i;
-          }`,
+      // Atmosphere — 1 ชั้น (backside glow)
+      const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
+      const atmosMat = new THREE.ShaderMaterial({
+        vertexShader: `varying vec3 vNormal; void main() { vNormal = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `varying vec3 vNormal; void main() { float i = pow(0.65 - dot(vNormal, vec3(0,0,1)), 2.0); gl_FragColor = vec4(0.3, 0.6, 1.0, 0.5) * i; }`,
         side: THREE.BackSide,
         blending: THREE.AdditiveBlending,
         transparent: true,
         depthWrite: false
       });
-      scene.add(new THREE.Mesh(atmos2Geo, atmos2Mat) as any);
-
-      // Layer 3: Fresnel rim — bright blue edge for spherical definition
-      const atmos3Geo = new THREE.SphereGeometry(1.005, 64, 64);
-      const atmos3Mat = new THREE.ShaderMaterial({
-        vertexShader: `
-          varying vec3 vNormal;
-          void main() {
-            vNormal = normalize(normalMatrix * normal);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }`,
-        fragmentShader: `
-          varying vec3 vNormal;
-          void main() {
-            float rim = 1.0 - max(0.0, dot(vNormal, vec3(0.0, 0.0, 1.0)));
-            float edge = pow(rim, 5.0) * 2.0;
-            gl_FragColor = vec4(0.4, 0.7, 1.0, edge * 0.8);
-          }`,
-        side: THREE.FrontSide,
-        blending: THREE.AdditiveBlending,
-        transparent: true,
-        depthWrite: false
-      });
-      scene.add(new THREE.Mesh(atmos3Geo, atmos3Mat) as any);
+      scene.add(new THREE.Mesh(atmosGeo, atmosMat) as any);
 
       // OrbitControls (drag to rotate globe)
       const controls = new OrbitControls(camera, renderer.domElement as HTMLElement);
@@ -804,7 +703,7 @@
       console.log('[Globe] Ready! Starting animation...');
       animateGlobe();
 
-      // Apply texture to earth
+      // Apply texture to earth — เรียบง่าย ไม่ประมวลผลเพิ่ม
       function applyEarthTexture(tex: any) {
         if (!tex || !globeEarth) return;
         globeEarth.material.map = tex;
@@ -812,8 +711,6 @@
         globeEarth.material.emissive.set(0x222233);
         globeEarth.material.emissiveIntensity = 0.6;
         globeEarth.material.emissiveMap = tex;
-        globeEarth.material.specular.set(0x334455);
-        globeEarth.material.shininess = 15;
         globeEarth.material.needsUpdate = true;
       }
 
@@ -12774,14 +12671,19 @@ out center body;`;
   .map-prefs-float {
     top: auto;
     bottom: 10px;
-    left: 10px;
+    left: 50%;
     right: auto;
-    max-width: calc(100% - 90px);
+    transform: translateX(-50%);
+    padding: 4px 5px;
+    border-radius: 20px;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    max-width: calc(100% - 20px);
   }
-  .float-pref-chips { flex-wrap: nowrap; }
-  .float-pref-chip { font-size: 10px; padding: 4px 7px; }
+  .float-pref-chips { flex-wrap: nowrap; gap: 3px; }
+  .float-pref-chip { font-size: 9px; padding: 3px 6px; }
+  .float-pref-toggles { gap: 3px; margin-left: 1px; padding-left: 4px; }
+  .float-toggle-chip { width: 24px; height: 24px; font-size: 11px; }
   .map-poi-float { top: 69px; right: 10px; max-width: 220px; padding: 6px; font-size: 11px; border-radius: 10px; }
   .map-poi-float .poi-search-btn { font-size: 10px; padding: 4px 8px; }
   .poi-modal { width: 95%; max-width: 360px; padding: 14px; }
@@ -12793,15 +12695,20 @@ out center body;`;
   .map-search-float { left: 8px; right: 8px; width: auto; top: 8px; padding: 6px 8px; }
   .map-search-float .search-input { padding: 8px 32px 8px 30px; font-size: 12px; }
   .map-prefs-float {
-    bottom: 8px;
-    left: 8px;
-    right: 8px;
-    max-width: calc(100% - 16px);
-    padding: 4px 6px;
+    bottom: 6px;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    padding: 3px 4px;
+    border-radius: 18px;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: calc(100% - 12px);
   }
-  .float-pref-chip { font-size: 9px; padding: 3px 6px; }
-  .float-toggle-chip { width: 26px; height: 26px; font-size: 11px; }
+  .float-pref-chips { flex-wrap: nowrap; gap: 2px; }
+  .float-pref-chip { font-size: 8px; padding: 3px 5px; }
+  .float-pref-toggles { gap: 2px; margin-left: 1px; padding-left: 3px; }
+  .float-toggle-chip { width: 22px; height: 22px; font-size: 10px; }
   .map-poi-float { top: 67px; right: 8px; max-width: 200px; padding: 5px; font-size: 10px; border-radius: 8px; }
   .poi-modal { width: 95%; padding: 12px; }
   .poi-chip { font-size: 10px; padding: 3px 8px; }
