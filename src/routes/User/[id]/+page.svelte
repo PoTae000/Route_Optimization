@@ -514,6 +514,10 @@
   let globeError = '';
   let globeViewLabel = '';
 
+  // Camera Tilt (perspective view)
+  let mapTilt = 0; // 0 = flat, 45 = tilted
+  let mapTiltEnabled = false;
+
   // Traffic
   let showTraffic = false;
   let trafficLayers: any[] = [];
@@ -5167,6 +5171,36 @@
   }
 
 
+  function toggleMapTilt() {
+    mapTiltEnabled = !mapTiltEnabled;
+    mapTilt = mapTiltEnabled ? 45 : 0;
+    const mapEl = document.getElementById('map');
+    if (mapEl) {
+      if (mapTiltEnabled) {
+        mapEl.style.perspective = '1200px';
+        mapEl.style.perspectiveOrigin = '50% 50%';
+        const inner = mapEl.querySelector('.leaflet-map-pane') as HTMLElement;
+        if (inner) {
+          inner.style.transformOrigin = '50% 100%';
+          inner.style.transform = `rotateX(${mapTilt}deg)`;
+          inner.style.transition = 'transform 0.5s ease';
+        }
+      } else {
+        mapEl.style.perspective = '';
+        mapEl.style.perspectiveOrigin = '';
+        const inner = mapEl.querySelector('.leaflet-map-pane') as HTMLElement;
+        if (inner) {
+          inner.style.transformOrigin = '';
+          inner.style.transform = '';
+          inner.style.transition = 'transform 0.5s ease';
+          setTimeout(() => { inner.style.transition = ''; }, 600);
+        }
+      }
+      // Leaflet needs to recalculate after transform
+      setTimeout(() => map?.invalidateSize(), 550);
+    }
+  }
+
   function centerOnCurrentLocation() {
     if (currentLocation && map) {
       isMapFollowing = true;
@@ -6868,7 +6902,7 @@ out center body;`;
         wheelDebounceTime: 40,
         wheelPxPerZoomLevel: 80,
         minZoom: 2,
-        maxZoom: 19,
+        maxZoom: 18,
         worldCopyJump: true,
         maxBounds: [[-85, -Infinity], [85, Infinity]],
         maxBoundsViscosity: 0.8,
@@ -6881,16 +6915,19 @@ out center body;`;
         easeLinearity: 0.25
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM ═══
+      // ═══ Tile Layer — OSM + detectRetina (คมชัด 2x บนจอ HiDPI) ═══
+      // maxZoom 18 + detectRetina → ขอ tile zoom 19 สูงสุด (OSM มีถึง 19)
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 19,
+        maxZoom: 18,
+        tileSize: 256,
         keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 150,
+        detectRetina: true,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -8004,11 +8041,16 @@ out center body;`;
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
     {/if}
 
-    <!-- My Location Button (bottom-right, above zoom) -->
+    <!-- My Location + Camera Tilt Buttons (bottom-right) -->
     {#if !isNavigating && !globeMode}
-      <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
-      </button>
+      <div class="map-right-btns">
+        <button class="map-tilt-btn" class:active={mapTiltEnabled} on:click={toggleMapTilt} title={mapTiltEnabled ? 'มุมมองปกติ' : 'มุมกล้อง 3D'}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 20L12 4l10 16"/><path d="M6 16h12" stroke-opacity="0.5"/></svg>
+        </button>
+        <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+        </button>
+      </div>
     {/if}
 
     <!-- Floating Navigate Button (mobile) -->
@@ -9919,12 +9961,12 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; will-change: transform; -webkit-transform: translateZ(0); transform: translateZ(0); }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.5) brightness(0.95) contrast(1.25); background: #e5e5e0; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.6) brightness(1.0) contrast(1.3); background: #e5e5e0; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { image-rendering: high-quality; }
-  :global(.leaflet-tile) { image-rendering: high-quality; will-change: transform, opacity; }
+  :global(.main-tiles) { image-rendering: -webkit-optimize-contrast; image-rendering: high-quality; }
+  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; image-rendering: high-quality; will-change: transform, opacity; -webkit-font-smoothing: antialiased; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-map-pane) { will-change: transform; }
   :global(.leaflet-tile-container) { will-change: transform; }
@@ -10052,19 +10094,24 @@ out center body;`;
   :global(.leaflet-control-zoom-in) { border-radius: 10px 10px 0 0 !important; }
   :global(.leaflet-control-zoom-out) { border-radius: 0 0 10px 10px !important; }
 
-  /* My Location Button — above zoom control, bottom-right */
-  .map-myloc-btn {
+  /* Right side map buttons — tilt + my location */
+  .map-right-btns {
     position: absolute; bottom: 110px; right: 10px; z-index: 1001;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .map-myloc-btn, .map-tilt-btn {
     width: 40px; height: 40px; border-radius: 12px;
     background: rgba(15, 15, 25, 0.95); border: 1px solid rgba(255,255,255,0.08);
     color: #a1a1aa; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 4px 24px rgba(0,0,0,0.35);
-    transition: background 0.2s, color 0.2s, border-color 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.15s;
   }
-  .map-myloc-btn svg { width: 20px; height: 20px; }
+  .map-myloc-btn svg, .map-tilt-btn svg { width: 20px; height: 20px; }
   .map-myloc-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
-  .map-myloc-btn:active { transform: scale(0.92); }
+  .map-myloc-btn:active, .map-tilt-btn:active { transform: scale(0.92); }
+  .map-tilt-btn:hover { background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.3); color: #60a5fa; }
+  .map-tilt-btn.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: #60a5fa; }
 
   :global(.marker-pin) {
     width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
@@ -10528,7 +10575,7 @@ out center body;`;
     .map-stat.weather .map-stat-value { font-size: 10px; }
     .map-info { display: none; }
 
-    .map-myloc-btn { bottom: 85px; }
+    .map-right-btns { bottom: 85px; }
 
     /* Floating Navigate Button - mobile */
     .map-nav-btn {
