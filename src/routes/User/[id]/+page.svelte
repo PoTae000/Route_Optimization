@@ -5933,7 +5933,8 @@ out center body;`;
     const signal = _prefetchAbort.signal;
     const center = mapRef.getCenter();
     const curZoom = mapRef.getZoom();
-    const subs = 'abc';
+    const subs = 'abcd';
+    const retina = window.devicePixelRatio > 1 ? '@2x' : '';
     const queue: string[] = [];
 
     function latLngToTile(lat: number, lng: number, z: number) {
@@ -5944,7 +5945,7 @@ out center body;`;
       return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
     }
 
-    // Prefetch current zoom ± 1, surrounding 5x5 tile grid (ไม่เยอะเกิน)
+    // Prefetch current zoom ± 1, surrounding 5x5 tile grid
     const zooms = [curZoom, curZoom - 1, curZoom + 1].filter(z => z >= 2 && z <= 19);
     for (const z of zooms) {
       const ct = latLngToTile(center.lat, center.lng, z);
@@ -5955,24 +5956,24 @@ out center body;`;
           const tx = ((ct.x + dx) % n + n) % n;
           const ty = ct.y + dy;
           if (ty < 0 || ty >= n) continue;
-          const s = subs[(tx + ty) % 3];
-          queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
+          const s = subs[(tx + ty) % 4];
+          queue.push(`https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${tx}/${ty}${retina}.png`);
         }
       }
     }
 
-    // Load tiles slowly in background (batch 2, 200ms gap — เบาๆ ไม่โดน rate limit)
+    // Load tiles in background (batch 4, 100ms gap — CDN รับได้เร็ว)
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 2);
-      idx += 2;
+      const batch = queue.slice(idx, idx + 4);
+      idx += 4;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 200);
+      setTimeout(loadBatch, 100);
     }
     loadBatch();
   }
@@ -6843,10 +6844,10 @@ out center body;`;
         markerZoomAnimation: true
       }).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layers ═══
-      // Layer 1: Safety — zoom 3 ยืดเต็มจอ (โหลดครั้งเดียว แคชตลอด ไม่มีเทาว่าง)
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        subdomains: 'abc',
+      // ═══ Tile Layers — CartoDB CDN (เร็วกว่า OSM มาก, มี edge server เอเชีย) ═══
+      // Layer 1: Safety — zoom 3 ยืดเต็มจอ (โหลดครั้งเดียว ไม่มีเทาว่าง)
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        subdomains: 'abcd',
         maxNativeZoom: 4,
         maxZoom: 19,
         keepBuffer: 50,
@@ -6856,16 +6857,16 @@ out center body;`;
         className: 'safety-tiles'
       }).addTo(map);
 
-      // Layer 2: Main — รายละเอียดสูง โหลดตามจริง
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        subdomains: 'abc',
+      // Layer 2: Main — รายละเอียดสูง, CDN 4 subdomains = 4x parallel
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+        subdomains: 'abcd',
         maxNativeZoom: 19,
         maxZoom: 19,
-        keepBuffer: 10,
+        keepBuffer: 15,
         updateWhenZooming: true,
         updateWhenIdle: true,
-        updateInterval: 100,
+        updateInterval: 80,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -7067,7 +7068,10 @@ out center body;`;
 
 <svelte:head>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://tile.openstreetmap.org">
+  <link rel="preconnect" href="https://a.basemaps.cartocdn.com">
+  <link rel="preconnect" href="https://b.basemaps.cartocdn.com">
+  <link rel="preconnect" href="https://c.basemaps.cartocdn.com">
+  <link rel="preconnect" href="https://d.basemaps.cartocdn.com">
   <title>ผู้ใช้ทั่วไป | Route Optimization</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
