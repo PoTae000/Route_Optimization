@@ -11,7 +11,17 @@
   import AlertsPanel from '$lib/components/AlertsPanel.svelte';
   import NavigationOverlay from '$lib/components/NavigationOverlay.svelte';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
-  import { callOSRMDirect, callOSRMTable } from '$lib/utils/osrm';
+  import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch, callOSRMIsochrone } from '$lib/utils/osrm';
+
+  // Silence all console output in production
+  if (browser) {
+    const noop = () => {};
+    console.log = noop;
+    console.warn = noop;
+    console.error = noop;
+    console.info = noop;
+    console.debug = noop;
+  }
 
   let currentUser: any = null;
 
@@ -95,6 +105,10 @@
     alongRoutePOIs = [];
     poiMarkers = [];
     mapPOIMarkers = [];
+    isochroneLayers = [];
+    showIsochrone = false;
+    _gpsTraceBuffer = [];
+    _matchedPosition = null;
     _poiElements.clear();
     _fetchedRegions.clear();
     _visibleMarkers.clear();
@@ -282,7 +296,6 @@
       }
     } catch (err) {
       oilPriceFailCount++;
-      console.error('Error fetching oil prices:', err);
       showNotification('ไม่สามารถดึงราคาน้ำมันได้ - ใช้ราคาเดิม', 'error');
       currentFuelPrice = 36;
     } finally {
@@ -529,6 +542,16 @@
   let showTraffic = false;
   let trafficLayers: any[] = [];
 
+  // Isochrone
+  let showIsochrone = false;
+  let isochroneLayers: any[] = [];
+  let isLoadingIsochrone = false;
+
+  // OSRM Match — GPS trace buffer
+  let _gpsTraceBuffer: [number, number][] = []; // [lng, lat][]
+  let _lastMatchTime = 0;
+  let _matchedPosition: { lat: number; lng: number } | null = null;
+
   // Off-Route Detection & Auto-Rerouting
   let isOffRoute = false;
   let offRouteThreshold = 150; // meters
@@ -682,7 +705,6 @@
   async function initGlobe() {
     if (globeInitializing || globeReady) return;
     globeInitializing = true;
-    console.log('[Globe] Starting init...');
     try {
       let threeModule: any, controlsModule: any;
       try {
@@ -691,7 +713,6 @@
           import('three/addons/controls/OrbitControls.js')
         ]);
       } catch(importErr) {
-        console.error('[Globe] Import failed, trying fallback path:', importErr);
         [threeModule, controlsModule] = await Promise.all([
           import('three'),
           import('three/examples/jsm/controls/OrbitControls.js')
@@ -699,11 +720,8 @@
       }
       const THREE = threeModule as any;
       const OrbitControls = (controlsModule as any).OrbitControls;
-      console.log('[Globe] Three.js loaded:', THREE.REVISION);
-
       const container = document.getElementById('globe-container');
       if (!container) {
-        console.error('[Globe] Container not found!');
         globeError = 'Container not found';
         globeInitializing = false;
         return;
@@ -711,8 +729,6 @@
 
       const w = container.clientWidth || window.innerWidth;
       const h = container.clientHeight || window.innerHeight;
-      console.log('[Globe] Container size:', w, 'x', h);
-
       // Scene
       const scene = new THREE.Scene();
       globeScene = scene;
@@ -782,7 +798,7 @@
         const clouds: any = new THREE.Mesh(cloudGeo, cloudMat);
         scene.add(clouds);
         globeClouds = clouds;
-      } catch(e) { console.warn('[Globe] Cloud layer skipped:', e); }
+      } catch(_) {}
 
       // Atmosphere — 1 ชั้น (backside glow)
       const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
@@ -852,7 +868,6 @@
 
       globeReady = true;
       globeInitializing = false;
-      console.log('[Globe] Ready! Starting animation...');
       animateGlobe();
 
       // Apply texture to earth
@@ -869,10 +884,9 @@
         loadGlobeTexture(THREE, 3).then((hdTex) => {
           applyEarthTexture(hdTex);
         }).catch(() => {});
-      }).catch((e: any) => console.error('[Globe] Texture load error:', e));
+      }).catch(() => {});
 
     } catch(e: any) {
-      console.error('[Globe] Init error:', e);
       globeError = String(e?.message || 'Unknown error');
       globeInitializing = false;
     }
@@ -991,8 +1005,7 @@
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.generateMipmaps = true;
       return texture;
-    } catch(e) {
-      console.error('Globe texture error:', e);
+    } catch(_) {
       return null;
     }
   }
@@ -1201,7 +1214,6 @@
               setGlobeViewLatLng(c.lat, c.lng);
             }
           }).catch((e: any) => {
-            console.error('Globe init failed:', e);
             globeError = String(e?.message || e);
           });
         }, 50);
@@ -1209,7 +1221,6 @@
       // Timeout fallback: if globe doesn't init within 15s, exit
       setTimeout(() => {
         if (globeMode && !globeReady) {
-          console.warn('Globe init timeout — falling back to flat map');
           globeError = 'โหลดไม่สำเร็จ';
           globeMode = false;
           globeInitializing = false;
@@ -1324,7 +1335,7 @@
         start: _lastStartPoint,
         pts: _lastSortedPoints
       }));
-    } catch (e) { console.warn('Route state save failed:', e); }
+    } catch (_) {}
   }
 
   function clearRouteState() {
@@ -1345,7 +1356,7 @@
       routeAlternatives = state.alts;
       selectRoute(state.idx || 0, state.start, state.pts || [], true);
       return true;
-    } catch (e) { console.warn('Route state restore failed:', e); return false; }
+    } catch (_) { return false; }
   }
 
   // Navigation alternative route layers (faded lines during navigation)
@@ -1387,9 +1398,7 @@
       if (data.error) return;
       completedDeliveries = data.completed || 0;
       totalDeliveriesToday = (data.completed || 0) + (data.pending || 0);
-    } catch (err) {
-      console.error('Load stats error:', err);
-    }
+    } catch (_) {}
   }
 
   async function loadDeliveryHistory() {
@@ -1412,9 +1421,7 @@
         lat: parseFloat(d.lat),
         lng: parseFloat(d.lng)
       }));
-    } catch (err) {
-      console.error('Load history error:', err);
-    }
+    } catch (_) {}
   }
 
   async function loadDeliveryPoints() {
@@ -1436,8 +1443,7 @@
         user_id: p.user_id ? Number(p.user_id) : null
       })) : [];
       displayPoints();
-    } catch (err) {
-      console.error(err);
+    } catch (_) {
       showNotification('โหลดข้อมูลไม่สำเร็จ', 'error');
     }
   }
@@ -1602,6 +1608,15 @@
     }
     isAddingPoint = true;
     try {
+      // Snap to nearest road (graceful — uses original coords if fails)
+      try {
+        const snapped = await callOSRMNearest(newPoint.lng, newPoint.lat);
+        if (snapped.distance < 500) { // only snap if within 500m of a road
+          newPoint = { ...newPoint, lat: parseFloat(snapped.lat.toFixed(6)), lng: parseFloat(snapped.lng.toFixed(6)) };
+          // Update click marker position
+          if (clickMarker && map) clickMarker.setLatLng([newPoint.lat, newPoint.lng]);
+        }
+      } catch (_) { /* OSRM Nearest failed — use original coords */ }
       const payload = { ...newPoint, user_id: currentUser?.id || null };
       const res = await fetch(`${API_URL}/points`, {
         method: 'POST',
@@ -1649,6 +1664,15 @@
       showNotification('ลบสำเร็จ', 'success');
     } catch (err) {
       showNotification('ลบไม่สำเร็จ', 'error');
+    }
+  }
+
+  // Fetch with auto-retry (fixes TLS 425 Too Early on first request to a new origin)
+  async function fetchRetry(url: string, opts?: RequestInit): Promise<Response> {
+    try { return await fetch(url, opts); }
+    catch (_) {
+      await new Promise(r => setTimeout(r, 300));
+      return fetch(url, opts);
     }
   }
 
@@ -2007,16 +2031,107 @@
     }
   }
 
+  // ==================== Isochrone ====================
+  function clearIsochroneLayers() {
+    isochroneLayers.forEach(l => { try { map?.removeLayer(l); } catch(_) {} });
+    isochroneLayers = [];
+  }
+
+  async function toggleIsochrone() {
+    showIsochrone = !showIsochrone;
+    if (!showIsochrone) {
+      clearIsochroneLayers();
+      return;
+    }
+    if (!currentLocation) {
+      showNotification('ยังไม่มีตำแหน่ง GPS', 'warning');
+      showIsochrone = false;
+      return;
+    }
+    isLoadingIsochrone = true;
+    try {
+      const result = await callOSRMIsochrone(currentLocation.lng, currentLocation.lat, [10, 20, 30]);
+      clearIsochroneLayers();
+      if (!map) return;
+      const colors = [
+        { fill: 'rgba(0, 255, 136, 0.25)', stroke: 'rgba(0, 255, 136, 0.6)' },
+        { fill: 'rgba(0, 200, 255, 0.18)', stroke: 'rgba(0, 200, 255, 0.5)' },
+        { fill: 'rgba(100, 140, 255, 0.12)', stroke: 'rgba(100, 140, 255, 0.4)' }
+      ];
+      // Draw largest first (so smaller ones overlay on top)
+      const reversed = [...result.contours].reverse();
+      reversed.forEach((contour, i) => {
+        if (contour.points.length < 3) return;
+        // Convert [lng,lat] to [lat,lng] for Leaflet + create convex hull
+        const latlngs = contour.points.map(p => [p[1], p[0]] as [number, number]);
+        const hull = convexHull(latlngs);
+        if (hull.length < 3) return;
+        const colorIdx = reversed.length - 1 - i; // map back to original order
+        const c = colors[colorIdx] || colors[0];
+        const polygon = L.polygon(hull, {
+          color: c.stroke,
+          fillColor: c.fill,
+          fillOpacity: 1,
+          weight: 2,
+          opacity: 0.8,
+          interactive: false
+        }).addTo(map);
+        // Add label at centroid
+        const centroid = hull.reduce((acc, p) => [acc[0] + p[0] / hull.length, acc[1] + p[1] / hull.length], [0, 0]);
+        const label = L.marker(centroid as [number, number], {
+          icon: L.divIcon({
+            className: 'isochrone-label',
+            html: `<span>${contour.minutes} นาที</span>`,
+            iconSize: [60, 20],
+            iconAnchor: [30, 10]
+          }),
+          interactive: false
+        }).addTo(map);
+        isochroneLayers.push(polygon, label);
+      });
+      if (isochroneLayers.length === 0) {
+        showNotification('ไม่สามารถสร้าง Isochrone ได้', 'warning');
+        showIsochrone = false;
+      }
+    } catch (err) {
+      showNotification('Isochrone ไม่สำเร็จ', 'error');
+      showIsochrone = false;
+    } finally {
+      isLoadingIsochrone = false;
+    }
+  }
+
+  // Simple convex hull (Graham scan)
+  function convexHull(points: [number, number][]): [number, number][] {
+    if (points.length < 3) return points;
+    const sorted = [...points].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+    const cross = (o: [number, number], a: [number, number], b: [number, number]) =>
+      (a[1] - o[1]) * (b[0] - o[0]) - (a[0] - o[0]) * (b[1] - o[1]);
+    const lower: [number, number][] = [];
+    for (const p of sorted) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper: [number, number][] = [];
+    for (const p of sorted.reverse()) {
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    upper.pop();
+    lower.pop();
+    return lower.concat(upper);
+  }
+
   // ขนาดเส้นตาม zoom — บางลงเมื่อซูมออก
   function getRouteWeight(zoom?: number): { main: number; mainSel: number } {
     const z = zoom ?? map?.getZoom?.() ?? 14;
-    if (z >= 16) return { main: 3.5, mainSel: 4.5 };
-    if (z >= 14) return { main: 3, mainSel: 4 };
-    if (z >= 13) return { main: 2.5, mainSel: 3.5 };
-    if (z >= 12) return { main: 2, mainSel: 3 };
-    if (z >= 10) return { main: 1.5, mainSel: 2 };
-    if (z >= 7)  return { main: 1, mainSel: 1.5 };
-    return { main: 0.8, mainSel: 1 };
+    if (z >= 16) return { main: 6, mainSel: 6.5 };
+    if (z >= 14) return { main: 5.5, mainSel: 6 };
+    if (z >= 13) return { main: 5, mainSel: 5.5 };
+    if (z >= 12) return { main: 4.5, mainSel: 5 };
+    if (z >= 10) return { main: 3, mainSel: 3.5 };
+    if (z >= 7)  return { main: 2, mainSel: 2.5 };
+    return { main: 1.5, mainSel: 1.8 };
   }
 
   function updateRouteWeights() {
@@ -2189,7 +2304,7 @@
 
       const allLines = sectionLayers.filter((_, i) => i % 2 === 0);
       const switchHandler = () => switchNavRoute(idx);
-      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.9 })); };
+      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 1 })); };
       const unhighlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.45 })); };
       sectionLayers.forEach(l => { l.on('click', switchHandler); l.on('mouseover', highlight); l.on('mouseout', unhighlight); });
       labelMarker.on('click', switchHandler);
@@ -2401,7 +2516,6 @@
       updateRouteDisplayForNavigation();
       updateNavigationMarkers();
     } catch (err) {
-      console.error('Recalculate with waypoints error:', err);
       showNotification('คำนวณเส้นทางใหม่ไม่สำเร็จ', 'error');
     } finally {
       isRecalculatingRoute = false;
@@ -2615,7 +2729,7 @@
       const allLines = info.sectionLayers.filter((_, i) => i % 2 === 0);
       const allHits = info.sectionLayers.filter((_, i) => i % 2 === 1);
 
-      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.9 })); };
+      const highlight = () => { allLines.forEach(l => l.setStyle({ opacity: 1 })); };
       const unhighlight = () => { allLines.forEach(l => l.setStyle({ opacity: 0.45 })); };
       const switchHandler = () => { clearAlternativeRouteLayers(); selectRoute(info.idx, startPoint, sortedPoints); };
 
@@ -2954,7 +3068,6 @@
       speak(speakText);
       return true;
     } catch (err) {
-      console.error('Auto reroute error:', err);
       showNotification('คำนวณเส้นทางใหม่ไม่สำเร็จ', 'error');
       return false;
     } finally {
@@ -3004,14 +3117,21 @@
   }
 
   // ==================== FETCH WITH TIMEOUT HELPER ====================
-  function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number } = {}): Promise<Response> {
+  async function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number } = {}): Promise<Response> {
     const { timeout = 10000, ...fetchOptions } = options;
     const controller = fetchOptions.signal ? undefined : new AbortController();
     const signal = fetchOptions.signal || controller?.signal;
     const timeoutId = controller ? setTimeout(() => controller.abort(), timeout) : null;
-    return fetch(url, { ...fetchOptions, signal }).finally(() => {
+    try {
+      const res = await fetch(url, { ...fetchOptions, signal });
       if (timeoutId) clearTimeout(timeoutId);
-    });
+      return res;
+    } catch (err) {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (signal?.aborted) throw err;
+      await new Promise(r => setTimeout(r, 300));
+      return fetch(url, { ...fetchOptions, signal });
+    }
   }
 
   // searchPlace + handleSearchInput moved to SearchPanel component
@@ -3023,8 +3143,8 @@
         lat: String(lat), lon: String(lng),
         format: 'json', addressdetails: '1', 'accept-language': 'th'
       });
-      const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/reverse?${params.toString()}`, {
-        headers: { 'User-Agent': 'RouteOptimization/2.0' },
+      params.set('endpoint', 'reverse');
+      const res = await fetchWithTimeout(`/api/geocode?${params.toString()}`, {
         timeout: 8000
       });
       if (!res.ok) return null;
@@ -3046,7 +3166,6 @@
       };
     } catch (err: any) {
       if (err.name === 'AbortError') return null;
-      console.error('Reverse geocode error:', err);
       return null;
     }
   }
@@ -3117,7 +3236,6 @@
 
   function loadSavedRoutes() {
     if (!currentUser?.id) {
-      console.warn('Cannot load saved routes: no user ID');
       savedRoutes = [];
       return;
     }
@@ -3571,7 +3689,6 @@
       }
 
     } catch (err: any) {
-      console.error('Optimization error:', err);
       showNotification(err.message || 'จัดลำดับไม่สำเร็จ', 'error');
     } finally {
       isOptimizingOrder = false;
@@ -3647,7 +3764,7 @@
     if (!query.trim() || query.trim().length < 2) { startPointResults = []; return; }
     isSearchingStartPoint = true;
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=th&limit=5&accept-language=th`);
+      const res = await fetch(`/api/geocode?endpoint=search&format=json&q=${encodeURIComponent(query)}&countrycodes=th&limit=5&accept-language=th`);
       const data = await res.json();
       startPointResults = data.map((r: any) => ({
         lat: parseFloat(r.lat), lng: parseFloat(r.lon),
@@ -3661,6 +3778,7 @@
   function setCustomStartFromSearch(result: { lat: number; lng: number; name: string }) {
     useCustomStartPoint = true;
     customStartPoint = result;
+    localStorage.setItem(getUserKey('customStartPoint'), JSON.stringify(result));
     showStartPointPicker = false;
     startPointResults = [];
     startPointSearchQuery = '';
@@ -3697,6 +3815,7 @@
   function clearCustomStartPoint() {
     useCustomStartPoint = false;
     customStartPoint = null;
+    localStorage.removeItem(getUserKey('customStartPoint'));
     showStartPointPicker = false;
     startPointResults = [];
     startPointSearchQuery = '';
@@ -3724,7 +3843,7 @@
 
   function onStartPointSearchInput() {
     if (startSearchTimer) clearTimeout(startSearchTimer);
-    startSearchTimer = setTimeout(() => searchStartPoint(startPointSearchQuery), 400);
+    startSearchTimer = setTimeout(() => searchStartPoint(startPointSearchQuery), 600);
   }
 
   function displayOptimizedRoute() {
@@ -3815,6 +3934,9 @@
     elapsedTime = 0;
     maxSpeed = 0;
     avgSpeedSamples = [];
+    _gpsTraceBuffer = [];
+    _matchedPosition = null;
+    _lastMatchTime = 0;
     lastArrivalDist = Infinity;
     lastDrawnRouteIndex = -1;
     evTripEnergyUsed = 0;
@@ -3951,6 +4073,8 @@
       resetMapRotation();
       _lastAppliedRotation = 0;
     }
+    _gpsTraceBuffer = [];
+    _matchedPosition = null;
     clearNavAlternativeLayers();
     if (nextTurnMarker && map) { try { map.removeLayer(nextTurnMarker); } catch (e) {} nextTurnMarker = null; }
     turnApproaching = false;
@@ -4199,6 +4323,21 @@
       _lastEnergyLat = latitude;
       _lastEnergyLng = longitude;
     }
+    // OSRM Match — buffer GPS trace & periodically snap to road
+    if (isNavigating && currentSpeed > 3) {
+      _gpsTraceBuffer.push([longitude, latitude]);
+      if (_gpsTraceBuffer.length > 15) _gpsTraceBuffer.shift();
+      const now = Date.now();
+      if (_gpsTraceBuffer.length >= 3 && now - _lastMatchTime > 5000) {
+        _lastMatchTime = now;
+        callOSRMMatch(_gpsTraceBuffer).then(result => {
+          if (result.coordinates.length > 0) {
+            const last = result.coordinates[result.coordinates.length - 1];
+            _matchedPosition = { lat: last[1], lng: last[0] };
+          }
+        }).catch(() => { /* Match failed — ignore, use raw GPS */ });
+      }
+    }
     // Update nearest route index FIRST (fresh for all subsequent functions)
     if (isNavigating && cachedRouteCoords.length > 0) {
       findNearestPointIndex(cachedRouteCoords, { lat: latitude, lng: longitude });
@@ -4219,8 +4358,10 @@
       }
       lastGpsTimestamp = now;
 
+      // Use OSRM Match position if available (already snapped to road network)
+      let snapLat = _matchedPosition ? _matchedPosition.lat : latitude;
+      let snapLng = _matchedPosition ? _matchedPosition.lng : longitude;
       // Smart route snapping: accuracy-weighted (trust route more when GPS is poor)
-      let snapLat = latitude, snapLng = longitude;
       if (cachedRouteCoords.length > 1) {
         const nearIdx = lastRouteIndex;
         const distToRoute = getDistance(latitude, longitude, cachedRouteCoords[nearIdx][0], cachedRouteCoords[nearIdx][1]);
@@ -4287,7 +4428,6 @@
   }
 
   function handleGeoError(error: GeolocationPositionError) {
-    console.error('GPS Error:', error);
     let msg = 'ไม่สามารถระบุตำแหน่งได้';
     if (error.code === 1) {
       msg = 'กรุณาอนุญาตการเข้าถึง GPS';
@@ -4648,9 +4788,7 @@
             }
           });
         }
-      } catch (e) {
-        console.log('Overpass fetch skipped');
-      }
+      } catch (_) {}
 
       // Generate mock incidents along the actual route
       const mockCount = Math.min(3, Math.floor(routeCoords.length / 100));
@@ -4683,7 +4821,6 @@
         showNotification('ไม่พบเหตุการณ์บนเส้นทาง ✓', 'success');
       }
     } catch (err) {
-      console.error('Error fetching traffic incidents:', err);
       showNotification('ไม่สามารถโหลดข้อมูลจราจรได้', 'error');
     } finally {
       isLoadingIncidents = false;
@@ -5009,7 +5146,6 @@
         speak(`มุ่งหน้าไปยัง ${nextTarget.name}`);
       }
     } catch (err) {
-      console.error('Error recalculating route:', err);
       currentTargetIndex = 1;
       arrivedPoints = [0];
       clearAllRouteLayers();
@@ -5118,7 +5254,6 @@
       showNotification(`พบ ${chargingStations.length} สถานีชาร์จ`, 'success');
     } catch (err: any) {
       if (err.name === 'AbortError') return;
-      console.error('Error loading charging stations:', err);
       showNotification('ไม่สามารถโหลดสถานีชาร์จได้ ลองใหม่อีกครั้ง', 'error');
     } finally {
       if (!signal.aborted) isLoadingStations = false;
@@ -5244,7 +5379,6 @@
       }
       activeTab = 'route';
     } catch (err: any) {
-      console.error('EV Route error:', err);
       showNotification(err.message || 'คำนวณเส้นทางไม่สำเร็จ', 'error');
       await optimizeRoute();
     } finally {
@@ -5421,9 +5555,7 @@
     for (const id of selectedPoints) {
       try {
         await fetch(`${API_URL}/points/${id}?${qs}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error('Delete error:', err);
-      }
+      } catch (_) {}
     }
     
     await loadDeliveryPoints();
@@ -5660,7 +5792,6 @@ out center body;`;
       showNotification(`พบ ${spacedPois.length} สถานที่ (${attractionCount} ที่เที่ยว)`, 'success');
     } catch (err: any) {
       if (err.name === 'AbortError') return;
-      console.error('POI search error:', err);
       showNotification('ค้นหาสถานที่ล้มเหลว ลองใหม่อีกครั้ง', 'error');
     } finally {
       if (!signal.aborted) isLoadingPOIs = false;
@@ -5732,7 +5863,6 @@ out center body;`;
       showNotification(`พบ ${count} สถานีชาร์จบนเส้นทาง`, 'success');
     } catch (err: any) {
       if (err.name === 'AbortError') return;
-      console.error('EV route search error:', err);
       showNotification('ค้นหาสถานีชาร์จบนเส้นทางล้มเหลว ลองใหม่', 'error');
     } finally {
       if (!signal.aborted) isLoadingStations = false;
@@ -6655,9 +6785,8 @@ out center body;`;
           params.append('countrycodes', strategy.countrycodes);
         }
 
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-          headers: { 'User-Agent': 'RouteOptimization/2.0' }
-        });
+        params.set('endpoint', 'search');
+        const res = await fetch(`/api/geocode?${params.toString()}`);
         const data = await res.json();
 
         if (data && data.length > 0) {
@@ -6691,9 +6820,7 @@ out center body;`;
             break;
           }
         }
-      } catch (err) {
-        console.error('Nominatim search failed:', err);
-      }
+      } catch (_) {}
     }
 
     // ถ้ายังไม่เจอ ลอง fallback - ถ้ามีคำว่า "ซอย" หรือ "ถนน" ลองตัดออก
@@ -6713,9 +6840,8 @@ out center body;`;
             limit: '3',
             'accept-language': 'th'
           });
-          const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-            headers: { 'User-Agent': 'RouteOptimization/2.0' }
-          });
+          params.set('endpoint', 'search');
+          const res = await fetch(`/api/geocode?${params.toString()}`);
           const data = await res.json();
           if (data && data.length > 0) {
             for (const place of data) {
@@ -6731,9 +6857,7 @@ out center body;`;
               });
             }
           }
-        } catch (err) {
-          console.error('Simplified search failed:', err);
-        }
+        } catch (_) {}
       }
     }
 
@@ -7082,8 +7206,7 @@ out center body;`;
     if (!userStr) { goto('/'); return; }
     try {
       currentUser = JSON.parse(userStr);
-    } catch (e) {
-      console.error('Corrupted user data in localStorage:', e);
+    } catch (_) {
       localStorage.removeItem('user');
       goto('/');
       return;
@@ -7124,6 +7247,16 @@ out center body;`;
     const savedAvoidHwy = localStorage.getItem(getUserKey('avoidExpressways'));
     if (savedAvoidHwy) avoidExpressways = savedAvoidHwy === 'true';
 
+    const savedCustomStart = localStorage.getItem(getUserKey('customStartPoint'));
+    if (savedCustomStart) {
+      try {
+        const parsed = JSON.parse(savedCustomStart);
+        if (parsed && parsed.lat && parsed.lng && parsed.name) {
+          useCustomStartPoint = true;
+          customStartPoint = parsed;
+        }
+      } catch (_) {}
+    }
     const savedAutoReroute = localStorage.getItem(getUserKey('autoRerouteEnabled'));
     if (savedAutoReroute !== null) autoRerouteEnabled = savedAutoReroute === 'true';
     const savedSpeedAlert = localStorage.getItem(getUserKey('speedAlertEnabled'));
@@ -7238,7 +7371,6 @@ out center body;`;
             }
           },
           (err) => {
-            console.warn('Continuous GPS error:', err.code, err.message);
             // Permission denied - stop trying
             if (err.code === 1) {
               if (continuousWatchId !== null) {
@@ -7307,12 +7439,30 @@ out center body;`;
       isDataLoaded = true;
       const failedCount = results.filter(r => r.status === 'rejected').length;
       if (failedCount > 0) {
-        console.warn(`${failedCount} data load(s) failed/timed out:`, results.filter(r => r.status === 'rejected'));
         if (failedCount < 4) showNotification(`โหลดข้อมูลบางส่วนไม่สำเร็จ (${failedCount} รายการ)`, 'warning');
         else showNotification('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้', 'error');
       }
       initExtraFeatures();
       initVoiceNavigation();
+
+      // Restore custom start point marker (page refresh)
+      if (useCustomStartPoint && customStartPoint && map && L) {
+        if (customStartMarker) { try { map.removeLayer(customStartMarker); } catch(_){} }
+        customStartMarker = L.marker([customStartPoint.lat, customStartPoint.lng], {
+          icon: L.divIcon({
+            className: 'custom-start-marker',
+            html: `<div class="custom-start-wrapper">
+              <div class="custom-start-pulse"></div>
+              <div class="custom-start-pulse custom-start-pulse-2"></div>
+              <div class="custom-start-dot"></div>
+              <div class="custom-start-label">${escapeHtml(customStartPoint.name)}</div>
+            </div>`,
+            iconSize: [44, 44], iconAnchor: [22, 22]
+          }),
+          zIndexOffset: 1000,
+          interactive: true
+        }).addTo(map);
+      }
 
       // Restore route from previous session (page refresh)
       if (restoreRouteState()) {
@@ -7345,13 +7495,11 @@ out center body;`;
       oilPriceInterval = setInterval(() => {
         if (oilPriceFailCount >= 3) {
           if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
-          console.warn('Oil price fetch stopped after 3 consecutive failures');
           return;
         }
         fetchOilPrices();
       }, 1800000);
     } catch (error) {
-      console.error('Map init error:', error);
       showNotification('ไม่สามารถโหลดแผนที่ได้', 'error');
     }
   });
@@ -8385,8 +8533,27 @@ out center body;`;
           <button class="float-toggle-chip" class:active={showIncidentsPanel} on:click={toggleIncidentsPanel} title="เหตุการณ์จราจร">🚨</button>
           <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
           <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
+          <button class="float-toggle-chip" class:active={showIsochrone} on:click={toggleIsochrone} title="ไปถึงไหนได้ใน X นาที" disabled={isLoadingIsochrone}>
+            {isLoadingIsochrone ? '...' : '⏱️'}
+          </button>
         </div>
       </div>
+
+      <!-- Isochrone Legend -->
+      {#if showIsochrone && isochroneLayers.length > 0}
+        <div class="isochrone-legend glass-card">
+          <div class="isochrone-legend-header">
+            <span>⏱️</span>
+            <span class="isochrone-legend-title">ระยะเข้าถึง</span>
+            <button class="isochrone-close-btn" on:click={() => { showIsochrone = false; clearIsochroneLayers(); }}>✕</button>
+          </div>
+          <div class="isochrone-legend-items">
+            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(0,255,136,0.4)"></span> 10 นาที</div>
+            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(0,200,255,0.35)"></span> 20 นาที</div>
+            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(100,140,255,0.3)"></span> 30 นาที</div>
+          </div>
+        </div>
+      {/if}
 
       <!-- Traffic Legend -->
       {#if showTraffic && optimizedRoute}
@@ -12980,6 +13147,69 @@ out center body;`;
   font-size: 10px;
   color: #71717a;
   font-weight: 500;
+}
+
+/* ==================== ISOCHRONE ==================== */
+.isochrone-legend {
+  position: absolute;
+  top: 175px;
+  left: 16px;
+  z-index: 1000;
+  padding: 10px 14px;
+  border-radius: 16px;
+  min-width: 130px;
+}
+.isochrone-legend-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.isochrone-legend-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e4e4e7;
+  flex: 1;
+}
+.isochrone-close-btn {
+  background: none;
+  border: none;
+  color: #71717a;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.isochrone-close-btn:hover { color: #fff; }
+.isochrone-legend-items {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.isochrone-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #a1a1aa;
+}
+.isochrone-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+:global(.isochrone-label span) {
+  background: rgba(0, 0, 0, 0.65);
+  color: #e4e4e7;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 8px;
+  white-space: nowrap;
 }
 
 /* ==================== TRAFFIC INCIDENTS ==================== */

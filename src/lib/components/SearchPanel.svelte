@@ -28,14 +28,22 @@
   // Load recent searches on init
   loadRecentSearches();
 
-  function fetchWithTimeout(url, options = {}) {
+  async function fetchWithTimeout(url, options = {}) {
     const { timeout = 10000, ...fetchOptions } = options;
     const controller = fetchOptions.signal ? undefined : new AbortController();
     const signal = fetchOptions.signal || controller?.signal;
     const timeoutId = controller ? setTimeout(() => controller.abort(), timeout) : null;
-    return fetch(url, { ...fetchOptions, signal }).finally(() => {
+    try {
+      const res = await fetch(url, { ...fetchOptions, signal });
       if (timeoutId) clearTimeout(timeoutId);
-    });
+      return res;
+    } catch (err) {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (signal?.aborted) throw err;
+      // Retry once (fixes TLS 425 Too Early on first request)
+      await new Promise(r => setTimeout(r, 300));
+      return fetch(url, { ...fetchOptions, signal });
+    }
   }
 
   async function searchPlace(query) {
@@ -49,8 +57,8 @@
         q: query, format: 'json', limit: '8', countrycodes: 'th',
         addressdetails: '1', 'accept-language': 'th'
       });
-      const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-        headers: { 'User-Agent': 'RouteOptimization/2.0' },
+      params.set('endpoint', 'search');
+      const res = await fetchWithTimeout(`/api/geocode?${params.toString()}`, {
         signal, timeout: 8000
       });
       if (signal.aborted) return;
@@ -67,7 +75,6 @@
       showSearchResults = searchResults.length > 0;
     } catch (err) {
       if (err.name === 'AbortError') return;
-      console.error('Search error:', err);
       dispatch('searchError', { message: 'ค้นหาไม่สำเร็จ ลองใหม่อีกครั้ง' });
     } finally {
       if (!signal.aborted) isSearching = false;
@@ -76,7 +83,7 @@
 
   function handleSearchInput() {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 400);
+    searchDebounceTimer = setTimeout(() => searchPlace(searchQuery), 600);
   }
 
   function selectSearchResult(result) {

@@ -34,7 +34,8 @@
       "Bash(npx vite dev:*)",
       "Bash(timeout:*)",
       "Bash(ping:*)",
-      "Bash(python -c \"import os; os.remove\\(''\\\\\\\\?\\\\C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\nul''\\)\")"
+      "Bash(python -c \"import os; os.remove\\(''\\\\\\\\?\\\\C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\nul''\\)\")",
+      "Bash(npx tsc:*)"
     ]
   }
 }
