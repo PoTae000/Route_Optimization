@@ -519,6 +519,7 @@
   let _exitingGlobe = false;
   let globeError = '';
   let globeViewLabel = '';
+  let globeShootingStars: any[] = [];
 
   // Camera rotation (leaflet-rotate — สองนิ้วหมุน)
   let camAngle = 0;
@@ -732,36 +733,56 @@
       container.appendChild(renderer.domElement as HTMLCanvasElement);
       globeRenderer = renderer;
 
-      // Lighting — ใช้เงาดำแทนแสงจ้า
+      // Lighting
       scene.add(new THREE.AmbientLight(0xffffff, 2.5));
-      const sun: any = new THREE.DirectionalLight(0xffffff, 0.8);
-      sun.position.set(3, 2, 5);
-      scene.add(sun);
 
-      // Stars — 2000 ดวง (เบา)
+      // Stars — 2500 ดวง + random sizes
       const starsGeo = new THREE.BufferGeometry();
       const starPos: number[] = [];
-      for (let i = 0; i < 2000; i++) {
+      const starSizes: number[] = [];
+      for (let i = 0; i < 2500; i++) {
         const r = 50;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         starPos.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+        starSizes.push(0.05 + Math.random() * 0.15);
       }
       starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+      starsGeo.setAttribute('size', new THREE.Float32BufferAttribute(starSizes, 1));
       scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.1, sizeAttenuation: true })) as any);
 
-      // Earth — 64 segments (smooth)
+      // Shooting stars — pool of 5
+      globeShootingStars = [];
+      for (let i = 0; i < 5; i++) {
+        const geo = new THREE.BufferGeometry();
+        const positions = new Float32Array(6); // 2 points
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 });
+        const line = new THREE.Line(geo, mat);
+        scene.add(line);
+        globeShootingStars.push({ line, active: false, timer: Math.random() * 500, speed: 0, dir: { x: 0, y: 0, z: 0 }, pos: { x: 0, y: 0, z: 0 }, life: 0 });
+      }
+
+      // Earth — satellite texture (ESRI World Imagery)
       const earthGeo = new THREE.SphereGeometry(1, 64, 64);
-      const earthMat = new THREE.MeshPhongMaterial({
-        color: 0x1a1a2e,
-        specular: new THREE.Color(0x000000),
-        shininess: 0,
-        emissive: new THREE.Color(0x000000),
-        emissiveIntensity: 0
-      });
+      const earthMat = new THREE.MeshBasicMaterial({ color: 0x0a1628 });
       const earth: any = new THREE.Mesh(earthGeo, earthMat);
       scene.add(earth);
       globeEarth = earth;
+
+      // Cloud layer — procedural texture, slightly above earth
+      try {
+        const cloudCanvas = generateCloudTexture(1024);
+        const cloudTex = new THREE.CanvasTexture(cloudCanvas);
+        cloudTex.wrapS = THREE.RepeatWrapping;
+        const cloudGeo = new THREE.SphereGeometry(1.015, 48, 48);
+        const cloudMat = new THREE.MeshBasicMaterial({
+          map: cloudTex, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.FrontSide
+        });
+        const clouds: any = new THREE.Mesh(cloudGeo, cloudMat);
+        scene.add(clouds);
+        globeClouds = clouds;
+      } catch(e) { console.warn('[Globe] Cloud layer skipped:', e); }
 
       // Atmosphere — 1 ชั้น (backside glow)
       const atmosGeo = new THREE.SphereGeometry(1.12, 32, 32);
@@ -795,6 +816,8 @@
       controls.maxDistance = isMobile ? 8 : 6;
       controls.rotateSpeed = 0.5;
       controls.zoomSpeed = 0.8;
+      controls.autoRotate = true;
+      controls.autoRotateSpeed = 0.3;
       globeControls = controls;
 
       // Zoom-in detection → transition back to flat map
@@ -832,7 +855,7 @@
       console.log('[Globe] Ready! Starting animation...');
       animateGlobe();
 
-      // Apply texture to earth — เรียบง่าย ไม่ประมวลผลเพิ่ม
+      // Apply texture to earth
       function applyEarthTexture(tex: any) {
         if (!tex || !globeEarth) return;
         globeEarth.material.map = tex;
@@ -847,6 +870,7 @@
           applyEarthTexture(hdTex);
         }).catch(() => {});
       }).catch((e: any) => console.error('[Globe] Texture load error:', e));
+
     } catch(e: any) {
       console.error('[Globe] Init error:', e);
       globeError = String(e?.message || 'Unknown error');
@@ -862,7 +886,42 @@
 
     // หมุนเมฆช้าๆ
     if (globeClouds) {
-      globeClouds.rotation.y += 0.0001;
+      globeClouds.rotation.y += 0.00012;
+    }
+
+    // Shooting stars animation
+    for (const star of globeShootingStars) {
+      if (!star.active) {
+        star.timer--;
+        if (star.timer <= 0) {
+          // Activate: random position in sky, random direction
+          const angle = Math.random() * Math.PI * 2;
+          const elev = 0.3 + Math.random() * 0.5;
+          const r = 8 + Math.random() * 12;
+          star.pos = { x: Math.cos(angle) * r, y: elev * r * 0.5 + 2, z: Math.sin(angle) * r };
+          const da = angle + Math.PI * 0.6 + Math.random() * 0.8;
+          star.dir = { x: Math.cos(da) * 0.4, y: -0.1 - Math.random() * 0.15, z: Math.sin(da) * 0.4 };
+          star.speed = 0.6 + Math.random() * 0.4;
+          star.life = 40 + Math.random() * 40;
+          star.active = true;
+          star.line.material.opacity = 0.8;
+        }
+      } else {
+        star.pos.x += star.dir.x * star.speed;
+        star.pos.y += star.dir.y * star.speed;
+        star.pos.z += star.dir.z * star.speed;
+        star.life--;
+        star.line.material.opacity = Math.max(0, star.life / 40) * 0.8;
+        const p = star.line.geometry.attributes.position.array;
+        p[0] = star.pos.x; p[1] = star.pos.y; p[2] = star.pos.z;
+        p[3] = star.pos.x - star.dir.x * 1.5; p[4] = star.pos.y - star.dir.y * 1.5; p[5] = star.pos.z - star.dir.z * 1.5;
+        star.line.geometry.attributes.position.needsUpdate = true;
+        if (star.life <= 0) {
+          star.active = false;
+          star.timer = 200 + Math.random() * 600; // 3-13 วินาทีก่อนดาวตกดวงต่อไป
+          star.line.material.opacity = 0;
+        }
+      }
     }
 
     // Pulse user marker (green glow effect)
@@ -897,22 +956,20 @@
       merc.width = n * tileSize;
       merc.height = n * tileSize;
       const ctx = merc.getContext('2d')!;
-      ctx.fillStyle = '#1d1f20';
+      ctx.fillStyle = '#0a1628';
       ctx.fillRect(0, 0, merc.width, merc.height);
 
-      const subs = 'abcd';
       const tiles: { tx: number; ty: number }[] = [];
       for (let ty = 0; ty < n; ty++) {
         for (let tx = 0; tx < n; tx++) tiles.push({ tx, ty });
       }
-      // โหลดทุก tile พร้อมกัน (browser จัดคิว HTTP เอง) + yield ให้ UI ไม่ค้าง
+      // โหลดทุก tile พร้อมกัน (ESRI World Imagery — ภาพถ่ายดาวเทียม)
       const loaded = await Promise.allSettled(tiles.map(({ tx, ty }) => new Promise<{tx: number, ty: number, img: HTMLImageElement}>((resolve, reject) => {
-        const s = subs[(tx + ty) % 4];
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = () => resolve({ tx, ty, img });
         img.onerror = () => reject();
-        img.src = `https://${s}.basemaps.cartocdn.com/dark_all/${zoom}/${tx}/${ty}.png`;
+        img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${zoom}/${ty}/${tx}`;
       })));
 
       // วาดลง canvas เป็น batch + yield ทุก 16 tiles ไม่ให้ block animation
@@ -970,6 +1027,48 @@
     for (let i = 3; i < outBytes.length; i += 4) outBytes[i] = 255;
     outCtx.putImageData(outData, 0, 0);
     return out;
+  }
+
+  // Generate procedural cloud texture on canvas
+  function generateCloudTexture(size: number): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = size; c.height = size / 2;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = 'rgba(0,0,0,0)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    // Layered white blobs to simulate clouds
+    for (let layer = 0; layer < 3; layer++) {
+      const count = 120 + layer * 60;
+      for (let i = 0; i < count; i++) {
+        const x = Math.random() * c.width;
+        const y = Math.random() * c.height;
+        const rx = 20 + Math.random() * 80;
+        const ry = 10 + Math.random() * 30;
+        const alpha = 0.02 + Math.random() * 0.06;
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, rx);
+        grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+        grad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // Band of clouds near equator/tropics
+    for (let i = 0; i < 200; i++) {
+      const x = Math.random() * c.width;
+      const band = (0.3 + Math.random() * 0.4) * c.height;
+      const rx = 30 + Math.random() * 60;
+      const ry = 5 + Math.random() * 15;
+      const grad = ctx.createRadialGradient(x, band, 0, x, band, rx);
+      grad.addColorStop(0, 'rgba(255,255,255,0.04)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(x, band, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return c;
   }
 
   function getGlobeCenterLatLng(): { lat: number; lng: number } | null {
@@ -1149,6 +1248,7 @@
     globeRenderer = null;
     globeEarth = null;
     globeClouds = null;
+    globeShootingStars = [];
     globeInitializing = false;
     const rh = (window as any).__globeResizeHandler;
     if (rh) { window.removeEventListener('resize', rh); delete (window as any).__globeResizeHandler; }
