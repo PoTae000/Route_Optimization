@@ -11,6 +11,7 @@
   import AlertsPanel from '$lib/components/AlertsPanel.svelte';
   import NavigationOverlay from '$lib/components/NavigationOverlay.svelte';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
+  import { callOSRMDirect, callOSRMTable } from '$lib/utils/osrm';
 
   let currentUser: any = null;
 
@@ -1571,6 +1572,23 @@
     return data;
   }
 
+  // ==================== OSRM with Mapbox Fallback ====================
+  async function routeWithOSRMFallback(waypoints: string, options?: { steps?: boolean; exclude?: string[] }, signal?: AbortSignal): Promise<any> {
+    // If exclude options are set, OSRM doesn't support them → go straight to Mapbox
+    if (options?.exclude && options.exclude.length > 0) {
+      return callOSRMProxy(waypoints, { steps: options.steps, exclude: options.exclude }, signal);
+    }
+    // Try OSRM first (fast, free)
+    try {
+      return await callOSRMDirect(waypoints, { steps: options?.steps }, signal);
+    } catch (e: any) {
+      // Don't fallback if the caller aborted
+      if (signal?.aborted) throw e;
+      // Fallback to Mapbox
+      return callOSRMProxy(waypoints, { steps: options?.steps }, signal);
+    }
+  }
+
   // ==================== ROUTE ALTERNATIVES ====================
 
   function getExcludeOptions(): string[] {
@@ -2246,7 +2264,7 @@
         ...remainingDeliveryPoints.map((p: any) => `${p.lng},${p.lat}`)
       ].join(';');
 
-      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: getExcludeOptions() });
+      const data = await routeWithOSRMFallback(waypointCoords, { steps: true, exclude: getExcludeOptions() });
 
       optimizedRoute = {
         ...optimizedRoute,
@@ -2770,7 +2788,7 @@
       ].join(';');
       // Single fastest route - no alternatives, just go
       const exclude = getExcludeOptions();
-      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
+      const data = await routeWithOSRMFallback(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
       const mainRoute = data.routes[0];
       if (!mainRoute?.geometry?.coordinates) {
         showNotification('ข้อมูลเส้นทางไม่ถูกต้อง', 'error');
@@ -3275,51 +3293,63 @@
     return matrix;
   }
 
-  // Build real distance matrix using Mapbox API (slow but accurate)
+  // Build real distance matrix using OSRM Table API (1 call for NxN matrix)
   async function buildRealDistanceMatrix(points: { lat: number; lng: number }[]): Promise<number[][]> {
     const n = points.length;
-    const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
+    const coords = points.map(p => `${p.lng},${p.lat}`).join(';');
 
-    // Fetch all pairs in batches to avoid too many concurrent requests
-    const pairs: { i: number; j: number }[] = [];
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        pairs.push({ i, j });
-      }
-    }
+    try {
+      optimizationProgress = 60;
+      const table = await callOSRMTable(coords);
+      optimizationProgress = 90;
 
-    const batchSize = 5;
-    const totalPairs = pairs.length;
-    let completed = 0;
-
-    for (let b = 0; b < pairs.length; b += batchSize) {
-      const batch = pairs.slice(b, b + batchSize);
-      const results = await Promise.allSettled(
-        batch.map(async ({ i, j }) => {
-          const waypoints = `${points[i].lng},${points[i].lat};${points[j].lng},${points[j].lat}`;
-          try {
-            const data = await callOSRMProxy(waypoints, { steps: false });
-            return { i, j, distance: data.routes[0].distance };
-          } catch {
-            // Fallback to Haversine if API fails
-            return { i, j, distance: getDistance(points[i].lat, points[i].lng, points[j].lat, points[j].lng) };
-          }
-        })
-      );
-
-      results.forEach((res) => {
-        if (res.status === 'fulfilled') {
-          const { i, j, distance } = res.value;
-          matrix[i][j] = distance;
-          matrix[j][i] = distance;
+      const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          if (i === j) continue;
+          const dist = table.distances[i][j];
+          // null = unreachable → fallback to Haversine
+          matrix[i][j] = dist != null ? dist : getDistance(points[i].lat, points[i].lng, points[j].lat, points[j].lng);
         }
-      });
-
-      completed += batch.length;
-      optimizationProgress = Math.round((completed / totalPairs) * 50) + 50; // 50-100%
+      }
+      optimizationProgress = 100;
+      return matrix;
+    } catch {
+      // OSRM Table failed entirely → fallback to pair-by-pair via Mapbox
+      const matrix: number[][] = Array(n).fill(null).map(() => Array(n).fill(0));
+      const pairs: { i: number; j: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          pairs.push({ i, j });
+        }
+      }
+      const batchSize = 5;
+      let completed = 0;
+      for (let b = 0; b < pairs.length; b += batchSize) {
+        const batch = pairs.slice(b, b + batchSize);
+        const results = await Promise.allSettled(
+          batch.map(async ({ i, j }) => {
+            const waypoints = `${points[i].lng},${points[i].lat};${points[j].lng},${points[j].lat}`;
+            try {
+              const data = await callOSRMProxy(waypoints, { steps: false });
+              return { i, j, distance: data.routes[0].distance };
+            } catch {
+              return { i, j, distance: getDistance(points[i].lat, points[i].lng, points[j].lat, points[j].lng) };
+            }
+          })
+        );
+        results.forEach((res) => {
+          if (res.status === 'fulfilled') {
+            const { i, j, distance } = res.value;
+            matrix[i][j] = distance;
+            matrix[j][i] = distance;
+          }
+        });
+        completed += batch.length;
+        optimizationProgress = Math.round((completed / pairs.length) * 50) + 50;
+      }
+      return matrix;
     }
-
-    return matrix;
   }
 
   // Calculate total tour distance using distance matrix
@@ -4827,7 +4857,7 @@
 
       // Single fastest route - no alternatives
       const exclude = getExcludeOptions();
-      const data = await callOSRMProxy(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
+      const data = await routeWithOSRMFallback(waypointCoords, { steps: true, exclude: exclude.length > 0 ? exclude : undefined });
       const mainRoute = data.routes[0];
       if (!mainRoute?.geometry?.coordinates) throw new Error('No route');
 
@@ -6129,18 +6159,16 @@ out center body;`;
     const signal = _prefetchAbort.signal;
     const center = mapRef.getCenter();
     const curZoom = mapRef.getZoom();
-    const subs = 'abc';
+    const subs = 'abcd';
     const queue: string[] = [];
 
-    // โหลด zoom ±1 กว้างมาก (ซูมเข้า/ออกไม่เห็นโหลด) + ±2,±3 พอประมาณ
+    // Prefetch zoom ±1 พอประมาณ (OSM tiles)
     const zoomConfigs = [
-      { z: curZoom - 1, radius: 7 },  // ซูมออก 1 ระดับ — โหลดเยอะ
-      { z: curZoom + 1, radius: 7 },  // ซูมเข้า 1 ระดับ — โหลดเยอะ
-      { z: curZoom,     radius: 6 },  // ปัจจุบัน
-      { z: curZoom - 2, radius: 5 },
-      { z: curZoom + 2, radius: 5 },
-      { z: curZoom - 3, radius: 3 },
-      { z: curZoom + 3, radius: 3 },
+      { z: curZoom,     radius: 3 },  // ปัจจุบัน
+      { z: curZoom - 1, radius: 3 },  // ซูมออก 1
+      { z: curZoom + 1, radius: 3 },  // ซูมเข้า 1
+      { z: curZoom - 2, radius: 2 },
+      { z: curZoom + 2, radius: 2 },
     ];
 
     for (const { z, radius } of zoomConfigs) {
@@ -6155,7 +6183,7 @@ out center body;`;
         const key = `${z}/${tx}/${ty}`;
         if (_prefetchedTiles.has(key)) continue;
         _prefetchedTiles.add(key);
-        const s = subs[(tx + ty) % 3];
+        const s = subs[(tx + ty) % 3]; // OSM uses a/b/c subdomains
         queue.push(`https://${s}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`);
       }
     }
@@ -7011,13 +7039,13 @@ out center body;`;
     }
 
     try {
-      // Start GPS + Leaflet import in parallel for faster load
+      // Start GPS + Leaflet + leaflet-rotate in parallel for fastest load
       const gpsPromise = new Promise<{lat: number, lng: number} | null>((resolve) => {
         if (!navigator.geolocation) { resolve(null); return; }
         navigator.geolocation.getCurrentPosition(
           (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
           () => resolve(null),
-          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 }
         );
       });
 
@@ -7027,9 +7055,9 @@ out center body;`;
         gpsPromise
       ]);
       L = leafletModule;
-      // leaflet-rotate ต้องการ global L — patch ก่อน import (ไม่ block ถ้า fail)
       (window as any).L = L;
-      try { await import('leaflet-rotate'); } catch(_) { console.warn('leaflet-rotate not loaded'); }
+      // leaflet-rotate — ไม่ block map creation, โหลดพร้อม map init
+      const rotatePromise = import('leaflet-rotate').catch(() => {});
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -7062,19 +7090,18 @@ out center body;`;
         bearing: 0
       } as any).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM ═══
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      // ═══ Tile Layer — OSM Standard + CSS dark filter (รายละเอียดเยอะ) ═══
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        subdomains: 'abc',
         maxNativeZoom: 19,
-        maxZoom: 19,
-        detectRetina: true,
-        keepBuffer: 25,
-        updateWhenZooming: true,
-        updateWhenIdle: false,
-        updateInterval: 150,
+        maxZoom: 20,
+        keepBuffer: 4,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        updateInterval: 200,
         className: 'main-tiles'
       }).addTo(map);
+      await rotatePromise;
 
       // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
@@ -7284,6 +7311,9 @@ out center body;`;
 <svelte:head>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://tile.openstreetmap.org">
+  <link rel="preconnect" href="https://a.tile.openstreetmap.org">
+  <link rel="preconnect" href="https://b.tile.openstreetmap.org">
+  <link rel="preconnect" href="https://c.tile.openstreetmap.org">
   <title>ผู้ใช้ทั่วไป | Route Optimization</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -10063,18 +10093,18 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; will-change: transform; -webkit-transform: translateZ(0); transform: translateZ(0); }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.6) brightness(1.0) contrast(1.3); background: #e5e5e0; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1a1a2e; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { image-rendering: auto; }
+  :global(.main-tiles) { image-rendering: auto; filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(1.1); }
   :global(.leaflet-tile) { image-rendering: auto; will-change: transform, opacity; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-map-pane) { will-change: transform; }
   :global(.leaflet-tile-container) { will-change: transform; }
   :global(.leaflet-overlay-pane svg) { shape-rendering: geometricPrecision; }
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
-  :global(.leaflet-fade-anim .leaflet-tile) { will-change: transform, opacity; transition: opacity 0.15s linear !important; }
+  :global(.leaflet-fade-anim .leaflet-tile) { will-change: transform, opacity; transition: opacity 0.08s linear !important; }
   :global(.leaflet-fade-anim .leaflet-popup) { transition: none !important; }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
@@ -12855,7 +12885,7 @@ out center body;`;
 /* ==================== TRAFFIC INCIDENTS ==================== */
 .incidents-panel {
   position: absolute;
-  bottom: 15px;
+  bottom: 65px;
   left: 16px;
   z-index: 1050;
   width: 300px;
