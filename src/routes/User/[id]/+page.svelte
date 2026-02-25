@@ -568,11 +568,11 @@
 
   function setupMapRotation() {}
 
-  // ═══ Device Compass — เข็มทิศจากเซ็นเซอร์มือถือ (ทำงานแม้ยืนอยู่กับที่) ═══
+  // ═══ Device Compass — เข็มทิศจากเซ็นเซอร์มือถือ (real-time, ทำงานแม้ยืนอยู่กับที่) ═══
   function _onDeviceOrientation(e: any) {
     let alpha: number | null = null;
     if (e.webkitCompassHeading !== undefined) {
-      // iOS: webkitCompassHeading = degrees from north (0-360)
+      // iOS: webkitCompassHeading = degrees from north (0-360), already correct
       alpha = e.webkitCompassHeading;
     } else if (e.alpha !== null && e.absolute) {
       // Android absolute: alpha = degrees from north (reversed)
@@ -586,6 +586,13 @@
         _deviceCompassHeading = ((_deviceCompassHeading + diff * 0.3) + 360) % 360;
       } else {
         _deviceCompassHeading = alpha;
+      }
+      // อัพเดท compassHeading แบบ real-time (ไม่ต้องรอ GPS callback)
+      // ใช้ GPS heading เป็นหลักเมื่อเคลื่อนที่เร็ว, device compass เมื่อช้า/หยุดนิ่ง
+      if (isNavigating && !(currentSpeed > 5 && currentHeading !== null)) {
+        compassHeading = _deviceCompassHeading;
+        const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+        compassDir = dirs[Math.round(_deviceCompassHeading / 45) % 8];
       }
     }
   }
@@ -3968,13 +3975,13 @@
       // Fallback: ใช้เข็มทิศเซ็นเซอร์ตอนยืนอยู่กับที่/ช้า
       if (currentHeading !== null) {
         let diff = ((_deviceCompassHeading - currentHeading + 540) % 360) - 180;
-        currentHeading = ((currentHeading + diff * 0.15) + 360) % 360;
+        currentHeading = ((currentHeading + diff * 0.4) + 360) % 360;
       } else {
         currentHeading = _deviceCompassHeading;
       }
     }
-    // อัพเดท compass heading
-    if (currentHeading !== null) {
+    // อัพเดท compass heading จาก GPS heading (เมื่อเคลื่อนที่เร็ว)
+    if (currentHeading !== null && currentSpeed > 5) {
       compassHeading = currentHeading;
       const dirs = ['N','NE','E','SE','S','SW','W','NW'];
       compassDir = dirs[Math.round(currentHeading / 45) % 8];

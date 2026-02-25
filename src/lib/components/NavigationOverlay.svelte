@@ -388,7 +388,8 @@
     justify-content: center;
   }
   .gmaps-compass-needle {
-    transition: transform 0.3s ease-out;
+    transition: transform 0.15s linear;
+    will-change: transform;
   }
   .gmaps-recenter-fab {
     width: 44px;
