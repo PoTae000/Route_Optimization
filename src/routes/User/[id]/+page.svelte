@@ -7406,8 +7406,8 @@ out center body;`;
       ]);
       L = leafletModule;
       (window as any).L = L;
-      // leaflet-rotate — ไม่ block map creation, โหลดพร้อม map init
-      const rotatePromise = import('leaflet-rotate').catch(() => {});
+      // leaflet-rotate — ต้องโหลดก่อนสร้าง map เพื่อ patch L.Map.prototype
+      await import('leaflet-rotate').catch(() => {});
 
       // Center on user's current position if available, otherwise Bangkok
       const initLat = userPos?.lat ?? 13.7465;
@@ -7451,7 +7451,6 @@ out center body;`;
         updateInterval: 200,
         className: 'main-tiles'
       }).addTo(map);
-      await rotatePromise;
 
       // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
