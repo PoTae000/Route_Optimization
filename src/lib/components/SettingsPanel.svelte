@@ -247,31 +247,45 @@
             </div>
           {/if}
 
-          <!-- Charging Stations / Gas Stations -->
+          <!-- Station display toggle -->
           <div class="section">
             <div class="section-title-row">
-              <span>{vehicleType === 'fuel' ? '⛽ ปั๊มน้ำมัน' : '⚡ สถานีชาร์จ EV'}</span>
+              <span>{vehicleType === 'fuel' ? '⛽ แสดงปั๊มน้ำมัน' : '⚡ แสดงสถานีชาร์จ EV'}</span>
               <button class="toggle-switch" class:active={showChargingStations} on:click={toggleChargingStations}>
                 <div class="toggle-dot"></div>
               </button>
             </div>
-            <div class="ev-actions">
-              {#if vehicleType === 'fuel'}
-                <button class="action-btn ev" on:click={searchGasAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
-                  {#if isLoadingStations}<div class="spinner-sm"></div>{:else}🔍{/if} ค้นหาปั๊มบนเส้นทาง
-                </button>
-              {:else}
+            {#if vehicleType === 'ev'}
+              <div class="ev-actions">
                 <button class="action-btn ev" on:click={loadNearbyChargingStations} disabled={isLoadingStations}>
                   {#if isLoadingStations}<div class="spinner-sm"></div>{:else}🔍{/if} ค้นหาใกล้เคียง 100กม.
                 </button>
-                <button class="action-btn ev" on:click={searchEVAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
-                  🛣️ ค้นหาตามเส้นทาง
-                </button>
-              {/if}
-              {#if chargingStations.length > 0}
+              </div>
+            {/if}
+            {#if chargingStations.length > 0}
+              <div class="ev-actions">
                 <button class="action-btn danger" on:click={clearChargingStations}>
                   🗑️ ล้าง{vehicleType === 'fuel' ? 'ปั๊ม' : 'สถานี'} ({chargingStations.length})
                 </button>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Search along route (separate) -->
+          <div class="section">
+            <div class="section-title">🛣️ ค้นหาตามเส้นทาง</div>
+            <div class="ev-actions">
+              {#if vehicleType === 'fuel'}
+                <button class="action-btn ev" on:click={searchGasAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
+                  {#if isLoadingStations}<div class="spinner-sm"></div>{:else}⛽{/if} ค้นหาปั๊มบนเส้นทาง
+                </button>
+              {:else}
+                <button class="action-btn ev" on:click={searchEVAlongRoute} disabled={isLoadingStations || !optimizedRoute}>
+                  {#if isLoadingStations}<div class="spinner-sm"></div>{:else}⚡{/if} ค้นหาสถานีชาร์จตามเส้นทาง
+                </button>
+              {/if}
+              {#if !optimizedRoute}
+                <span class="hint-text">ต้องมีเส้นทางก่อนจึงจะค้นหาได้</span>
               {/if}
             </div>
           </div>
@@ -516,6 +530,7 @@
   .action-btn.ev:hover:not(:disabled) { background: rgba(0,255,136,0.08); }
   .action-btn.danger { border-color: rgba(255,107,107,0.15); color: #ff6b6b; }
   .action-btn.danger:hover:not(:disabled) { background: rgba(255,107,107,0.08); }
+  .hint-text { font-size: 11px; color: #52525b; font-style: italic; }
 
   /* Toggle Switch */
   .toggle-switch {
