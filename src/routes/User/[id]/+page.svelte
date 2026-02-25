@@ -7348,9 +7348,9 @@ out center body;`;
         maxNativeZoom: 19,
         maxZoom: 20,
         keepBuffer: 4,
-        updateWhenZooming: false,
-        updateWhenIdle: true,
-        updateInterval: 200,
+        updateWhenZooming: true,
+        updateWhenIdle: false,
+        updateInterval: 150,
         className: 'main-tiles'
       }).addTo(map);
 
