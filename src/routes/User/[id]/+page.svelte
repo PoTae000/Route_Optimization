@@ -6010,11 +6010,15 @@ out center body;`;
     const subs = 'abc';
     const queue: string[] = [];
 
-    // โหลดแค่ zoom ±1 รัศมีเล็ก — ไม่ flood connection
+    // โหลด zoom ±1 กว้างมาก (ซูมเข้า/ออกไม่เห็นโหลด) + ±2,±3 พอประมาณ
     const zoomConfigs = [
-      { z: curZoom,     radius: 3 },  // ปัจจุบัน — ขอบนอก viewport
-      { z: curZoom - 1, radius: 2 },  // ซูมออก 1 ระดับ
-      { z: curZoom + 1, radius: 2 },  // ซูมเข้า 1 ระดับ
+      { z: curZoom - 1, radius: 7 },  // ซูมออก 1 ระดับ — โหลดเยอะ
+      { z: curZoom + 1, radius: 7 },  // ซูมเข้า 1 ระดับ — โหลดเยอะ
+      { z: curZoom,     radius: 6 },  // ปัจจุบัน
+      { z: curZoom - 2, radius: 5 },
+      { z: curZoom + 2, radius: 5 },
+      { z: curZoom - 3, radius: 3 },
+      { z: curZoom + 3, radius: 3 },
     ];
 
     for (const { z, radius } of zoomConfigs) {
@@ -6036,18 +6040,18 @@ out center body;`;
 
     if (queue.length === 0) return;
 
-    // โหลดเบื้องหลัง batch 6 ทุก 300ms — ไม่แย่ง connection กับ visible tiles
+    // โหลดเบื้องหลัง batch 3 ทุก 120ms
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 6);
-      idx += 6;
+      const batch = queue.slice(idx, idx + 3);
+      idx += 3;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 300);
+      setTimeout(loadBatch, 120);
     }
     loadBatch();
   }
@@ -6936,24 +6940,24 @@ out center body;`;
         bearing: 0
       } as any).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM (detectRetina + ลด buffer ให้โหลดเร็ว) ═══
+      // ═══ Tile Layer — OSM ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
         detectRetina: true,
-        keepBuffer: 3,
+        keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 50,
+        updateInterval: 150,
         className: 'main-tiles'
       }).addTo(map);
 
-      // ═══ Background tile prefetch — หลัง idle 1.5s (ให้ visible tiles โหลดก่อน) ═══
+      // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 1500); });
-      setTimeout(() => prefetchTiles(map), 2000);
+      map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 800); });
+      setTimeout(() => prefetchTiles(map), 500);
 
       // ═══ Camera rotation listener (leaflet-rotate) ═══
       setupCamRotateListener();
