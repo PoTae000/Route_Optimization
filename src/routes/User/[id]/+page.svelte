@@ -3863,7 +3863,8 @@
 
     // Show current location blue dot after stopping (with heading beam)
     if (currentLocation && map) {
-      const hdeg = currentHeading !== null ? currentHeading : 0;
+      const hdeg = _deviceCompassHeading !== null ? _deviceCompassHeading : (currentHeading !== null ? currentHeading : 0);
+      const hasHeading = _deviceCompassHeading !== null || currentHeading !== null;
       currentLocationMarker = L.marker([currentLocation.lat, currentLocation.lng], {
         icon: L.divIcon({
           className: '',
@@ -3871,7 +3872,7 @@
             <div class="my-loc-wrapper">
               <div class="loc-pulse-ring"></div>
               <div class="loc-pulse-ring loc-pulse-ring-2"></div>
-              <div class="heading-beam" style="transform: rotate(${hdeg}deg); opacity: 0;"></div>
+              <div class="heading-beam" style="transform: rotate(${hdeg}deg); opacity: ${hasHeading ? 1 : 0};"></div>
               <div class="my-loc-dot"></div>
               <div class="custom-start-label start-label-gps">ตำแหน่งปัจจุบัน</div>
             </div>
@@ -3883,6 +3884,10 @@
         interactive: false
       }).addTo(map);
       headingMarkerElement = currentLocationMarker.getElement();
+      _nonNavBeamCurrent = hdeg;
+      _nonNavBeamTarget = hdeg;
+      // Restart compass + beam loop หลังหยุดนำทาง
+      startDeviceCompass();
       map.setView([currentLocation.lat, currentLocation.lng], 16);
     }
     showNotification('หยุดนำทางแล้ว', 'success');
@@ -4285,13 +4290,16 @@
       const isCurrent = i === currentTargetIndex;
       const isStart = point.id === -1;
 
+      // Skip GPS start point — blue dot แสดงอยู่แล้ว ไม่ต้องซ้อน marker
+      if (isStart && !useCustomStartPoint) return;
+
       let gradient, glow;
       if (isArrived) { gradient = 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'; glow = '#6b7280'; }
       else if (isCurrent) { gradient = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'; glow = '#f59e0b'; }
       else if (isStart) { gradient = 'linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)'; glow = '#00ff88'; }
       else { gradient = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; glow = '#667eea'; }
 
-      const displayNumber = isStart ? '📍' : (isArrived ? '✓' : i);
+      const displayNumber = isArrived ? '✓' : i;
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: 'route-marker',
