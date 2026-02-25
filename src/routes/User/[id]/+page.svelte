@@ -568,6 +568,9 @@
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
+    if (map && (map as any).setBearing) {
+      (map as any).setBearing(0);
+    }
   }
 
   // ═══ Globe Mode: Three.js 3D Earth ═══
@@ -3493,7 +3496,6 @@
 
   function displayOptimizedRoute() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
-    lockRotation();
     if (routeLayer) routeLayer.remove();
     clearTrafficLayers();
     const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
@@ -3856,7 +3858,15 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Map rotation disabled — แผนที่เหนืออยู่ข้างบนเสมอ
+      // Heading-up rotation — แผนที่หมุนตามทิศทางขับ
+      if (isNavigating && currentSpeed > 5 && (map as any).setBearing) {
+        const targetBearing = -animCurrentHeading;
+        const diff = Math.abs(targetBearing - _lastAppliedRotation);
+        if (diff > 2) {
+          (map as any).setBearing(targetBearing);
+          _lastAppliedRotation = targetBearing;
+        }
+      }
     }
     tick();
   }
@@ -3907,6 +3917,12 @@
           currentHeading = newHeading;
         }
       }
+    }
+    // อัพเดท compass heading
+    if (currentHeading !== null) {
+      compassHeading = currentHeading;
+      const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+      compassDir = dirs[Math.round(currentHeading / 45) % 8];
     }
     // อัพเดท GPS status ตามความแม่นยำ
     if (acc <= 10) gpsStatus = 'excellent';
@@ -6931,10 +6947,11 @@ out center body;`;
         bearing: 0
       } as any).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM ═══
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        subdomains: 'abc',
+      // ═══ Tile Layer — CartoDB Dark Matter @2x (native dark, retina sharp) ═══
+      const retinaSuffix = window.devicePixelRatio > 1 ? '@2x' : '';
+      L.tileLayer(`https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${retinaSuffix}.png`, {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+        subdomains: 'abcd',
         maxNativeZoom: 19,
         maxZoom: 19,
         keepBuffer: 25,
@@ -9983,7 +10000,7 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; will-change: transform; -webkit-transform: translateZ(0); transform: translateZ(0); }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.6) brightness(1.0) contrast(1.3); background: #e5e5e0; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1a1a2e; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
