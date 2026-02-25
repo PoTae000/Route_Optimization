@@ -10213,24 +10213,24 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 120px; height: 120px;
+    width: 60px; height: 60px;
     top: 50%; left: 50%;
-    margin-left: -60px;
-    margin-top: -120px;
+    margin-left: -30px;
+    margin-top: -60px;
     transform-origin: 50% 100%;
     background: conic-gradient(
-      from -30deg at 50% 100%,
+      from -22deg at 50% 100%,
       transparent 0deg,
-      rgba(0, 255, 136, 0.18) 15deg,
-      rgba(0, 255, 136, 0.28) 30deg,
-      rgba(0, 255, 136, 0.18) 45deg,
-      transparent 60deg
+      rgba(0, 255, 136, 0.15) 12deg,
+      rgba(0, 255, 136, 0.25) 22deg,
+      rgba(0, 255, 136, 0.15) 32deg,
+      transparent 44deg
     );
     border-radius: 50%;
-    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 30%, transparent 70%);
-    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 30%, transparent 70%);
+    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 25%, transparent 65%);
+    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 25%, transparent 65%);
     pointer-events: none;
-    transition: transform 0.3s ease, opacity 0.3s;
+    transition: opacity 0.3s;
     z-index: 5;
   }
   :global(.loc-pulse-ring) {
