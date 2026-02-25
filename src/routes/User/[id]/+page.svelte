@@ -11,7 +11,7 @@
   import AlertsPanel from '$lib/components/AlertsPanel.svelte';
   import NavigationOverlay from '$lib/components/NavigationOverlay.svelte';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
-  import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch, callOSRMIsochrone } from '$lib/utils/osrm';
+  import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch } from '$lib/utils/osrm';
 
   // Silence all console output in production
   if (browser) {
@@ -105,8 +105,6 @@
     alongRoutePOIs = [];
     poiMarkers = [];
     mapPOIMarkers = [];
-    isochroneLayers = [];
-    showIsochrone = false;
     if (weatherRadarLayer && map) { try { map.removeLayer(weatherRadarLayer); } catch(e) {} }
     weatherRadarLayer = null;
     showWeatherRadar = false;
@@ -547,11 +545,6 @@
   // Traffic
   let showTraffic = false;
   let trafficLayers: any[] = [];
-
-  // Isochrone
-  let showIsochrone = false;
-  let isochroneLayers: any[] = [];
-  let isLoadingIsochrone = false;
 
   // Weather Radar (RainViewer)
   let showWeatherRadar = false;
@@ -2120,76 +2113,6 @@
     }
   }
 
-  // ==================== Isochrone ====================
-  function clearIsochroneLayers() {
-    isochroneLayers.forEach(l => { try { map?.removeLayer(l); } catch(_) {} });
-    isochroneLayers = [];
-  }
-
-  async function toggleIsochrone() {
-    showIsochrone = !showIsochrone;
-    if (!showIsochrone) {
-      clearIsochroneLayers();
-      return;
-    }
-    if (!currentLocation) {
-      showNotification('ยังไม่มีตำแหน่ง GPS', 'warning');
-      showIsochrone = false;
-      return;
-    }
-    isLoadingIsochrone = true;
-    try {
-      const result = await callOSRMIsochrone(currentLocation.lng, currentLocation.lat, [10, 20, 30]);
-      clearIsochroneLayers();
-      if (!map) return;
-      const colors = [
-        { fill: 'rgba(0, 255, 136, 0.25)', stroke: 'rgba(0, 255, 136, 0.6)' },
-        { fill: 'rgba(0, 200, 255, 0.18)', stroke: 'rgba(0, 200, 255, 0.5)' },
-        { fill: 'rgba(100, 140, 255, 0.12)', stroke: 'rgba(100, 140, 255, 0.4)' }
-      ];
-      // Draw largest first (so smaller ones overlay on top)
-      const reversed = [...result.contours].reverse();
-      reversed.forEach((contour, i) => {
-        if (contour.points.length < 3) return;
-        // Convert [lng,lat] to [lat,lng] for Leaflet + create convex hull
-        const latlngs = contour.points.map(p => [p[1], p[0]] as [number, number]);
-        const hull = convexHull(latlngs);
-        if (hull.length < 3) return;
-        const colorIdx = reversed.length - 1 - i; // map back to original order
-        const c = colors[colorIdx] || colors[0];
-        const polygon = L.polygon(hull, {
-          color: c.stroke,
-          fillColor: c.fill,
-          fillOpacity: 1,
-          weight: 2,
-          opacity: 0.8,
-          interactive: false
-        }).addTo(map);
-        // Add label at centroid
-        const centroid = hull.reduce((acc, p) => [acc[0] + p[0] / hull.length, acc[1] + p[1] / hull.length], [0, 0]);
-        const label = L.marker(centroid as [number, number], {
-          icon: L.divIcon({
-            className: 'isochrone-label',
-            html: `<span>${contour.minutes} นาที</span>`,
-            iconSize: [60, 20],
-            iconAnchor: [30, 10]
-          }),
-          interactive: false
-        }).addTo(map);
-        isochroneLayers.push(polygon, label);
-      });
-      if (isochroneLayers.length === 0) {
-        showNotification('ไม่สามารถสร้าง Isochrone ได้', 'warning');
-        showIsochrone = false;
-      }
-    } catch (err) {
-      showNotification('Isochrone ไม่สำเร็จ', 'error');
-      showIsochrone = false;
-    } finally {
-      isLoadingIsochrone = false;
-    }
-  }
-
   async function toggleWeatherRadar() {
     if (showWeatherRadar) {
       // Turn off
@@ -2216,27 +2139,6 @@
     } catch (err) {
       showNotification('โหลดเรดาร์ฝนไม่สำเร็จ', 'error');
     }
-  }
-
-  // Simple convex hull (Graham scan)
-  function convexHull(points: [number, number][]): [number, number][] {
-    if (points.length < 3) return points;
-    const sorted = [...points].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
-    const cross = (o: [number, number], a: [number, number], b: [number, number]) =>
-      (a[1] - o[1]) * (b[0] - o[0]) - (a[0] - o[0]) * (b[1] - o[1]);
-    const lower: [number, number][] = [];
-    for (const p of sorted) {
-      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-      lower.push(p);
-    }
-    const upper: [number, number][] = [];
-    for (const p of sorted.reverse()) {
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-      upper.push(p);
-    }
-    upper.pop();
-    lower.pop();
-    return lower.concat(upper);
   }
 
   // ขนาดเส้นตาม zoom — บางลงเมื่อซูมออก
@@ -8649,28 +8551,9 @@ out center body;`;
           <button class="float-toggle-chip" class:active={showIncidentsPanel} on:click={toggleIncidentsPanel} title="เหตุการณ์จราจร">🚨</button>
           <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
           <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
-          <button class="float-toggle-chip" class:active={showIsochrone} on:click={toggleIsochrone} title="ไปถึงไหนได้ใน X นาที" disabled={isLoadingIsochrone}>
-            {isLoadingIsochrone ? '...' : '⏱️'}
-          </button>
           <button class="float-toggle-chip" class:active={showWeatherRadar} on:click={toggleWeatherRadar} title="เรดาร์ฝน">🌧️</button>
         </div>
       </div>
-
-      <!-- Isochrone Legend -->
-      {#if showIsochrone && isochroneLayers.length > 0}
-        <div class="isochrone-legend glass-card">
-          <div class="isochrone-legend-header">
-            <span>⏱️</span>
-            <span class="isochrone-legend-title">ระยะเข้าถึง</span>
-            <button class="isochrone-close-btn" on:click={() => { showIsochrone = false; clearIsochroneLayers(); }}>✕</button>
-          </div>
-          <div class="isochrone-legend-items">
-            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(0,255,136,0.4)"></span> 10 นาที</div>
-            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(0,200,255,0.35)"></span> 20 นาที</div>
-            <div class="isochrone-legend-item"><span class="isochrone-swatch" style="background: rgba(100,140,255,0.3)"></span> 30 นาที</div>
-          </div>
-        </div>
-      {/if}
 
       <!-- Traffic Legend -->
       {#if showTraffic && optimizedRoute}
@@ -13264,69 +13147,6 @@ out center body;`;
   font-size: 10px;
   color: #71717a;
   font-weight: 500;
-}
-
-/* ==================== ISOCHRONE ==================== */
-.isochrone-legend {
-  position: absolute;
-  top: 175px;
-  left: 16px;
-  z-index: 1000;
-  padding: 10px 14px;
-  border-radius: 16px;
-  min-width: 130px;
-}
-.isochrone-legend-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-.isochrone-legend-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #e4e4e7;
-  flex: 1;
-}
-.isochrone-close-btn {
-  background: none;
-  border: none;
-  color: #71717a;
-  font-size: 14px;
-  cursor: pointer;
-  padding: 0 2px;
-  line-height: 1;
-}
-.isochrone-close-btn:hover { color: #fff; }
-.isochrone-legend-items {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.isochrone-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: #a1a1aa;
-}
-.isochrone-swatch {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-:global(.isochrone-label span) {
-  background: rgba(0, 0, 0, 0.65);
-  color: #e4e4e7;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 8px;
-  white-space: nowrap;
 }
 
 /* ==================== TRAFFIC INCIDENTS ==================== */
