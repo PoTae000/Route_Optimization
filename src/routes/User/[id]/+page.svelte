@@ -3496,6 +3496,7 @@
 
   function displayOptimizedRoute() {
     if (!L || !map || !optimizedRoute?.route?.geometry) return;
+    lockRotation();
     if (routeLayer) routeLayer.remove();
     clearTrafficLayers();
     const coords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]]);
@@ -3858,15 +3859,7 @@
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
       }
-      // Heading-up rotation — แผนที่หมุนตามทิศทางขับ
-      if (isNavigating && currentSpeed > 5 && (map as any).setBearing) {
-        const targetBearing = -animCurrentHeading;
-        const diff = Math.abs(targetBearing - _lastAppliedRotation);
-        if (diff > 2) {
-          (map as any).setBearing(targetBearing);
-          _lastAppliedRotation = targetBearing;
-        }
-      }
+      // Map rotation locked — ไม่หมุนตอนนำทาง/คำนวณเสร็จ
     }
     tick();
   }
@@ -6017,15 +6010,11 @@ out center body;`;
     const subs = 'abc';
     const queue: string[] = [];
 
-    // โหลด zoom ±1 กว้างมาก (ซูมเข้า/ออกไม่เห็นโหลด) + ±2,±3 พอประมาณ
+    // โหลดแค่ zoom ±1 รัศมีเล็ก — ไม่ flood connection
     const zoomConfigs = [
-      { z: curZoom - 1, radius: 7 },  // ซูมออก 1 ระดับ — โหลดเยอะ
-      { z: curZoom + 1, radius: 7 },  // ซูมเข้า 1 ระดับ — โหลดเยอะ
-      { z: curZoom,     radius: 6 },  // ปัจจุบัน
-      { z: curZoom - 2, radius: 5 },
-      { z: curZoom + 2, radius: 5 },
-      { z: curZoom - 3, radius: 3 },
-      { z: curZoom + 3, radius: 3 },
+      { z: curZoom,     radius: 3 },  // ปัจจุบัน — ขอบนอก viewport
+      { z: curZoom - 1, radius: 2 },  // ซูมออก 1 ระดับ
+      { z: curZoom + 1, radius: 2 },  // ซูมเข้า 1 ระดับ
     ];
 
     for (const { z, radius } of zoomConfigs) {
@@ -6047,18 +6036,18 @@ out center body;`;
 
     if (queue.length === 0) return;
 
-    // โหลดเบื้องหลัง batch 3 ทุก 120ms
+    // โหลดเบื้องหลัง batch 6 ทุก 300ms — ไม่แย่ง connection กับ visible tiles
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 3);
-      idx += 3;
+      const batch = queue.slice(idx, idx + 6);
+      idx += 6;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 120);
+      setTimeout(loadBatch, 300);
     }
     loadBatch();
   }
@@ -6947,24 +6936,24 @@ out center body;`;
         bearing: 0
       } as any).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — OSM (detectRetina = คมชัดบนจอ HiDPI) ═══
+      // ═══ Tile Layer — OSM (detectRetina + ลด buffer ให้โหลดเร็ว) ═══
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
         detectRetina: true,
-        keepBuffer: 25,
+        keepBuffer: 3,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 150,
+        updateInterval: 50,
         className: 'main-tiles'
       }).addTo(map);
 
-      // ═══ Background tile prefetch — โหลดต่อเนื่อง ═══
+      // ═══ Background tile prefetch — หลัง idle 1.5s (ให้ visible tiles โหลดก่อน) ═══
       map.on('movestart zoomstart', () => { _prefetchAbort?.abort(); });
-      map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 800); });
-      setTimeout(() => prefetchTiles(map), 500);
+      map.on('moveend zoomend', () => { setTimeout(() => prefetchTiles(map), 1500); });
+      setTimeout(() => prefetchTiles(map), 2000);
 
       // ═══ Camera rotation listener (leaflet-rotate) ═══
       setupCamRotateListener();
