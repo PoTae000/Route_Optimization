@@ -107,6 +107,9 @@
     mapPOIMarkers = [];
     isochroneLayers = [];
     showIsochrone = false;
+    if (weatherRadarLayer && map) { try { map.removeLayer(weatherRadarLayer); } catch(e) {} }
+    weatherRadarLayer = null;
+    showWeatherRadar = false;
     _gpsTraceBuffer = [];
     _matchedPosition = null;
     _poiElements.clear();
@@ -533,6 +536,9 @@
   let globeError = '';
   let globeViewLabel = '';
   let globeShootingStars: any[] = [];
+  let globeDeliveryMarkers: any[] = [];
+  let _globeDeliveryPointIds: number[] = [];
+  let _globeTHREE: any = null;
 
   // Camera rotation (leaflet-rotate — สองนิ้วหมุน)
   let camAngle = 0;
@@ -546,6 +552,10 @@
   let showIsochrone = false;
   let isochroneLayers: any[] = [];
   let isLoadingIsochrone = false;
+
+  // Weather Radar (RainViewer)
+  let showWeatherRadar = false;
+  let weatherRadarLayer: any = null;
 
   // OSRM Match — GPS trace buffer
   let _gpsTraceBuffer: [number, number][] = []; // [lng, lat][]
@@ -719,6 +729,7 @@
         ]);
       }
       const THREE = threeModule as any;
+      _globeTHREE = THREE;
       const OrbitControls = (controlsModule as any).OrbitControls;
       const container = document.getElementById('globe-container');
       if (!container) {
@@ -847,6 +858,32 @@
         }
       });
 
+      // Click on delivery marker → zoom in to that point
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      renderer.domElement.addEventListener('click', (e: MouseEvent) => {
+        if (_exitingGlobe || !globeCamera || globeDeliveryMarkers.length === 0) return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, globeCamera);
+        const hits = raycaster.intersectObjects(globeDeliveryMarkers, true);
+        if (hits.length > 0) {
+          // Find the root marker (parent with userData.pointId)
+          let obj = hits[0].object;
+          while (obj.parent && !obj.userData?.pointId) obj = obj.parent;
+          if (obj.userData?.lat != null) {
+            _exitingGlobe = true;
+            exitGlobeMode({ lat: obj.userData.lat, lng: obj.userData.lng });
+            // Zoom closer to the point after globe exit
+            setTimeout(() => {
+              if (map) map.setView([obj.userData.lat, obj.userData.lng], 14, { animate: true });
+              _exitingGlobe = false;
+            }, 600);
+          }
+        }
+      });
+
       // Resize handler — ทั้ง window resize และ container resize (sidebar toggle)
       const onGlobeResize = () => {
         if (!container || !globeCamera || !globeRenderer) return;
@@ -865,6 +902,8 @@
 
       // Place user location marker on globe
       updateGlobeUserMarker(THREE);
+      // Place delivery point markers on globe
+      updateGlobeDeliveryMarkers(THREE);
 
       globeReady = true;
       globeInitializing = false;
@@ -955,8 +994,9 @@
     if (globeUserMarker?.children[0]) {
       globeUserMarker.children[0].material.opacity = 0.2 + 0.15 * Math.sin(Date.now() * 0.004);
     }
-    // Update label every 30 frames
+    // Update label every 30 frames; rebuild delivery markers every 60 frames
     if (++_globeFrameCount % 30 === 0) updateGlobeViewLabel();
+    if (_globeFrameCount % 60 === 0 && _globeTHREE) updateGlobeDeliveryMarkers(_globeTHREE);
     if (globeRenderer && globeScene && globeCamera) {
       globeRenderer.render(globeScene, globeCamera);
     }
@@ -1159,6 +1199,47 @@
     globeUserPulse.lookAt(0, 0, 0);
   }
 
+  // Place delivery point markers on the globe
+  function updateGlobeDeliveryMarkers(THREE: any) {
+    if (!globeScene) return;
+    const currentIds = deliveryPoints.map((p: any) => p.id).sort().join(',');
+    const cachedIds = _globeDeliveryPointIds.join(',');
+    if (currentIds === cachedIds && globeDeliveryMarkers.length > 0) return;
+
+    // Remove old markers
+    for (const m of globeDeliveryMarkers) {
+      globeScene.remove(m);
+      m.geometry?.dispose();
+      m.material?.dispose();
+      if (m.children) {
+        for (const c of m.children) { c.geometry?.dispose(); c.material?.dispose(); }
+      }
+    }
+    globeDeliveryMarkers = [];
+    _globeDeliveryPointIds = deliveryPoints.map((p: any) => p.id).sort();
+
+    for (const pt of deliveryPoints) {
+      if (!pt.lat || !pt.lng) continue;
+      const pos = latLngToGlobe3D(pt.lat, pt.lng, 1.012);
+
+      // Orange sphere marker
+      const dotGeo = new THREE.SphereGeometry(0.012, 16, 16);
+      const dotMat = new THREE.MeshBasicMaterial({ color: 0xff6b35 });
+      const dot = new THREE.Mesh(dotGeo, dotMat);
+      dot.position.set(pos.x, pos.y, pos.z);
+      dot.userData = { pointId: pt.id, lat: pt.lat, lng: pt.lng, name: pt.name || '' };
+
+      // Glow sphere (additive blend)
+      const glowGeo = new THREE.SphereGeometry(0.02, 16, 16);
+      const glowMat = new THREE.MeshBasicMaterial({ color: 0xff6b35, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false });
+      const glow = new THREE.Mesh(glowGeo, glowMat);
+      dot.add(glow);
+
+      globeScene.add(dot);
+      globeDeliveryMarkers.push(dot);
+    }
+  }
+
   // Get rough location name from lat/lng
   function getGlobeRegionName(lat: number, lng: number): string {
     // Thailand
@@ -1260,6 +1341,14 @@
     globeEarth = null;
     globeClouds = null;
     globeShootingStars = [];
+    // Clean up delivery markers from scene
+    for (const m of globeDeliveryMarkers) {
+      m.geometry?.dispose(); m.material?.dispose();
+      if (m.children) { for (const c of m.children) { c.geometry?.dispose(); c.material?.dispose(); } }
+    }
+    globeDeliveryMarkers = [];
+    _globeDeliveryPointIds = [];
+    _globeTHREE = null;
     globeInitializing = false;
     const rh = (window as any).__globeResizeHandler;
     if (rh) { window.removeEventListener('resize', rh); delete (window as any).__globeResizeHandler; }
@@ -2098,6 +2187,34 @@
       showIsochrone = false;
     } finally {
       isLoadingIsochrone = false;
+    }
+  }
+
+  async function toggleWeatherRadar() {
+    if (showWeatherRadar) {
+      // Turn off
+      if (weatherRadarLayer && map) { map.removeLayer(weatherRadarLayer); }
+      weatherRadarLayer = null;
+      showWeatherRadar = false;
+      return;
+    }
+    try {
+      const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+      const data = await res.json();
+      const past = data?.radar?.past;
+      if (!past || past.length === 0) { showNotification('ไม่มีข้อมูลเรดาร์ฝน', 'warning'); return; }
+      const latest = past[past.length - 1];
+      const ts = latest.path; // e.g. "/v2/radar/1234567890"
+      if (weatherRadarLayer && map) { map.removeLayer(weatherRadarLayer); }
+      weatherRadarLayer = L.tileLayer(`https://tilecache.rainviewer.com${ts}/256/{z}/{x}/{y}/4/1_1.png`, {
+        opacity: 0.45,
+        zIndex: 500,
+        attribution: '<a href="https://www.rainviewer.com/">RainViewer</a>'
+      });
+      if (map) weatherRadarLayer.addTo(map);
+      showWeatherRadar = true;
+    } catch (err) {
+      showNotification('โหลดเรดาร์ฝนไม่สำเร็จ', 'error');
     }
   }
 
@@ -8536,6 +8653,7 @@ out center body;`;
           <button class="float-toggle-chip" class:active={showIsochrone} on:click={toggleIsochrone} title="ไปถึงไหนได้ใน X นาที" disabled={isLoadingIsochrone}>
             {isLoadingIsochrone ? '...' : '⏱️'}
           </button>
+          <button class="float-toggle-chip" class:active={showWeatherRadar} on:click={toggleWeatherRadar} title="เรดาร์ฝน">🌧️</button>
         </div>
       </div>
 

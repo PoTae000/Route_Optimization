@@ -35,7 +35,8 @@
       "Bash(timeout:*)",
       "Bash(ping:*)",
       "Bash(python -c \"import os; os.remove\\(''\\\\\\\\?\\\\C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\nul''\\)\")",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm ls:*)"
     ]
   }
 }
