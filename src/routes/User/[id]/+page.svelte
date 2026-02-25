@@ -10258,17 +10258,17 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 150px; height: 80px;
+    width: 150px; height: 50px;
     top: 50%; left: 50%;
     margin-left: -75px;
-    margin-top: -80px;
+    margin-top: -50px;
     transform-origin: 50% 100%;
     background: conic-gradient(
       from -65deg at 50% 100%,
       transparent 0deg,
-      rgba(0, 255, 136, 0.15) 30deg,
-      rgba(0, 255, 136, 0.4) 65deg,
-      rgba(0, 255, 136, 0.15) 100deg,
+      rgba(0, 255, 136, 0.1) 30deg,
+      rgba(0, 255, 136, 0.28) 65deg,
+      rgba(0, 255, 136, 0.1) 100deg,
       transparent 130deg
     );
     border-radius: 50%;
