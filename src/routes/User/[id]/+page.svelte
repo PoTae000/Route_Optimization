@@ -170,6 +170,9 @@
   let currentHeading: number | null = null; // GPS heading in degrees
   let _deviceCompassHeading: number | null = null; // เข็มทิศจากเซ็นเซอร์มือถือ
   let _compassListenerAdded = false;
+  let _nonNavBeamTarget = 0; // beam heading target (non-navigation)
+  let _nonNavBeamCurrent = 0; // beam heading current (non-navigation, smoothed)
+  let _nonNavBeamRaf: number | null = null; // rAF for non-nav beam
   let currentTargetIndex = 0;
   let remainingDistance = 0;
   let remainingTime = 0;
@@ -583,7 +586,10 @@
     if (alpha !== null && !isNaN(alpha)) {
       if (_deviceCompassHeading !== null) {
         let diff = ((alpha - _deviceCompassHeading + 540) % 360) - 180;
-        _deviceCompassHeading = ((_deviceCompassHeading + diff * 0.5) + 360) % 360;
+        // Dead-zone: ละเว้น noise เล็กๆ (< 1.5°)
+        if (Math.abs(diff) < 1.5) return;
+        // Heavy smoothing เพื่อกัน sensor jitter (alpha 0.12)
+        _deviceCompassHeading = ((_deviceCompassHeading + diff * 0.12) + 360) % 360;
       } else {
         _deviceCompassHeading = alpha;
       }
@@ -594,19 +600,14 @@
         const dirs = ['N','NE','E','SE','S','SW','W','NW'];
         compassDir = dirs[Math.round(_deviceCompassHeading / 45) % 8];
       }
-      // Real-time beam rotation จาก compass (ไม่ต้องรอ GPS 1Hz)
+      // Real-time beam target จาก compass (ไม่ต้องรอ GPS 1Hz)
       if (useCompass && _deviceCompassHeading !== null) {
         if (isNavigating && animReady) {
-          // อัพเดต animTargetHeading ให้ animation loop หมุน beam ทันที
+          // อัพเดต target เท่านั้น — animation loop จะ lerp ให้ลื่น
           animTargetHeading = _deviceCompassHeading;
-          animPrevHeading = animCurrentHeading;
-        } else if (!isNavigating && headingMarkerElement) {
-          // ไม่ได้ navigate: หมุน beam ตรงๆ real-time
-          const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
-          if (beam) {
-            beam.style.transform = `rotate(${_deviceCompassHeading}deg)`;
-            beam.style.opacity = '1';
-          }
+        } else if (!isNavigating) {
+          // ไม่ได้ navigate: ใช้ _nonNavBeamTarget ให้ animation loop จัดการ
+          _nonNavBeamTarget = _deviceCompassHeading;
         }
       }
     }
@@ -621,12 +622,14 @@
           window.addEventListener('deviceorientationabsolute', _onDeviceOrientation, true);
           window.addEventListener('deviceorientation', _onDeviceOrientation, true);
           _compassListenerAdded = true;
+          startNonNavBeamLoop();
         }
       }).catch(() => {});
     } else {
       window.addEventListener('deviceorientationabsolute', _onDeviceOrientation, true);
       window.addEventListener('deviceorientation', _onDeviceOrientation, true);
       _compassListenerAdded = true;
+      startNonNavBeamLoop();
     }
   }
 
@@ -637,6 +640,32 @@
     }
     _compassListenerAdded = false;
     _deviceCompassHeading = null;
+    stopNonNavBeamLoop();
+  }
+
+  // Smooth beam rotation loop สำหรับตอนไม่ navigate (lerp 60fps แทน direct set)
+  function startNonNavBeamLoop() {
+    if (_nonNavBeamRaf !== null) return;
+    function tick() {
+      _nonNavBeamRaf = requestAnimationFrame(tick);
+      if (isNavigating || !headingMarkerElement) return;
+      // Lerp heading smoothly
+      let diff = ((_nonNavBeamTarget - _nonNavBeamCurrent + 540) % 360) - 180;
+      if (Math.abs(diff) < 0.3) return; // ไม่ขยับถ้าเปลี่ยนน้อยมาก
+      _nonNavBeamCurrent = ((_nonNavBeamCurrent + diff * 0.08) + 360) % 360;
+      const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
+      if (beam) {
+        beam.style.transform = `rotate(${_nonNavBeamCurrent}deg)`;
+        beam.style.opacity = '1';
+      }
+    }
+    tick();
+  }
+  function stopNonNavBeamLoop() {
+    if (_nonNavBeamRaf !== null) {
+      cancelAnimationFrame(_nonNavBeamRaf);
+      _nonNavBeamRaf = null;
+    }
   }
 
   function resetMapRotation() {
@@ -3871,7 +3900,8 @@
       const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
 
       // Heading: always chase target independently (compass updates at 60Hz)
-      animCurrentHeading = lerpAngle(animCurrentHeading, animTargetHeading, 0.15);
+      // alpha 0.08 = smooth & stable, ไม่กระตุกตาม sensor noise
+      animCurrentHeading = lerpAngle(animCurrentHeading, animTargetHeading, 0.08);
 
       if (t < 1) {
         // Phase 1: Smooth interpolation to GPS-snapped target
@@ -10228,22 +10258,22 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 80px; height: 40px;
+    width: 110px; height: 36px;
     top: 50%; left: 50%;
-    margin-left: -40px;
-    margin-top: -40px;
+    margin-left: -55px;
+    margin-top: -36px;
     transform-origin: 50% 100%;
     background: conic-gradient(
-      from -40deg at 50% 100%,
+      from -55deg at 50% 100%,
       transparent 0deg,
-      rgba(0, 255, 136, 0.12) 20deg,
-      rgba(0, 255, 136, 0.22) 40deg,
-      rgba(0, 255, 136, 0.12) 60deg,
-      transparent 80deg
+      rgba(0, 255, 136, 0.08) 25deg,
+      rgba(0, 255, 136, 0.18) 55deg,
+      rgba(0, 255, 136, 0.08) 85deg,
+      transparent 110deg
     );
     border-radius: 50%;
-    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 20%, transparent 60%);
-    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 20%, transparent 60%);
+    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 15%, transparent 55%);
+    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 15%, transparent 55%);
     pointer-events: none;
     transition: opacity 0.3s;
     z-index: 5;
