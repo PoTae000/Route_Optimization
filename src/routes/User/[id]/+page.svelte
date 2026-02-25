@@ -6947,13 +6947,13 @@ out center body;`;
         bearing: 0
       } as any).setView([initLat, initLng], initZoom);
 
-      // ═══ Tile Layer — CartoDB Dark Matter @2x (native dark, retina sharp) ═══
-      const retinaSuffix = window.devicePixelRatio > 1 ? '@2x' : '';
-      L.tileLayer(`https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${retinaSuffix}.png`, {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
-        subdomains: 'abcd',
+      // ═══ Tile Layer — OSM (detectRetina = คมชัดบนจอ HiDPI) ═══
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 19,
+        detectRetina: true,
         keepBuffer: 25,
         updateWhenZooming: true,
         updateWhenIdle: false,
@@ -10000,12 +10000,12 @@ out center body;`;
   #map { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e !important; will-change: transform; -webkit-transform: translateZ(0); transform: translateZ(0); }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-control-zoom) { display: none !important; }
-  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); background: #1a1a2e; }
+  :global(.leaflet-tile-pane) { -webkit-backface-visibility: hidden; transform: translateZ(0); filter: invert(1) hue-rotate(180deg) saturate(0.6) brightness(1.0) contrast(1.3); background: #e5e5e0; }
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { image-rendering: -webkit-optimize-contrast; image-rendering: high-quality; }
-  :global(.leaflet-tile) { image-rendering: -webkit-optimize-contrast; image-rendering: high-quality; will-change: transform, opacity; -webkit-font-smoothing: antialiased; }
+  :global(.main-tiles) { image-rendering: auto; }
+  :global(.leaflet-tile) { image-rendering: auto; will-change: transform, opacity; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-map-pane) { will-change: transform; }
   :global(.leaflet-tile-container) { will-change: transform; }
