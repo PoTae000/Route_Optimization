@@ -168,6 +168,8 @@
   let isMapFollowing = true; // auto-follow mode like Google Maps
   let _programmaticZoom = false; // flag to distinguish user zoom from code zoom
   let currentHeading: number | null = null; // GPS heading in degrees
+  let _deviceCompassHeading: number | null = null; // เข็มทิศจากเซ็นเซอร์มือถือ
+  let _compassListenerAdded = false;
   let currentTargetIndex = 0;
   let remainingDistance = 0;
   let remainingTime = 0;
@@ -565,6 +567,56 @@
   }
 
   function setupMapRotation() {}
+
+  // ═══ Device Compass — เข็มทิศจากเซ็นเซอร์มือถือ (ทำงานแม้ยืนอยู่กับที่) ═══
+  function _onDeviceOrientation(e: any) {
+    let alpha: number | null = null;
+    if (e.webkitCompassHeading !== undefined) {
+      // iOS: webkitCompassHeading = degrees from north (0-360)
+      alpha = e.webkitCompassHeading;
+    } else if (e.alpha !== null && e.absolute) {
+      // Android absolute: alpha = degrees from north (reversed)
+      alpha = (360 - e.alpha) % 360;
+    } else if (e.alpha !== null) {
+      alpha = (360 - e.alpha) % 360;
+    }
+    if (alpha !== null && !isNaN(alpha)) {
+      if (_deviceCompassHeading !== null) {
+        let diff = ((alpha - _deviceCompassHeading + 540) % 360) - 180;
+        _deviceCompassHeading = ((_deviceCompassHeading + diff * 0.3) + 360) % 360;
+      } else {
+        _deviceCompassHeading = alpha;
+      }
+    }
+  }
+
+  function startDeviceCompass() {
+    if (_compassListenerAdded) return;
+    // iOS 13+ ต้องขอ permission
+    if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+      (DeviceOrientationEvent as any).requestPermission().then((state: string) => {
+        if (state === 'granted') {
+          window.addEventListener('deviceorientationabsolute', _onDeviceOrientation, true);
+          window.addEventListener('deviceorientation', _onDeviceOrientation, true);
+          _compassListenerAdded = true;
+        }
+      }).catch(() => {});
+    } else {
+      window.addEventListener('deviceorientationabsolute', _onDeviceOrientation, true);
+      window.addEventListener('deviceorientation', _onDeviceOrientation, true);
+      _compassListenerAdded = true;
+    }
+  }
+
+  function stopDeviceCompass() {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('deviceorientationabsolute', _onDeviceOrientation, true);
+      window.removeEventListener('deviceorientation', _onDeviceOrientation, true);
+    }
+    _compassListenerAdded = false;
+    _deviceCompassHeading = null;
+  }
+
   function resetMapRotation() {
     _userMapRotation = 0;
     _lastAppliedRotation = 0;
@@ -3571,7 +3623,8 @@
     }
 
     isNavigating = true;
-    _userMapRotation = 0; // reset user rotation when nav starts
+    _userMapRotation = 0;
+    startDeviceCompass(); // เปิดเข็มทิศเซ็นเซอร์
     currentTargetIndex = 1;
     arrivedPoints = [0];
 
@@ -3708,6 +3761,7 @@
     }
     // Clean up map drag listener, nav alternatives, and custom waypoints
     stopSmoothLoop();
+    stopDeviceCompass();
     if (map) {
       map.off('dragstart');
       map.off('zoomstart');
@@ -3843,7 +3897,7 @@
         const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
         if (beam) {
           beam.style.transform = `rotate(${animCurrentHeading}deg)`;
-          beam.style.opacity = currentSpeed > 1 ? '1' : '0';
+          beam.style.opacity = (currentHeading !== null) ? '1' : '0';
         }
       }
       // Update route line start to follow blue dot in real-time (every 4th frame ~15fps)
@@ -3909,6 +3963,14 @@
         } else {
           currentHeading = newHeading;
         }
+      }
+    } else if (_deviceCompassHeading !== null) {
+      // Fallback: ใช้เข็มทิศเซ็นเซอร์ตอนยืนอยู่กับที่/ช้า
+      if (currentHeading !== null) {
+        let diff = ((_deviceCompassHeading - currentHeading + 540) % 360) - 180;
+        currentHeading = ((currentHeading + diff * 0.15) + 360) % 360;
+      } else {
+        currentHeading = _deviceCompassHeading;
       }
     }
     // อัพเดท compass heading
@@ -4059,8 +4121,8 @@
     if (!L || !map || !currentLocation) return;
     // ถ้าใช้จุดเริ่มต้นแบบกำหนดเอง ไม่ต้องแสดง GPS marker
     if (useCustomStartPoint || showStartPointPicker) return;
-    const headingDeg = currentHeading !== null ? currentHeading : 0;
-    const showHeading = currentHeading !== null && currentSpeed > 1;
+    const headingDeg = currentHeading !== null ? currentHeading : (_deviceCompassHeading !== null ? _deviceCompassHeading : 0);
+    const showHeading = currentHeading !== null || _deviceCompassHeading !== null;
 
     // Update or create accuracy circle
     if (accuracy > 0) {
@@ -6968,6 +7030,9 @@ out center body;`;
         updateCurrentLocationMarker();
       }
 
+      // เปิดเข็มทิศเซ็นเซอร์ (ใช้แสดงทิศตอนยืนอยู่กับที่)
+      startDeviceCompass();
+
       // Start continuous GPS tracking (always-on, real-time)
       if (navigator.geolocation) {
         continuousWatchId = navigator.geolocation.watchPosition(
@@ -6979,6 +7044,8 @@ out center body;`;
               accuracy = acc;
               if (heading !== null && !isNaN(heading) && speed && speed > 1) {
                 currentHeading = heading;
+              } else if (_deviceCompassHeading !== null) {
+                currentHeading = _deviceCompassHeading;
               }
               updateCurrentLocationMarker();
             }
@@ -9601,9 +9668,6 @@ out center body;`;
   .ev-info-row:last-child { border-bottom: none; }
   .ev-warning-banner { margin-top: 12px; padding: 10px; background: rgba(255, 107, 107, 0.2); border-radius: 8px; text-align: center; color: #ff6b6b; font-size: 13px; font-weight: 500; }
 
-  .nav-stat.ev-stat { border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.1); }
-  .nav-stat.ev-stat .nav-stat-icon { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
-
   /* Map Vehicle Type Indicator */
   .map-stat.vehicle-type { border-left: 2px solid #00ff88; }
   .map-stat.vehicle-type.ev { border-left-color: #3b82f6; }
@@ -9815,60 +9879,6 @@ out center body;`;
 
   /* AlertsPanel CSS moved to $lib/components/AlertsPanel.svelte */
 
-  /* Navigation Status Bar */
-  .nav-status-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: center; gap: 20px; padding: 8px 16px; background: rgba(0, 0, 0, 0.6); pointer-events: none; }
-  .status-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #a1a1aa; }
-  .status-icon { font-size: 14px; }
-
-  /* Left cluster: speed + stats grouped together */
-  .nav-right-cluster { position: absolute; right: 20px; bottom: 260px; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; z-index: 1050; }
-
-  /* Speed Display */
-  .speed-display { width: 100px; height: 100px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; position: relative; }
-  .speed-value { font-size: 36px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; line-height: 1; }
-  .speed-unit { font-size: 12px; color: #71717a; }
-  /* Compass Widget */
-  .compass-widget {
-    width: 72px; height: 72px; border-radius: 50%; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; pointer-events: none; position: relative;
-    background: rgba(20, 20, 30, 0.85); border: 2px solid rgba(255, 255, 255, 0.1);
-  }
-  .compass-ring {
-    width: 60px; height: 60px; position: relative; transition: transform 0.4s ease;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .compass-n, .compass-e, .compass-s, .compass-w {
-    position: absolute; font-size: 10px; font-weight: 800;
-    font-family: 'JetBrains Mono', monospace; line-height: 1;
-  }
-  .compass-n { top: 0; left: 50%; transform: translateX(-50%); color: #ff4444; }
-  .compass-e { right: 1px; top: 50%; transform: translateY(-50%); color: #71717a; }
-  .compass-s { bottom: 0; left: 50%; transform: translateX(-50%); color: #71717a; }
-  .compass-w { left: 1px; top: 50%; transform: translateY(-50%); color: #71717a; }
-  .compass-needle { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }
-  .compass-heading-text {
-    position: absolute; bottom: -16px; left: 50%; transform: translateX(-50%);
-    font-size: 10px; font-weight: 700; color: #a1a1aa; white-space: nowrap;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  /* Lock position button (always visible during nav) */
-  .lock-btn { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); cursor: pointer; pointer-events: auto; background: rgba(30, 30, 40, 0.7); transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease, opacity 0.3s ease, transform 0.3s ease; }
-  .lock-btn svg { width: 20px; height: 20px; }
-  .lock-btn:hover { background: rgba(59, 130, 246, 0.2); }
-  .lock-btn.locked { color: #00ff88; border-color: rgba(0, 255, 136, 0.4); background: rgba(0, 255, 136, 0.12); box-shadow: 0 0 12px rgba(0, 255, 136, 0.2); }
-  @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-  /* Nav ETA */
-  .nav-eta { font-size: 12px; color: #a1a1aa; margin-top: 4px; }
-  .nav-eta strong { color: #00ff88; }
-
-  /* Additional Nav Buttons */
-  .nav-btn-voice { background: rgba(168, 85, 247, 0.15); color: #c084fc; flex: 0 0 auto; width: 50px; border: 1px solid rgba(168, 85, 247, 0.2); }
-  .nav-btn-voice:hover { background: rgba(168, 85, 247, 0.25); }
-  .nav-btn-voice.active { background: rgba(0, 255, 136, 0.2); color: #00ff88; border-color: rgba(0, 255, 136, 0.3); }
-  .nav-btn-share { background: rgba(59, 130, 246, 0.15); color: #60a5fa; flex: 0 0 auto; width: 44px; border: 1px solid rgba(59, 130, 246, 0.2); }
-  .nav-btn-share:hover { background: rgba(59, 130, 246, 0.25); }
   .map-container { flex: 1; position: relative; overflow: hidden; transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
   .map-container.fullscreen { width: 100vw; }
   .map-container.settings-open > *:not(#map) { display: none !important; }
@@ -10009,53 +10019,6 @@ out center body;`;
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
-  .nav-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 1000; }
-  .nav-top-bar { position: absolute; top: 150px; right: 20px; display: flex; align-items: center; gap: 20px; padding: 16px 24px; pointer-events: auto; z-index: 1050; max-width: calc(100% - 40px); }
-  .nav-target-info { flex: 1; min-width: 0; }
-  .nav-target-label { font-size: 11px; color: #00ff88; font-weight: 500; letter-spacing: 0.5px; }
-  .nav-target-name { font-size: 18px; font-weight: 600; color: #e4e4e7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .nav-distance-badge { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 10px 20px; border-radius: 12px; }
-  .nav-distance-value { font-size: 20px; font-weight: 700; color: white; font-family: 'JetBrains Mono', monospace; }
-
-  .nav-bottom-panel { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: calc(100% - 40px); max-width: 1200px; padding: 20px; pointer-events: auto; }
-  .nav-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-  .nav-stat { display: flex; align-items: center; gap: 12px; padding: 14px; background: rgba(255, 255, 255, 0.03); border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.06); }
-  .nav-stat-icon { width: 50px; height: 50px; background: rgba(0, 255, 136, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .nav-stat-icon svg { width: 26px; height: 26px; color: #00ff88; }
-  .nav-stat-content { flex: 1; }
-  .nav-stat-value { font-size: 20px; font-weight: 700; color: #e4e4e7; font-family: 'JetBrains Mono', monospace; }
-  .nav-stat-label { font-size: 12px; color: #71717a; margin-top: 2px; }
-  .nav-progress { margin-bottom: 16px; }
-  .nav-progress-bar { height: 6px; background: rgba(255, 255, 255, 0.1); border-radius: 3px; overflow: hidden; }
-  .nav-progress-fill { height: 100%; background: linear-gradient(90deg, #00ff88, #00cc6a); border-radius: 3px; transition: width 0.5s ease; }
-  .nav-actions { display: flex; gap: 12px; }
-  .nav-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px; border-radius: 12px; font-family: 'Kanit', sans-serif; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s, transform 0.2s; }
-  .nav-btn svg { width: 20px; height: 20px; }
-  .nav-btn-secondary { background: rgba(255, 255, 255, 0.1); color: #a1a1aa; }
-  .nav-btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); color: #e4e4e7; }
-  .nav-btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
-  
-  /* Success Button */
-  .nav-btn-success { background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); color: #000; font-weight: 600; }
-  .nav-btn-success:hover:not(:disabled) { background: linear-gradient(135deg, #00ff99 0%, #00dd7a 100%); transform: scale(1.05); }
-  .nav-btn-success:disabled { opacity: 0.4; cursor: not-allowed; }
-  
-  /* Skip Button */
-  .nav-btn-skip { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
-  .nav-btn-skip:hover:not(:disabled) { background: rgba(245, 158, 11, 0.3); }
-  .nav-btn-skip:disabled { opacity: 0.4; cursor: not-allowed; }
-  
-  /* History Button */
-  .nav-btn-history { background: rgba(139, 92, 246, 0.2); color: #a78bfa; position: relative; }
-  .nav-btn-history:hover { background: rgba(139, 92, 246, 0.3); }
-  /* Waypoint Button */
-  .nav-btn-waypoint { background: rgba(236, 72, 153, 0.15); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.2); flex: 0 0 auto; }
-  .nav-btn-waypoint:hover { background: rgba(236, 72, 153, 0.25); }
-  .nav-btn-waypoint.active { background: rgba(236, 72, 153, 0.35); color: #f9a8d4; border-color: rgba(236, 72, 153, 0.5); animation: pulse-waypoint 1.5s infinite; }
-  @keyframes pulse-waypoint { 0%, 100% { box-shadow: 0 0 0 0 rgba(236, 72, 153, 0.3); } 50% { box-shadow: 0 0 0 6px rgba(236, 72, 153, 0); } }
-
-  .nav-btn-stop { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
-  .nav-btn-stop:hover { background: rgba(255, 107, 107, 0.3); }
 
   .toast {
     position: fixed; bottom: 140px; right: 16px;
@@ -10304,18 +10267,7 @@ out center body;`;
     #map { position: absolute; inset: 0; width: 100%; height: 100%; }
     .sidebar-content { padding: 12px; }
     .point-card { padding: 12px; }
-    .nav-bottom-panel { max-width: 95%; padding: 16px; }
-    .nav-stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-    .nav-stat { padding: 10px; }
-    .nav-stat-value { font-size: 16px; }
-    .nav-stat-icon { width: 40px; height: 40px; }
     .map-stats { flex-wrap: wrap; gap: 8px; padding: 10px; }
-    .nav-top-bar { top: 140px; right: 15px; padding: 14px 20px; min-width: auto; }
-    .nav-target-name { font-size: 16px; max-width: 240px; }
-    .nav-right-cluster { right: 15px; bottom: 250px; }
-    .speed-display { width: 85px; height: 85px; }
-    .speed-value { font-size: 30px; }
-    .lock-btn { width: 40px; height: 40px; }
     .alerts-panel { width: calc(100% - 60px); max-width: 400px; }
     .settings-panel { max-width: 95%; }
     .today-stats { gap: 8px; padding: 5px 10px; }
@@ -10643,51 +10595,6 @@ out center body;`;
       from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
     }
-    /* ===== Navigation Mode Mobile ===== */
-    .nav-overlay { position: fixed; inset: 0; z-index: 1500; }
-
-    /* Turn instruction - top right, compact */
-    .turn-by-turn-panel { right: 6px; left: auto; min-width: auto; max-width: calc(100% - 12px); top: 6px; padding: 6px 10px 22px; border-radius: 10px; }
-    .turn-icon-wrap { width: 28px; height: 28px; }
-    .turn-icon { font-size: 16px; }
-    .turn-text { font-size: 11px; }
-    .turn-distance { font-size: 9px; }
-
-    /* Target bar - below turn */
-    .nav-top-bar { position: absolute; top: 140px; right: 6px; left: auto; width: auto; max-width: calc(100% - 12px); padding: 6px 10px; min-width: auto; gap: 8px; border-radius: 10px; }
-    .nav-target-label { font-size: 8px; }
-    .nav-target-name { font-size: 12px; max-width: 160px; }
-    .nav-eta { font-size: 10px; }
-    .nav-distance-value { font-size: 13px; }
-    .nav-distance-badge { padding: 5px 8px; border-radius: 8px; }
-
-    /* Speed + Lock - right side */
-    .nav-right-cluster { right: 6px; bottom: 220px; gap: 4px; }
-    .speed-display { width: 50px; height: 50px; }
-    .speed-value { font-size: 18px; }
-    .speed-unit { font-size: 8px; }
-    .compass-widget { width: 40px; height: 40px; }
-    .compass-ring { width: 32px; height: 32px; }
-    .compass-n, .compass-e, .compass-s, .compass-w { font-size: 6px; }
-    .compass-needle { width: 22px; height: 22px; }
-    .compass-heading-text { font-size: 7px; bottom: -12px; }
-    .lock-btn { width: 30px; height: 30px; }
-    .lock-btn svg { width: 14px; height: 14px; }
-
-    /* Bottom panel - full width, compact */
-    .nav-bottom-panel { position: absolute; padding: 6px; left: 6px; right: 6px; width: auto; transform: none; max-width: none; bottom: 6px; border-radius: 10px; }
-    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 6px; }
-    .nav-stat { padding: 4px 2px; gap: 0; flex-direction: column; align-items: center; text-align: center; border-radius: 6px; }
-    .nav-stat-icon { display: none; }
-    .nav-stat-value { font-size: 12px; }
-    .nav-stat-label { font-size: 7px; }
-    .nav-actions { flex-wrap: nowrap; gap: 4px; }
-    .nav-btn { padding: 7px 4px; font-size: 10px; flex: 1 1 auto; min-width: 0; white-space: nowrap; border-radius: 8px; }
-    .nav-btn svg { width: 14px; height: 14px; }
-    .nav-btn-success, .nav-btn-skip { flex: 1 1 30%; }
-    .nav-btn-voice, .nav-btn-share, .nav-btn-stop { flex: 0 0 auto; width: 34px; }
-    .nav-btn-share svg { width: 12px; height: 12px; }
-
     /* History Panel */
 
     /* Modals */
@@ -10764,48 +10671,8 @@ out center body;`;
     .map-stat-label { font-size: 5px; letter-spacing: 0; }
     .map-stat.weather .map-stat-value { font-size: 9px; }
     
-    /* Navigation Small Mobile */
-    .nav-right-cluster { right: 4px; bottom: 200px; gap: 3px; }
-    .speed-display { width: 44px; height: 44px; }
-    .speed-value { font-size: 16px; }
-    .speed-unit { font-size: 7px; }
-    .compass-widget { width: 36px; height: 36px; }
-    .compass-ring { width: 28px; height: 28px; }
-    .compass-needle { width: 20px; height: 20px; }
     .today-stats { gap: 4px; padding: 3px 6px; }
     .today-stat .stat-value { font-size: 12px; }
-    .nav-bottom-panel { padding: 5px; left: 4px; right: 4px; bottom: 4px; border-radius: 8px; }
-    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 3px; margin-bottom: 5px; }
-    .nav-stat { padding: 3px 2px; border-radius: 5px; }
-    .nav-stat-value { font-size: 11px; }
-    .nav-stat-label { font-size: 7px; }
-    .nav-actions { gap: 3px; }
-    .nav-btn { padding: 6px 3px; font-size: 9px; min-width: 0; border-radius: 6px; }
-    .nav-btn svg { width: 12px; height: 12px; }
-    .nav-btn-success, .nav-btn-skip { flex: 1 1 30%; }
-    .nav-btn-voice, .nav-btn-share, .nav-btn-stop { width: 30px; }
-
-    /* History Panel Small Mobile */
-    
-
-    /* Nav top bar small */
-    .nav-top-bar { top: 132px; right: 4px; padding: 5px 8px; min-width: auto; border-radius: 8px; }
-    .nav-target-name { font-size: 11px; max-width: 140px; }
-    .nav-target-label { font-size: 7px; }
-    .nav-eta { font-size: 9px; }
-    .nav-distance-value { font-size: 11px; }
-    .nav-distance-badge { padding: 4px 6px; border-radius: 6px; }
-
-    /* Lock btn small */
-    .lock-btn { width: 28px; height: 28px; }
-    .lock-btn svg { width: 12px; height: 12px; }
-
-    /* Turn-by-turn small */
-    .turn-by-turn-panel { right: 4px; max-width: calc(100% - 8px); padding: 5px 8px 20px; border-radius: 8px; }
-    .turn-text { font-size: 10px; }
-    .turn-distance { font-size: 8px; }
-    .turn-icon-wrap { width: 24px; height: 24px; }
-    .turn-icon { font-size: 14px; }
 
     /* Alerts small */
     .alerts-panel { width: calc(100% - 20px); }
@@ -10826,20 +10693,6 @@ out center body;`;
     .app-container { flex-direction: row; }
     .sidebar { width: 280px; height: 100vh; max-height: 100vh; border-right: 1px solid rgba(255,255,255,0.1); border-bottom: none; }
     .map-container { height: 100vh; flex: 1; }
-    .nav-right-cluster { bottom: 120px; right: 10px; }
-    .speed-display { width: 60px; height: 60px; }
-    .speed-value { font-size: 20px; }
-    .nav-bottom-panel { bottom: 10px; padding: 10px; }
-    .nav-stats { grid-template-columns: repeat(4, 1fr); gap: 6px; }
-    .nav-stat { padding: 6px; }
-    .nav-stat-icon { width: 30px; height: 30px; }
-    .nav-stat-value { font-size: 12px; }
-    .nav-actions { gap: 6px; }
-    .nav-btn { padding: 8px; }
-    .lock-btn { width: 34px; height: 34px; }
-    .turn-by-turn-panel { right: 10px; min-width: auto; max-width: 300px; padding: 8px 12px 20px; }
-    .nav-top-bar { top: 140px; right: 10px; padding: 10px; min-width: auto; }
-    .nav-target-name { font-size: 13px; max-width: 180px; }
     .alerts-panel { width: calc(100% - 40px); max-width: 360px; }
   }
   /* ==================== เพิ่มเติมสำหรับ Database Integration ==================== */
@@ -10908,14 +10761,6 @@ out center body;`;
   animation: spin 0.8s linear infinite;
 }
 
-/* Processing state for buttons */
-.nav-btn-success:disabled,
-.nav-btn-skip:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none !important;
-}
-
 /* ==================== Responsive สำหรับ Today Stats ==================== */
 
 @media (max-width: 768px) {
@@ -10926,11 +10771,6 @@ out center body;`;
 
   .today-stat .stat-value {
     font-size: 14px;
-  }
-
-  .nav-right-cluster {
-    right: 10px;
-    bottom: 240px;
   }
 }
 
@@ -10952,36 +10792,6 @@ out center body;`;
     font-size: 8px;
   }
 
-  .curve-warning {
-    top: 155px;
-    left: 10px;
-    right: auto;
-    min-width: 150px;
-    padding: 10px 12px;
-  }
-
-  .curve-icon {
-    font-size: 24px;
-  }
-
-  .curve-text {
-    font-size: 12px;
-  }
-
-  .lane-guidance {
-    top: 205px;
-    left: 10px;
-    padding: 8px 10px;
-  }
-
-  .lane {
-    width: 12px;
-    height: 24px;
-  }
-
-  .lane-text {
-    font-size: 12px;
-  }
 }
 .driver-phone {
   font-size: 12px;
@@ -12270,12 +12080,6 @@ out center body;`;
   font-family: 'Kanit', sans-serif; font-size: 11px; cursor: pointer;
 }
 
-/* Nav Action Buttons - Notify & Amenity */
-.nav-btn-notify { background: rgba(0,255,136,0.1); color: #00ff88; }
-.nav-btn-notify:hover { background: rgba(0,255,136,0.18); }
-.nav-btn-amenity { background: rgba(255,255,255,0.06); color: #a1a1aa; }
-.nav-btn-amenity:hover { background: rgba(255,255,255,0.1); color: #e4e4e7; }
-
 /* ==================== RESPONSIVE - ADVANCED FEATURES ==================== */
 
 @media (max-width: 1024px) {
@@ -12295,16 +12099,6 @@ out center body;`;
   .route-selector-header h3 { font-size: 13px; }
   .route-option-card { padding: 7px 10px 7px 11px; }
   .route-option-stats { flex-wrap: wrap; }
-  .turn-by-turn-panel {
-    min-width: auto;
-    max-width: calc(100% - 30px);
-    right: 10px;
-    left: auto;
-    padding: 10px 14px;
-  }
-  .turn-icon { font-size: 24px; }
-  .turn-icon-wrap { width: 40px; height: 40px; border-radius: 12px; }
-  .turn-text { font-size: 14px; }
   .nav-route-progress-strip { top: 34px; padding: 4px 10px; }
   .route-progress-info { font-size: 10px; }
   .celebration-text { font-size: 20px; }
@@ -12324,10 +12118,6 @@ out center body;`;
   .pref-chips { flex-direction: column; }
   .pref-chip { width: 100%; justify-content: center; }
   .route-option-stats { flex-direction: column; gap: 4px; }
-  .turn-by-turn-panel { top: 30px; padding: 8px 12px; bottom: 20px; }
-  .turn-icon { font-size: 20px; }
-  .turn-text { font-size: 12px; }
-  .turn-distance { font-size: 11px; }
   .comparison-row { grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 8px 10px; }
   .comparison-row .comp-col:nth-child(4) { display: none; }
 }
