@@ -116,7 +116,6 @@
     oilPriceData = null;
     currentLocation = null;
     currentLocationMarker = null;
-    accuracyCircle = null;
     headingMarkerElement = null;
     cachedRouteCoords = [];
     lastRouteIndex = 0;
@@ -177,7 +176,6 @@
   // ==================== GPS VARIABLES - COPIED FROM ORIGINAL ====================
   let currentLocation: { lat: number; lng: number; heading?: number | null; speed?: number | null } | null = null;
   let currentLocationMarker: any = null;
-  let accuracyCircle: any = null;
   let headingMarkerElement: HTMLElement | null = null;
   let watchId: number | null = null;
   let continuousWatchId: number | null = null; // Always-on GPS tracking for marker
@@ -3806,10 +3804,6 @@
       try { map.removeLayer(currentLocationMarker); } catch(_){}
       currentLocationMarker = null;
     }
-    if (accuracyCircle && map) {
-      try { map.removeLayer(accuracyCircle); } catch(_){}
-      accuracyCircle = null;
-    }
     // วาง marker จุดเริ่มต้นแบบเด่น (คล้าย GPS blue dot แต่สีเขียว)
     if (customStartMarker) { try { map.removeLayer(customStartMarker); } catch(_){} }
     if (map && L) {
@@ -3850,13 +3844,6 @@
         zIndexOffset: 1000, interactive: false
       }).addTo(map);
       headingMarkerElement = currentLocationMarker.getElement();
-    }
-    // คืน accuracy circle
-    if (currentLocation && map && L && !accuracyCircle && accuracy > 0) {
-      accuracyCircle = L.circle([currentLocation.lat, currentLocation.lng], {
-        radius: accuracy, color: '#00ff88', fillColor: '#00ff88',
-        fillOpacity: 0.08, weight: 1.5, opacity: 0.35, dashArray: '4 6'
-      }).addTo(map);
     }
   }
 
@@ -4069,10 +4056,6 @@
       currentLocationMarker = null;
       headingMarkerElement = null;
     }
-    if (accuracyCircle) {
-      accuracyCircle.remove();
-      accuracyCircle = null;
-    }
     if (traveledLayer) {
       traveledLayer.remove();
       traveledLayer = null;
@@ -4221,10 +4204,6 @@
       // Move blue dot marker smoothly
       if (currentLocationMarker) {
         currentLocationMarker.setLatLng([animCurrentLat, animCurrentLng]);
-      }
-      // Move accuracy circle
-      if (accuracyCircle) {
-        accuracyCircle.setLatLng([animCurrentLat, animCurrentLng]);
       }
       // Rotate heading beam smoothly
       if (headingMarkerElement) {
@@ -4469,24 +4448,6 @@
     if (useCustomStartPoint || showStartPointPicker) return;
     const headingDeg = currentHeading !== null ? currentHeading : (_deviceCompassHeading !== null ? _deviceCompassHeading : 0);
     const showHeading = currentHeading !== null || _deviceCompassHeading !== null;
-
-    // Update or create accuracy circle
-    if (accuracy > 0) {
-      if (accuracyCircle) {
-        accuracyCircle.setLatLng([currentLocation.lat, currentLocation.lng]);
-        accuracyCircle.setRadius(accuracy);
-      } else {
-        accuracyCircle = L.circle([currentLocation.lat, currentLocation.lng], {
-          radius: accuracy,
-          color: '#00ff88',
-          fillColor: '#00ff88',
-          fillOpacity: 0.08,
-          weight: 1.5,
-          opacity: 0.35,
-          dashArray: '4 6'
-        }).addTo(map);
-      }
-    }
 
     if (currentLocationMarker) {
       currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
@@ -7544,11 +7505,6 @@ out center body;`;
       navigator.geolocation.clearWatch(continuousWatchId);
       continuousWatchId = null;
     }
-    // Clean up accuracy circle
-    if (accuracyCircle && map) {
-      try { map.removeLayer(accuracyCircle); } catch(e) {}
-      accuracyCircle = null;
-    }
     // Clean up location marker
     if (currentLocationMarker && map) {
       try { map.removeLayer(currentLocationMarker); } catch(e) {}
@@ -7994,7 +7950,7 @@ out center body;`;
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 00-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 00-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
               GPS
             </button>
-            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } if (accuracyCircle && map) { try { map.removeLayer(accuracyCircle); } catch(_){} accuracyCircle = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
+            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1118 0z"/><circle cx="12" cy="10" r="3"/></svg>
               กำหนดเอง
             </button>
@@ -8056,7 +8012,7 @@ out center body;`;
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 00-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 00-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
               GPS
             </button>
-            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } if (accuracyCircle && map) { try { map.removeLayer(accuracyCircle); } catch(_){} accuracyCircle = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
+            <button class="start-opt {showStartPointPicker || useCustomStartPoint ? 'active' : ''}" class:disabled-route={!!optimizedRoute} on:click={() => { if (optimizedRoute) { showNotification('ยกเลิกเส้นทางก่อนเปลี่ยนจุดเริ่มต้น', 'warning'); return; } showStartPointPicker = !showStartPointPicker; if (showStartPointPicker) { if (currentLocationMarker && map) { try { map.removeLayer(currentLocationMarker); } catch(_){} currentLocationMarker = null; } } else if (!useCustomStartPoint) { clearCustomStartPoint(); } }}>
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1118 0z"/><circle cx="12" cy="10" r="3"/></svg>
               กำหนดเอง
             </button>
