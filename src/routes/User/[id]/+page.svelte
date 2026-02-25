@@ -10258,22 +10258,22 @@ out center body;`;
   }
   :global(.heading-beam) {
     position: absolute;
-    width: 110px; height: 36px;
+    width: 110px; height: 80px;
     top: 50%; left: 50%;
     margin-left: -55px;
-    margin-top: -36px;
+    margin-top: -80px;
     transform-origin: 50% 100%;
     background: conic-gradient(
       from -55deg at 50% 100%,
       transparent 0deg,
-      rgba(0, 255, 136, 0.08) 25deg,
-      rgba(0, 255, 136, 0.18) 55deg,
-      rgba(0, 255, 136, 0.08) 85deg,
+      rgba(0, 255, 136, 0.06) 25deg,
+      rgba(0, 255, 136, 0.16) 55deg,
+      rgba(0, 255, 136, 0.06) 85deg,
       transparent 110deg
     );
     border-radius: 50%;
-    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 15%, transparent 55%);
-    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 15%, transparent 55%);
+    -webkit-mask: radial-gradient(ellipse at 50% 100%, black 0%, black 20%, transparent 65%);
+    mask: radial-gradient(ellipse at 50% 100%, black 0%, black 20%, transparent 65%);
     pointer-events: none;
     transition: opacity 0.3s;
     z-index: 5;
