@@ -11086,7 +11086,7 @@ out center body;`;
     .map-stat.weather .map-stat-value { font-size: 10px; }
     .map-info { display: none; }
 
-    .map-right-btns { bottom: 85px; }
+    .map-right-btns { bottom: 135px; }
 
     /* Floating Navigate Button - mobile */
     .map-nav-btn {

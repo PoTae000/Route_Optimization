@@ -483,8 +483,8 @@
   }
   .ai-chat-toggle {
     bottom: 50px;
-    left: 16px;
-    right: auto;
+    right: 16px;
+    left: auto;
     width: 48px;
     height: 48px;
   }
