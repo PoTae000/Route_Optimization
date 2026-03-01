@@ -7484,6 +7484,8 @@ out center body;`;
         updateWhenZooming: true,
         updateWhenIdle: false,
         updateInterval: 100,
+        detectRetina: true,
+        tileSize: 256,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -7505,10 +7507,16 @@ out center body;`;
       startDeviceCompass();
 
       // Start continuous GPS tracking (always-on, real-time)
+      let _firstGpsDone = !!(userPos);
       if (navigator.geolocation) {
         continuousWatchId = navigator.geolocation.watchPosition(
           (pos) => {
             const { latitude, longitude, accuracy: acc, heading, speed } = pos.coords;
+            // First GPS fix: center map if initial GPS was missed
+            if (!_firstGpsDone && map) {
+              _firstGpsDone = true;
+              map.setView([latitude, longitude], 16, { animate: true });
+            }
             // Update location when not navigating (navigation has its own watch)
             if (!isNavigating) {
               currentLocation = { lat: latitude, lng: longitude, heading, speed };
@@ -10528,7 +10536,7 @@ out center body;`;
   :global(.leaflet-container) { background: #1a1a2e !important; }
   :global(.leaflet-marker-icon.leaflet-default-icon-path),
   :global(.leaflet-marker-shadow) { display: none !important; }
-  :global(.main-tiles) { image-rendering: auto; filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(1.1); }
+  :global(.main-tiles) { image-rendering: auto; filter: invert(1) hue-rotate(180deg) brightness(1.05) contrast(1.35) saturate(1.15); }
   :global(.leaflet-tile) { image-rendering: auto; will-change: transform, opacity; }
   :global(.leaflet-tile-loaded) { opacity: 1 !important; }
   :global(.leaflet-map-pane) { will-change: transform; }
