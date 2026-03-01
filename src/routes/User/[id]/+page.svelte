@@ -184,6 +184,7 @@
   let watchId: number | null = null;
   let continuousWatchId: number | null = null; // Always-on GPS tracking for marker
   let isMapFollowing = true; // auto-follow mode like Google Maps
+  let isFollowMode = false; // non-navigation GPS follow mode
   let _programmaticZoom = false; // flag to distinguish user zoom from code zoom
   let currentHeading: number | null = null; // GPS heading in degrees
   let _deviceCompassHeading: number | null = null; // เข็มทิศจากเซ็นเซอร์มือถือ
@@ -3820,6 +3821,111 @@
     aiSuggestion = null;
   }
 
+  // ==================== AI CHAT ACTIONS ====================
+  async function addPointFromAI(name: string, lat: number, lng: number, address: string) {
+    const payload = { name, address, lat, lng, priority: 3, user_id: currentUser?.id };
+    const res = await fetch(`${API_URL}/points`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
+    await loadDeliveryPoints();
+    return data;
+  }
+
+  async function handleAIAction(e: CustomEvent<{type: string, params: Record<string,string>}>) {
+    const { type, params } = e.detail;
+    try {
+      switch (type) {
+        case 'searchAndAdd': {
+          const query = params.query;
+          if (!query) break;
+          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&countrycodes=th`);
+          const results = await res.json();
+          if (results.length > 0) {
+            const r = results[0];
+            const shortName = r.display_name.split(',')[0];
+            await addPointFromAI(shortName, parseFloat(r.lat), parseFloat(r.lon), r.display_name);
+            showNotification(`เพิ่มจุด "${shortName}" สำเร็จ`, 'success');
+            if (map) map.setView([parseFloat(r.lat), parseFloat(r.lon)], 15, { animate: true });
+          } else {
+            showNotification(`ไม่พบ "${query}"`, 'error');
+          }
+          break;
+        }
+        case 'addPoint': {
+          if (params.name && params.lat && params.lng) {
+            await addPointFromAI(params.name, parseFloat(params.lat), parseFloat(params.lng), params.name);
+            showNotification(`เพิ่มจุด "${params.name}" สำเร็จ`, 'success');
+          }
+          break;
+        }
+        case 'navigate':
+          if (optimizedRoute && allDeliveryPoints.length > 0) startNavigation();
+          else showNotification('กรุณาคำนวณเส้นทางก่อนนำทาง', 'warning');
+          break;
+        case 'stopNav':
+          if (isNavigating) stopNavigation();
+          break;
+        case 'calcRoute':
+          if (allDeliveryPoints.length >= 1) optimizeRoute();
+          else showNotification('กรุณาเพิ่มจุดแวะก่อนคำนวณ', 'warning');
+          break;
+        case 'clearRoute':
+          clearRoute(); clearAlternativeRouteLayers();
+          routeAlternatives = []; showRouteSelector = false;
+          showNotification('ล้างเส้นทางแล้ว', 'success');
+          break;
+        case 'centerMap':
+          if (params.lat && params.lng) map?.setView([parseFloat(params.lat), parseFloat(params.lng)], 15);
+          break;
+        case 'deletePoint': {
+          const name = params.name;
+          if (!name) break;
+          const point = deliveryPoints.find(p => p.name.includes(name));
+          if (point) {
+            const delParams = new URLSearchParams();
+            if (currentUser?.id) delParams.append('user_id', String(currentUser.id));
+            delParams.append('table', 'users');
+            await fetch(`${API_URL}/points/${point.id}?${delParams}`, { method: 'DELETE' });
+            await loadDeliveryPoints();
+            if (optimizedRoute) { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; }
+            showNotification(`ลบ "${point.name}" แล้ว`, 'success');
+          } else {
+            showNotification(`ไม่พบจุด "${name}"`, 'error');
+          }
+          break;
+        }
+        case 'deleteAll': {
+          if (deliveryPoints.length === 0) { showNotification('ไม่มีจุดแวะให้ลบ', 'warning'); break; }
+          for (const p of [...deliveryPoints]) {
+            const dp = new URLSearchParams();
+            if (currentUser?.id) dp.append('user_id', String(currentUser.id));
+            dp.append('table', 'users');
+            await fetch(`${API_URL}/points/${p.id}?${dp}`, { method: 'DELETE' });
+          }
+          await loadDeliveryPoints();
+          if (optimizedRoute) { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; }
+          showNotification('ลบจุดแวะทั้งหมดแล้ว', 'success');
+          break;
+        }
+        case 'vehicle':
+          if (params.type && params.type !== vehicleType) toggleVehicleType();
+          break;
+        case 'shareETA':
+          shareETA();
+          break;
+        case 'carMode':
+          toggleCarMode();
+          break;
+      }
+    } catch (err: any) {
+      showNotification(`ดำเนินการไม่สำเร็จ: ${err.message}`, 'error');
+    }
+  }
+
   // ==================== GPS FUNCTIONS - COPIED EXACTLY FROM ORIGINAL ====================
   function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
     const inner = new Promise<{ lat: number; lng: number }>((resolve, reject) => {
@@ -5741,11 +5847,19 @@
 
   function centerOnCurrentLocation() {
     if (currentLocation && map) {
-      isMapFollowing = true;
-      if (isNavigating) _headingUpMode = true; // re-enable heading-up on recenter
-      const zoom = isNavigating ? getAutoZoom(currentSpeed) : 16;
-      // Snap immediately to current GPS position - no animation delay
-      map.setView([currentLocation.lat, currentLocation.lng], zoom, { animate: false });
+      if (isNavigating) {
+        isMapFollowing = true;
+        _headingUpMode = true;
+        map.setView([currentLocation.lat, currentLocation.lng], getAutoZoom(currentSpeed), { animate: false });
+      } else {
+        // Toggle follow mode
+        if (!isFollowMode) {
+          isFollowMode = true;
+          map.setView([currentLocation.lat, currentLocation.lng], 16, { animate: true });
+        } else {
+          isFollowMode = false;
+        }
+      }
     }
   }
 
@@ -7510,6 +7624,9 @@ out center body;`;
       // ═══ Camera rotation listener (leaflet-rotate) ═══
       setupCamRotateListener();
 
+      // ═══ Follow mode: disable on manual drag ═══
+      map.on('dragstart', () => { if (!isNavigating) isFollowMode = false; });
+
       // Set current location immediately if GPS succeeded
       if (userPos) {
         currentLocation = { lat: userPos.lat, lng: userPos.lng };
@@ -7540,6 +7657,10 @@ out center body;`;
                 currentHeading = _deviceCompassHeading;
               }
               updateCurrentLocationMarker();
+              // Follow mode: auto-pan map to GPS position
+              if (isFollowMode && map) {
+                map.panTo([latitude, longitude], { animate: true });
+              }
             }
           },
           (err) => {
@@ -8720,7 +8841,7 @@ out center body;`;
             </svg>
           </button>
         {/if}
-        <button class="map-myloc-btn" on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
+        <button class="map-myloc-btn" class:follow-active={isFollowMode && !isNavigating} on:click={centerOnCurrentLocation} title="ไปตำแหน่งปัจจุบัน">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
         </button>
       </div>
@@ -8972,7 +9093,7 @@ out center body;`;
 
 <!-- AI Chat Panel (floating) -->
 {#if aiAvailable && !isNavigating}
-  <AIChatPanel context={aiChatContext} bind:isOpen={aiChatOpen} />
+  <AIChatPanel context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} />
 {/if}
 
 <!-- AI Route Suggestion Modal -->
@@ -10672,6 +10793,8 @@ out center body;`;
   }
   .map-myloc-btn svg, .map-cam-btn svg { width: 22px; height: 22px; }
   .map-myloc-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.3); color: #00ff88; }
+  .map-myloc-btn.follow-active { background: rgba(0,255,136,0.2); border-color: rgba(0,255,136,0.5); color: #00ff88; animation: pulse-follow 2s ease infinite; }
+  @keyframes pulse-follow { 0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.3); } 50% { box-shadow: 0 0 0 8px rgba(0,255,136,0); } }
   .map-myloc-btn:active, .map-cam-btn:active { transform: scale(0.92); }
   .map-cam-btn.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.4); color: #60a5fa; }
   .map-cam-btn:hover { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.5); color: #60a5fa; }

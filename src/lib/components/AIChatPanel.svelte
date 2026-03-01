@@ -19,14 +19,83 @@
   let messagesContainer: HTMLElement;
   let inputElement: HTMLInputElement;
 
+  // Track actions per message index
+  let messageActions: Record<number, { type: string; params: Record<string, string> }[]> = {};
+  let executedActions: Set<string> = new Set();
+
   const quickChips = [
     { label: 'สรุปวันนี้', text: 'สรุปสถานะเส้นทางวันนี้' },
     { label: 'ไปไหนก่อนดี?', text: 'ดูจุดแวะทั้งหมดแล้วแนะนำว่าควรไปจุดไหนก่อน' },
     { label: 'เส้นทางไหนดี?', text: 'แนะนำเส้นทางที่ดีที่สุดสำหรับจุดแวะปัจจุบัน' },
     { label: 'ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' },
     { label: 'แนะนำที่เที่ยว', text: 'แนะนำสถานที่ท่องเที่ยวที่น่าสนใจใกล้ตำแหน่งปัจจุบัน 5 ที่' },
-    { label: 'คาเฟ่ใกล้ๆ', text: 'แนะนำคาเฟ่หรือร้านกาแฟที่น่านั่งใกล้ตำแหน่งปัจจุบัน 5 ที่' }
+    { label: 'คาเฟ่ใกล้ๆ', text: 'แนะนำคาเฟ่หรือร้านกาแฟที่น่านั่งใกล้ตำแหน่งปัจจุบัน 5 ที่' },
+    { label: 'คำนวณเส้นทาง', text: 'คำนวณเส้นทางให้หน่อย' },
+    { label: 'เริ่มนำทาง', text: 'เริ่มนำทางเลย' }
   ];
+
+  // ═══ Action parsing utilities ═══
+
+  function stripActions(content: string): string {
+    return content.replace(/<<ACTION:[^>]+>>/g, '').trim();
+  }
+
+  function parseActions(content: string): { type: string; params: Record<string, string> }[] {
+    const actions: { type: string; params: Record<string, string> }[] = [];
+    const pattern = new RegExp('<<ACTION:(\\w+)(\\|[^>]+)?>>','g');
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const type = match[1];
+      const params: Record<string, string> = {};
+      if (match[2]) {
+        const paramStr = match[2].startsWith('|') ? match[2].slice(1) : match[2];
+        for (const pair of paramStr.split('|')) {
+          const eqIdx = pair.indexOf('=');
+          if (eqIdx > 0) {
+            params[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
+          }
+        }
+      }
+      actions.push({ type, params });
+    }
+    return actions;
+  }
+
+  function getActionIcon(type: string): string {
+    const icons: Record<string, string> = {
+      searchAndAdd: '+',
+      addPoint: '+',
+      navigate: '>',
+      stopNav: '||',
+      calcRoute: '~',
+      clearRoute: 'x',
+      centerMap: '@',
+      deletePoint: '-',
+      deleteAll: '-',
+      vehicle: 'V',
+      shareETA: 'S',
+      carMode: 'C'
+    };
+    return icons[type] || '*';
+  }
+
+  function getActionLabel(action: { type: string; params: Record<string, string> }): string {
+    const labels: Record<string, string> = {
+      searchAndAdd: `ค้นหาและเพิ่ม "${action.params.query || ''}"`,
+      addPoint: `เพิ่มจุด "${action.params.name || ''}"`,
+      navigate: 'เริ่มนำทาง',
+      stopNav: 'หยุดนำทาง',
+      calcRoute: 'คำนวณเส้นทาง',
+      clearRoute: 'ล้างเส้นทาง',
+      centerMap: 'เลื่อนแผนที่',
+      deletePoint: `ลบจุด "${action.params.name || ''}"`,
+      deleteAll: 'ลบจุดทั้งหมด',
+      vehicle: `เปลี่ยนเป็น${action.params.type === 'ev' ? 'รถไฟฟ้า' : 'รถน้ำมัน'}`,
+      shareETA: 'แชร์เวลาถึง',
+      carMode: 'โหมดรถยนต์'
+    };
+    return labels[action.type] || action.type;
+  }
 
   function togglePanel() {
     isOpen = !isOpen;
@@ -120,6 +189,25 @@
       messages = [...messages.slice(0, -1), { role: 'assistant', content: `เกิดข้อผิดพลาด: ${err.message || 'ไม่ทราบสาเหตุ'}` }];
     } finally {
       isStreaming = false;
+
+      // Parse and execute actions from the last assistant message
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg?.role === 'assistant' && lastMsg.content) {
+        const actions = parseActions(lastMsg.content);
+        if (actions.length > 0) {
+          const msgIdx = messages.length - 1;
+          messageActions = { ...messageActions, [msgIdx]: actions };
+          for (const action of actions) {
+            const actionKey = `${msgIdx}-${action.type}-${JSON.stringify(action.params)}`;
+            if (!executedActions.has(actionKey)) {
+              executedActions.add(actionKey);
+              executedActions = executedActions; // trigger reactivity
+              dispatch('action', { type: action.type, params: action.params });
+            }
+          }
+        }
+      }
+
       scrollToBottom();
     }
   }
@@ -133,6 +221,8 @@
 
   function clearChat() {
     messages = [];
+    messageActions = {};
+    executedActions = new Set();
   }
 </script>
 
@@ -184,7 +274,7 @@
             </svg>
           </div>
           <p>สวัสดี! ฉันเป็นผู้ช่วย AI</p>
-          <p class="ai-welcome-sub">ถามอะไรก็ได้เกี่ยวกับเส้นทางและสถานที่</p>
+          <p class="ai-welcome-sub">สั่งได้ทุกอย่าง: เพิ่มจุด, คำนวณเส้นทาง, นำทาง, ลบจุด</p>
           <div class="ai-quick-chips">
             {#each quickChips as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
@@ -192,20 +282,33 @@
           </div>
         </div>
       {:else}
-        {#each messages as msg}
+        {#each messages as msg, i}
           <div class="ai-msg" class:ai-msg-user={msg.role === 'user'} class:ai-msg-assistant={msg.role === 'assistant'}>
             {#if msg.role === 'assistant'}
               <div class="ai-msg-avatar">AI</div>
             {/if}
-            <div class="ai-msg-bubble">
-              {msg.content || '...'}
+            <div class="ai-msg-content">
+              <div class="ai-msg-bubble">
+                {stripActions(msg.content) || '...'}
+              </div>
+              {#if msg.role === 'assistant' && messageActions[i]}
+                <div class="ai-action-cards">
+                  {#each messageActions[i] as action}
+                    <div class="ai-action-card">
+                      <span class="ai-action-icon">{getActionIcon(action.type)}</span>
+                      <span class="ai-action-label">{getActionLabel(action)}</span>
+                      <span class="ai-action-check">OK</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           </div>
         {/each}
         <!-- Quick chips after messages -->
         {#if !isStreaming}
           <div class="ai-quick-chips ai-chips-inline">
-            {#each quickChips.slice(0, 3) as chip}
+            {#each quickChips.slice(0, 4) as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
             {/each}
           </div>
@@ -218,7 +321,7 @@
         bind:this={inputElement}
         bind:value={inputText}
         on:keydown={handleKeydown}
-        placeholder="ถาม AI ได้เลย..."
+        placeholder="สั่ง AI ได้เลย... เช่น เพิ่มจุดแวะที่..."
         disabled={isStreaming}
         autocomplete="off"
       />
@@ -397,6 +500,13 @@
   flex-direction: row-reverse;
 }
 
+.ai-msg-content {
+  max-width: 80%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .ai-msg-avatar {
   width: 26px;
   height: 26px;
@@ -413,7 +523,6 @@
 }
 
 .ai-msg-bubble {
-  max-width: 80%;
   padding: 8px 12px;
   border-radius: 12px;
   font-size: 13px;
@@ -434,6 +543,49 @@
   color: #d4d4d8;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-bottom-left-radius: 4px;
+}
+
+/* Action cards */
+.ai-action-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-action-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(0, 255, 136, 0.06);
+  border: 1px solid rgba(0, 255, 136, 0.15);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.ai-action-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: rgba(0, 255, 136, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #00ff88;
+  flex-shrink: 0;
+}
+
+.ai-action-label {
+  flex: 1;
+  color: #a1a1aa;
+}
+
+.ai-action-check {
+  color: #22c55e;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .ai-chat-input {
