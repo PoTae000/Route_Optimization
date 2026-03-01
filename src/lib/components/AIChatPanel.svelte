@@ -482,7 +482,7 @@
     border-radius: 12px;
   }
   .ai-chat-toggle {
-    bottom: 80px;
+    bottom: 50px;
     left: 16px;
     right: auto;
     width: 48px;
