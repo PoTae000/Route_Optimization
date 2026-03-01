@@ -11,6 +11,9 @@
   import AlertsPanel from '$lib/components/AlertsPanel.svelte';
   import NavigationOverlay from '$lib/components/NavigationOverlay.svelte';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
+  import AIChatPanel from '$lib/components/AIChatPanel.svelte';
+  import AIRouteSuggestion from '$lib/components/AIRouteSuggestion.svelte';
+  import type { AIRouteSuggestionData, AIChatContext } from '$lib/types';
   import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch } from '$lib/utils/osrm';
 
   // Silence all console output in production
@@ -165,7 +168,7 @@
   let mobileContentExpanded = false;
   let desktopSidebarCollapsed = false;
   let isDragMode = false;
-  let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
+  let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldName: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
 
   // Reorder mode (drag to reorder in sidebar)
   let isReorderMode = false;
@@ -226,6 +229,7 @@
   let _isGestureRotating = false;
   let _navIntervalTick = 0; // perf: stagger heavy funcs in nav interval
   let _lastCurveRouteIdx = 0; // perf: skip curve detect until moved 50 route pts
+  let _headingUpMode = true; // heading-up map rotation during navigation
 
   // Smooth animation (Google Maps-like 60fps interpolation)
   let animFrameId: number | null = null;
@@ -479,6 +483,19 @@
 
   // perf: direct alias instead of .map(spread) - User page has no customer system
   $: allDeliveryPoints = deliveryPoints;
+
+  // AI Chat context (reactive - updates when points/route/nav changes)
+  $: aiChatContext = {
+    totalPoints: allDeliveryPoints.length,
+    completedPoints: deliveryHistory.filter((d: any) => d.status === 'success').length,
+    remainingPoints: allDeliveryPoints.length - deliveryHistory.filter((d: any) => d.status === 'success').length,
+    hasRoute: !!optimizedRoute,
+    isNavigating,
+    routeDistance: optimizedRoute?.distance,
+    routeDuration: optimizedRoute?.duration,
+    vehicleType,
+    pointNames: allDeliveryPoints.map((p: any) => p.name).join(', ')
+  } as AIChatContext;
 
   // Resize map when settings/addForm opens/closes (sidebar hides/shows)
   $: if (browser && map) { showSettings; showAddForm; desktopSidebarCollapsed; mobileSidebarOpen; setTimeout(() => map?.invalidateSize(), 300); }
@@ -1397,6 +1414,13 @@
   let showOptimizationResult = false;
   let optimizationResult: { beforeDistance: number; afterDistance: number; improvement: number } | null = null;
 
+  // AI Route Planning
+  let aiAvailable = false;
+  let showAISuggestion = false;
+  let aiSuggestion: AIRouteSuggestionData | null = null;
+  let isAIPlanning = false;
+  let aiChatOpen = false;
+
   // Save/Restore route state across page refresh
   function saveRouteState() {
     if (!optimizedRoute || !routeAlternatives.length) return;
@@ -1553,12 +1577,14 @@
         deliveryPoints[i] = { ...deliveryPoints[i], lat: pos.lat, lng: pos.lng };
         deliveryPoints = [...deliveryPoints];
 
-        // ดึงที่อยู่ใหม่จาก reverse geocoding
+        // ดึงชื่อ+ที่อยู่ใหม่จาก reverse geocoding
         let newAddress = oldAddress;
+        let newName = point.name;
         const geoResult = await reverseGeocode(pos.lat, pos.lng);
         if (geoResult) {
+          newName = geoResult.name;
           newAddress = geoResult.address;
-          deliveryPoints[i] = { ...deliveryPoints[i], address: newAddress };
+          deliveryPoints[i] = { ...deliveryPoints[i], name: newName, address: newAddress };
           deliveryPoints = [...deliveryPoints];
         }
 
@@ -1566,15 +1592,15 @@
           const res = await fetch(`${API_URL}/points/${point.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lat: pos.lat, lng: pos.lng, address: newAddress, user_id: currentUser?.id, table: 'users' })
+            body: JSON.stringify({ name: newName, lat: pos.lat, lng: pos.lng, address: newAddress, user_id: currentUser?.id, table: 'users' })
           });
           if (!res.ok) throw new Error();
-          lastDragUndo = { pointId: point.id, pointIndex: i, name: point.name, oldLat, oldLng, oldAddress };
-          showNotification(`ย้าย "${point.name}" สำเร็จ`, 'success');
+          lastDragUndo = { pointId: point.id, pointIndex: i, name: newName, oldName: point.name, oldLat, oldLng, oldAddress };
+          showNotification(`ย้ายไปยัง "${newName}" สำเร็จ`, 'success');
           displayPoints(); // อัปเดต popup ด้วยที่อยู่ใหม่
           if (optimizedRoute) await optimizeRoute();
         } catch {
-          deliveryPoints[i] = { ...deliveryPoints[i], lat: oldLat, lng: oldLng, address: oldAddress };
+          deliveryPoints[i] = { ...deliveryPoints[i], name: point.name, lat: oldLat, lng: oldLng, address: oldAddress };
           deliveryPoints = [...deliveryPoints];
           marker.setLatLng([oldLat, oldLng]);
           showNotification('ย้ายจุดไม่สำเร็จ', 'error');
@@ -1594,10 +1620,10 @@
 
   async function undoDragPoint() {
     if (!lastDragUndo) return;
-    const { pointId, pointIndex, name, oldLat, oldLng, oldAddress } = lastDragUndo;
+    const { pointId, pointIndex, name, oldName, oldLat, oldLng, oldAddress } = lastDragUndo;
     lastDragUndo = null;
     try {
-      const updateData: any = { lat: oldLat, lng: oldLng, user_id: currentUser?.id, table: 'users' };
+      const updateData: any = { name: oldName, lat: oldLat, lng: oldLng, user_id: currentUser?.id, table: 'users' };
       if (oldAddress) updateData.address = oldAddress;
 
       const res = await fetch(`${API_URL}/points/${pointId}`, {
@@ -1607,7 +1633,7 @@
       });
       if (!res.ok) throw new Error();
 
-      const pointUpdate: any = { lat: oldLat, lng: oldLng };
+      const pointUpdate: any = { name: oldName, lat: oldLat, lng: oldLng };
       if (oldAddress) pointUpdate.address = oldAddress;
       deliveryPoints[pointIndex] = { ...deliveryPoints[pointIndex], ...pointUpdate };
       deliveryPoints = [...deliveryPoints];
@@ -3713,6 +3739,74 @@
     }
   }
 
+  // ==================== AI ROUTE PLANNING ====================
+  async function requestAIRouteOptimization() {
+    if (allDeliveryPoints.length < 2) {
+      showNotification('ต้องมีอย่างน้อย 2 จุดส่งเพื่อใช้ AI วางแผน', 'warning');
+      return;
+    }
+    isAIPlanning = true;
+    showAISuggestion = true;
+    aiSuggestion = null;
+
+    try {
+      const startPoint = await getStartPoint();
+      const pointsData = allDeliveryPoints.map((p: any) => ({
+        name: p.name,
+        lat: p.lat,
+        lng: p.lng,
+        priority: p.priority || 3,
+        address: p.address || ''
+      }));
+
+      const res = await fetch('/api/ai/route-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          points: pointsData,
+          startLocation: startPoint,
+          currentTime: new Date().toLocaleString('th-TH'),
+          vehicleType
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'AI ไม่ตอบสนอง' }));
+        throw new Error(err.error || `AI error: ${res.status}`);
+      }
+
+      aiSuggestion = await res.json();
+    } catch (err: any) {
+      showNotification(err.message || 'AI วางแผนไม่สำเร็จ', 'error');
+      showAISuggestion = false;
+    } finally {
+      isAIPlanning = false;
+    }
+  }
+
+  function applyAISuggestion(event: CustomEvent<{ order: number[] }>) {
+    const { order } = event.detail;
+    if (!order || order.length === 0) return;
+
+    const newOrder = order
+      .map(idx => allDeliveryPoints[idx - 1])
+      .filter(Boolean);
+
+    if (newOrder.length > 0) {
+      deliveryPoints = newOrder;
+      manualOrder = true;
+      displayPoints();
+      showNotification('ใช้ลำดับ AI แล้ว! กด "คำนวณเส้นทาง" เพื่อดูเส้นทาง', 'success');
+      speak('ใช้ลำดับจาก AI เรียบร้อยแล้ว');
+
+      if (optimizedRoute) {
+        optimizeRoute();
+      }
+    }
+    showAISuggestion = false;
+    aiSuggestion = null;
+  }
+
   // ==================== GPS FUNCTIONS - COPIED EXACTLY FROM ORIGINAL ====================
   function getCurrentLocationAsStart(): Promise<{ lat: number; lng: number }> {
     const inner = new Promise<{ lat: number; lng: number }>((resolve, reject) => {
@@ -3991,6 +4085,7 @@
     _navIntervalTick = 0;
     _lastCurveRouteIdx = 0;
     _lastAppliedRotation = 0;
+    _headingUpMode = true; // heading-up rotation on by default
     currentHeading = null;
     consecutiveOffRouteCount = 0;
     rerouteCount = 0;
@@ -4067,6 +4162,7 @@
     // Clean up map drag listener, nav alternatives, and custom waypoints
     stopSmoothLoop();
     stopDeviceCompass();
+    _headingUpMode = true; // reset for next navigation session
     if (map) {
       map.off('dragstart');
       map.off('zoomstart');
@@ -4171,7 +4267,7 @@
       } else if (currentSpeed > 5 && cachedRouteCoords.length > 1 && lastRouteIndex < cachedRouteCoords.length - 2) {
         // Phase 2: Predict forward along route using speed (continuous movement)
         const extraSec = (elapsed - animDuration) / 1000;
-        const maxPredict = Math.min((currentSpeed / 3.6) * extraSec, 100); // max 100m ahead
+        const maxPredict = Math.min((currentSpeed / 3.6) * extraSec, 40); // max 40m ahead (reduced to prevent snap-back)
         let walked = 0;
         let idx = lastRouteIndex;
         let predicted = false;
@@ -4205,11 +4301,12 @@
       if (currentLocationMarker) {
         currentLocationMarker.setLatLng([animCurrentLat, animCurrentLng]);
       }
-      // Rotate heading beam smoothly
+      // Rotate heading beam smoothly (compensate for map bearing rotation)
       if (headingMarkerElement) {
         const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
         if (beam) {
-          beam.style.transform = `rotate(${animCurrentHeading}deg)`;
+          const mapBearing = (map as any).getBearing?.() || 0;
+          beam.style.transform = `rotate(${animCurrentHeading - mapBearing}deg)`;
           beam.style.opacity = (currentHeading !== null || _deviceCompassHeading !== null) ? '1' : '0';
         }
       }
@@ -4222,11 +4319,19 @@
         }
       }
       _animFrameCount++;
-      // Smooth map follow (we handle interpolation - no Leaflet animation)
+      // Smooth map follow + heading-up rotation (Google Maps-like)
       if (isMapFollowing && map) {
         map.panTo([animCurrentLat, animCurrentLng], { animate: false });
+        // Heading-up: rotate map so direction of travel points UP
+        if (_headingUpMode && (map as any).setBearing && currentSpeed > 3 && (currentHeading !== null || _deviceCompassHeading !== null)) {
+          const curBearing = (map as any).getBearing() || 0;
+          const bearingDiff = Math.abs(((animCurrentHeading - curBearing + 540) % 360) - 180);
+          if (bearingDiff > 1) {
+            const smoothBearing = lerpAngle(curBearing, animCurrentHeading, 0.1);
+            (map as any).setBearing(smoothBearing);
+          }
+        }
       }
-      // Map rotation locked — ไม่หมุนตอนนำทาง/คำนวณเสร็จ
     }
     tick();
   }
@@ -4331,7 +4436,24 @@
         callOSRMMatch(_gpsTraceBuffer).then(result => {
           if (result.coordinates.length > 0) {
             const last = result.coordinates[result.coordinates.length - 1];
-            _matchedPosition = { lat: last[1], lng: last[0] };
+            const mLat = last[1], mLng = last[0];
+            // Validate: reject matched position if behind current route progress
+            if (cachedRouteCoords.length > 1 && lastRouteIndex < cachedRouteCoords.length) {
+              let bestIdx = lastRouteIndex;
+              let bestDist = Infinity;
+              const sEnd = Math.min(cachedRouteCoords.length, lastRouteIndex + 30);
+              for (let si = Math.max(0, lastRouteIndex - 3); si < sEnd; si++) {
+                const d = getDistance(mLat, mLng, cachedRouteCoords[si][0], cachedRouteCoords[si][1]);
+                if (d < bestDist) { bestDist = d; bestIdx = si; }
+              }
+              // Only accept if at or ahead of current progress
+              if (bestIdx >= lastRouteIndex - 1) {
+                _matchedPosition = { lat: mLat, lng: mLng };
+              }
+              // else: stale match behind us — ignore
+            } else {
+              _matchedPosition = { lat: mLat, lng: mLng };
+            }
           }
         }).catch(() => { /* Match failed — ignore, use raw GPS */ });
       }
@@ -4390,6 +4512,21 @@
         if (jumpDist > maxJump && jumpDist > 500) {
           // GPS jumped impossibly far - extend animation duration to smooth it
           animDuration = Math.min(animDuration * 2, 3000);
+        }
+      }
+
+      // Anti-warp: prevent snap position going backward along route direction
+      if (animReady && cachedRouteCoords.length > 1 && lastRouteIndex < cachedRouteCoords.length - 1) {
+        const routeDirLat = cachedRouteCoords[lastRouteIndex + 1][0] - cachedRouteCoords[lastRouteIndex][0];
+        const routeDirLng = cachedRouteCoords[lastRouteIndex + 1][1] - cachedRouteCoords[lastRouteIndex][1];
+        const moveLat = snapLat - animCurrentLat;
+        const moveLng = snapLng - animCurrentLng;
+        // Dot product: negative = backward movement along route
+        const dot = moveLat * routeDirLat + moveLng * routeDirLng;
+        if (dot < 0 && currentSpeed > 3) {
+          // Snap would go backward — hold current position until GPS catches up
+          snapLat = animCurrentLat;
+          snapLng = animCurrentLng;
         }
       }
 
@@ -4654,13 +4791,13 @@
     }
   }
 
-  // Progressive search: only search near last known index (O(1) amortized instead of O(n))
-  // Forward-biased: route index only moves forward unless GPS jumps significantly backward
+  // Progressive search: forward-only (O(1) amortized)
+  // NEVER goes backward — prevents blue dot warping to passed positions
   function findNearestPointIndex(coords: [number, number][], location: { lat: number; lng: number }): number {
     if (!coords.length) return 0;
     const searchRadius = 50;
-    // Forward-biased search: only look 5 back (GPS correction), but 50 forward
-    const start = Math.max(0, lastRouteIndex - 5);
+    // Forward-only search from current index (no backward = no warp)
+    const start = lastRouteIndex;
     const end = Math.min(coords.length, lastRouteIndex + searchRadius);
     let minDist = Infinity;
     let nearestIndex = lastRouteIndex;
@@ -4682,17 +4819,8 @@
         }
       }
     }
-    // Prevent backward jumps of more than 5 points (GPS jitter)
-    // Only allow backward if significantly closer (> 50% closer)
-    if (nearestIndex < lastRouteIndex - 2) {
-      const currentDist = getDistance(location.lat, location.lng, coords[lastRouteIndex][0], coords[lastRouteIndex][1]);
-      if (minDist < currentDist * 0.5) {
-        lastRouteIndex = nearestIndex; // genuinely moved backward
-      }
-      // else keep lastRouteIndex (ignore jitter)
-    } else {
-      lastRouteIndex = nearestIndex;
-    }
+    // Monotonic: index only increases (backward = off-route → reroute handles it)
+    lastRouteIndex = nearestIndex;
     return lastRouteIndex;
   }
 
@@ -5554,6 +5682,16 @@
 
   // ═══ Camera rotation — leaflet-rotate จัดการทั้งหมด ═══
   function resetCamView() {
+    if (isNavigating) {
+      // Toggle heading-up / north-up mode during navigation
+      _headingUpMode = !_headingUpMode;
+      if (!_headingUpMode) {
+        if (map && (map as any).setBearing) (map as any).setBearing(0);
+        camAngle = 0;
+        camActive = false;
+      }
+      return;
+    }
     if (map && (map as any).setBearing) {
       (map as any).setBearing(0);
     }
@@ -5572,7 +5710,12 @@
 
   // ล็อค/ปลดล็อค rotation ตามสถานะเส้นทาง
   function lockRotation() {
-    resetCamView();
+    // Reset bearing to 0 directly (don't trigger heading-up toggle via resetCamView)
+    if (map && (map as any).setBearing) {
+      (map as any).setBearing(0);
+    }
+    camAngle = 0;
+    camActive = false;
     if (map && (map as any).touchRotate) {
       (map as any).touchRotate.disable();
     }
@@ -5586,6 +5729,7 @@
   function centerOnCurrentLocation() {
     if (currentLocation && map) {
       isMapFollowing = true;
+      if (isNavigating) _headingUpMode = true; // re-enable heading-up on recenter
       const zoom = isNavigating ? getAutoZoom(currentSpeed) : 16;
       // Snap immediately to current GPS position - no animation delay
       map.setView([currentLocation.lat, currentLocation.lng], zoom, { animate: false });
@@ -6400,23 +6544,50 @@ out center body;`;
 
     if (queue.length === 0) return;
 
-    // โหลดเบื้องหลัง batch 3 ทุก 120ms
+    // โหลดเบื้องหลัง batch 6 ทุก 80ms
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 3);
-      idx += 3;
+      const batch = queue.slice(idx, idx + 6);
+      idx += 6;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 120);
+      setTimeout(loadBatch, 80);
     }
     loadBatch();
   }
 
   // ==================== SHARE ROUTE QR ====================
+  function openInGoogleMaps() {
+    if (!optimizedRoute || allDeliveryPoints.length < 1) {
+      showNotification('ยังไม่มีเส้นทาง กรุณาคำนวณเส้นทางก่อน', 'warning');
+      return;
+    }
+
+    const points = manualOrder ? [...allDeliveryPoints] : [...allDeliveryPoints];
+    const origin = currentLocation
+      ? `${currentLocation.lat},${currentLocation.lng}`
+      : `${points[0].lat},${points[0].lng}`;
+    const destination = `${points[points.length - 1].lat},${points[points.length - 1].lng}`;
+
+    // Google Maps รองรับ waypoints คั่นด้วย |
+    const waypoints = points.length > 2
+      ? points.slice(0, -1).map((p: any) => `${p.lat},${p.lng}`).join('|')
+      : points.length === 2 && currentLocation
+        ? `${points[0].lat},${points[0].lng}`
+        : '';
+
+    let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}`;
+    if (waypoints) url += `&waypoints=${waypoints}`;
+    url += '&travelmode=driving';
+
+    window.open(url, '_blank');
+    showNotification('เปิดใน Google Maps แล้ว', 'success');
+  }
+
   function openShareQR() {
     if (!optimizedRoute?.optimized_order || optimizedRoute.optimized_order.length < 2) {
       showNotification('ยังไม่มีเส้นทาง กรุณาคำนวณเส้นทางก่อน', 'warning');
@@ -7304,14 +7475,15 @@ out center body;`;
       } as any).setView([initLat, initLng], initZoom);
 
       // ═══ Tile Layer — OSM Standard + CSS dark filter (รายละเอียดเยอะ) ═══
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        subdomains: 'abc',
         maxNativeZoom: 19,
         maxZoom: 20,
-        keepBuffer: 4,
+        keepBuffer: 6,
         updateWhenZooming: true,
         updateWhenIdle: false,
-        updateInterval: 150,
+        updateInterval: 100,
         className: 'main-tiles'
       }).addTo(map);
 
@@ -7423,6 +7595,9 @@ out center body;`;
       }
       initExtraFeatures();
       initVoiceNavigation();
+
+      // Check AI availability
+      fetch('/api/ai/chat').then(r => r.json()).then(d => { aiAvailable = d.available === true; }).catch(() => {});
 
       // Restore custom start point marker (page refresh)
       if (useCustomStartPoint && customStartPoint && map && L) {
@@ -8039,6 +8214,10 @@ out center body;`;
           {/if}
           <button class="btn btn-save-route" on:click={saveCurrentRoute} title="บันทึกเส้นทาง [S]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><span>บันทึกเส้นทาง</span></button>
           <button class="btn btn-share" on:click={openShareQR} title="แชร์เส้นทาง QR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>แชร์ QR</span></button>
+          <button class="btn btn-google-maps" on:click={openInGoogleMaps} title="เปิดใน Google Maps">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+            <span>Google Maps</span>
+          </button>
 
           <button class="btn btn-ghost" on:click={() => { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; showRouteComparison = false; }} title="ล้างเส้นทาง [C]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg><span>ล้างเส้นทาง</span></button>
         {/if}
@@ -8078,6 +8257,17 @@ out center body;`;
                 <span class="toggle-hint">{useRealDistances ? '🛣️ API (แม่นยำ)' : '📐 Haversine (เร็ว)'}</span>
               </span>
             </label>
+          {/if}
+          {#if aiAvailable && deliveryPoints.length >= 2}
+            <button class="btn btn-ai-plan" on:click={requestAIRouteOptimization} disabled={isAIPlanning} title="AI วางแผนเส้นทาง">
+              {#if isAIPlanning}
+                <div class="spinner"></div>
+                <span>AI กำลังวิเคราะห์...</span>
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 2a4 4 0 0 1 4 4v1a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z"/></svg>
+                <span>AI วางแผน</span>
+              {/if}
+            </button>
           {/if}
         {/if}
       </div>
@@ -8427,10 +8617,37 @@ out center body;`;
     </div>
 
     {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker}
-      <div class="map-stats glass-card" class:route-active={optimizedRoute}>
-        <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? deliveryPoints.length : '...'}</span><span class="map-stat-label">จุดแวะ</span></div>
-        <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? getSuccessCount() : '...'}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
-        <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
+      <div class="map-top-left-group">
+        <div class="map-stats glass-card" class:route-active={optimizedRoute}>
+          <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? deliveryPoints.length : '...'}</span><span class="map-stat-label">จุดแวะ</span></div>
+          <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? getSuccessCount() : '...'}</span><span class="map-stat-label">เสร็จแล้ว</span></div>
+          <div class="map-stat weather"><span class="map-stat-value">{getWeatherIcon()} {weather.temp}°</span><span class="map-stat-label">อากาศ</span></div>
+        </div>
+        <div class="map-vehicle-float glass-card">
+          <button class="float-vehicle-btn" class:fuel={vehicleType === 'fuel'} class:ev={vehicleType === 'ev'} on:click={toggleVehicleType}>
+            <span>{getVehicleIcon()}</span>
+            <span class="float-vehicle-label">{vehicleType === 'fuel' ? 'น้ำมัน' : 'EV'}</span>
+            {#if vehicleType === 'ev'}
+              <span class="ev-charge-badge" style="background: {getEVBatteryColor()}">{evCurrentCharge}%</span>
+            {:else}
+              <span class="fuel-price-badge">฿{currentFuelPrice.toFixed(0)}</span>
+            {/if}
+          </button>
+          {#if vehicleType === 'fuel' && oilPriceData}
+            <div class="float-station-selects">
+              <select bind:value={selectedStation} on:change={updateCurrentFuelPrice}>
+                {#each stationOptions as station}
+                  <option value={station.value}>{station.label}</option>
+                {/each}
+              </select>
+              <select bind:value={selectedFuelType} on:change={updateCurrentFuelPrice}>
+                {#each getAvailableFuelTypes() as fuel}
+                  <option value={fuel.value}>{fuel.label}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
 
@@ -8447,7 +8664,7 @@ out center body;`;
     {/if}
 
     <!-- My Location + Camera Reset Buttons (bottom-right) -->
-    {#if !isNavigating && !globeMode}
+    {#if !isNavigating && !globeMode && !aiChatOpen}
       <div class="map-right-btns">
         {#if camActive}
           <button class="map-cam-btn active" on:click={resetCamView} title="รีเซ็ตมุมกล้อง (กลับทิศเหนือ)">
@@ -8681,34 +8898,7 @@ out center body;`;
       </div>
     {/if}
 
-    <!-- Floating Vehicle Toggle -->
-    {#if !isNavigating}
-      <div class="map-vehicle-float glass-card">
-        <button class="float-vehicle-btn" class:fuel={vehicleType === 'fuel'} class:ev={vehicleType === 'ev'} on:click={toggleVehicleType}>
-          <span>{getVehicleIcon()}</span>
-          <span class="float-vehicle-label">{vehicleType === 'fuel' ? 'น้ำมัน' : 'EV'}</span>
-          {#if vehicleType === 'ev'}
-            <span class="ev-charge-badge" style="background: {getEVBatteryColor()}">{evCurrentCharge}%</span>
-          {:else}
-            <span class="fuel-price-badge">฿{currentFuelPrice.toFixed(0)}</span>
-          {/if}
-        </button>
-        {#if vehicleType === 'fuel' && oilPriceData}
-          <div class="float-station-selects">
-            <select bind:value={selectedStation} on:change={updateCurrentFuelPrice}>
-              {#each stationOptions as station}
-                <option value={station.value}>{station.label}</option>
-              {/each}
-            </select>
-            <select bind:value={selectedFuelType} on:change={updateCurrentFuelPrice}>
-              {#each getAvailableFuelTypes() as fuel}
-                <option value={fuel.value}>{fuel.label}</option>
-              {/each}
-            </select>
-          </div>
-        {/if}
-      </div>
-    {/if}
+    <!-- Vehicle Toggle moved to map-top-left-group -->
 
     <!-- Floating Saved Routes (if any) -->
     {#if !isNavigating && savedRoutes.length > 0}
@@ -8731,6 +8921,22 @@ out center body;`;
     {/if}
   </div>
 </div>
+
+<!-- AI Chat Panel (floating) -->
+{#if aiAvailable && !isNavigating}
+  <AIChatPanel context={aiChatContext} bind:isOpen={aiChatOpen} />
+{/if}
+
+<!-- AI Route Suggestion Modal -->
+{#if showAISuggestion}
+  <AIRouteSuggestion
+    suggestion={aiSuggestion}
+    points={allDeliveryPoints}
+    isLoading={isAIPlanning}
+    on:apply={applyAISuggestion}
+    on:dismiss={() => { showAISuggestion = false; aiSuggestion = null; }}
+  />
+{/if}
 
 <!-- POI Results Modal (outside app-container for proper fixed positioning) -->
 {#if showPOIModal && alongRoutePOIs.length > 0 && !isNavigating}
@@ -10308,7 +10514,7 @@ out center body;`;
   /* Floating Route Summary (mobile only) */
   .map-route-summary { display: none; }
 
-  .map-stats { position: absolute; top: 28px; left: 16px; z-index: 1001; display: flex; gap: 10px; padding: 10px 14px; border-radius: 12px; animation: fadeInFloat 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both; }
+  .map-stats { display: flex; gap: 10px; padding: 10px 14px; border-radius: 12px; }
   .map-stat { text-align: center; padding: 4px 8px; }
   .map-stat-value { display: block; font-size: 18px; font-weight: 700; color: #00ff88; font-family: 'JetBrains Mono', monospace; }
   .map-stat-label { font-size: 10px; color: #71717a; text-transform: uppercase; }
@@ -10334,7 +10540,7 @@ out center body;`;
 
 
   .toast {
-    position: fixed; bottom: 140px; right: 16px;
+    position: fixed; bottom: 170px; right: 16px;
     display: flex; align-items: center; gap: 8px;
     padding: 10px 14px 10px 12px; border-radius: 12px;
     font-size: 12px; font-weight: 500; z-index: 9999;
@@ -12514,11 +12720,21 @@ out center body;`;
 }
 
 /* Floating Vehicle Toggle */
-.map-vehicle-float {
+.map-top-left-group {
   position: absolute;
-  bottom: 30px;
-  right: 70px;
-  z-index: 1000;
+  top: 28px;
+  left: 16px;
+  z-index: 1001;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  animation: fadeInFloat 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both;
+}
+.map-top-left-group .map-stats {
+  position: static;
+  animation: none;
+}
+.map-vehicle-float {
   padding: 6px;
   border-radius: 12px;
 }
@@ -13002,7 +13218,9 @@ out center body;`;
   .map-poi-float { top: 69px; right: 10px; max-width: 220px; padding: 6px; font-size: 11px; border-radius: 10px; }
   .map-poi-float .poi-search-btn { font-size: 10px; padding: 4px 8px; }
   .poi-modal { width: 95%; max-width: 360px; padding: 14px; }
-  .map-vehicle-float { display: none; }
+  .map-top-left-group { flex-direction: column; gap: 6px; }
+  .map-vehicle-float { padding: 4px; }
+  .float-vehicle-btn { padding: 5px 10px; font-size: 12px; }
   .map-saved-float { bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 40px); }
 }
 
@@ -13027,7 +13245,10 @@ out center body;`;
   .map-poi-float { top: 67px; right: 8px; max-width: 200px; padding: 5px; font-size: 10px; border-radius: 8px; }
   .poi-modal { width: 95%; padding: 12px; }
   .poi-chip { font-size: 10px; padding: 3px 8px; }
-  .map-vehicle-float { display: none; }
+  .map-top-left-group { flex-direction: column; gap: 4px; top: 14px; left: 10px; }
+  .map-vehicle-float { padding: 3px; }
+  .float-vehicle-btn { padding: 4px 8px; font-size: 11px; gap: 4px; }
+  .float-vehicle-label { display: none; }
   .map-saved-float { bottom: 14px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 30px); }
 }
 
@@ -14143,6 +14364,37 @@ out center body;`;
     gap: 12px;
   }
   .keyboard-help-modal { max-width: 95%; }
+}
+
+/* Google Maps Button */
+.btn-google-maps {
+  background: rgba(66, 133, 244, 0.12) !important;
+  border: 1px solid rgba(66, 133, 244, 0.3) !important;
+  color: #60a5fa !important;
+}
+.btn-google-maps:hover {
+  background: rgba(66, 133, 244, 0.2) !important;
+  border-color: rgba(66, 133, 244, 0.5) !important;
+}
+.btn-google-maps svg { color: #4285f4; }
+
+/* AI Plan Button */
+.btn-ai-plan {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(99, 102, 241, 0.2)) !important;
+  border: 1px solid rgba(139, 92, 246, 0.4) !important;
+  color: #c4b5fd !important;
+}
+.btn-ai-plan:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(99, 102, 241, 0.3)) !important;
+  border-color: rgba(139, 92, 246, 0.6) !important;
+  color: #e0d5ff !important;
+}
+.btn-ai-plan:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.btn-ai-plan svg {
+  color: #8b5cf6;
 }
 
 /* Point card selected state */

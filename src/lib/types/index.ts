@@ -94,3 +94,28 @@ export interface TrafficIncident {
 }
 
 export type VehicleType = 'fuel' | 'ev';
+
+// AI Route Planning
+export interface AIRouteSuggestionData {
+  suggestedOrder: number[];
+  reasoning: string;
+  clusters: { name: string; points: number[] }[];
+  tips: string[];
+}
+
+export interface AIChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AIChatContext {
+  totalPoints: number;
+  completedPoints: number;
+  remainingPoints: number;
+  hasRoute: boolean;
+  isNavigating: boolean;
+  routeDistance?: number;
+  routeDuration?: number;
+  vehicleType?: string;
+  pointNames?: string;
+}

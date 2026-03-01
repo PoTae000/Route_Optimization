@@ -36,7 +36,9 @@
       "Bash(ping:*)",
       "Bash(python -c \"import os; os.remove\\(''\\\\\\\\?\\\\C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\nul''\\)\")",
       "Bash(npx tsc:*)",
-      "Bash(npm ls:*)"
+      "Bash(npm ls:*)",
+      "Bash(powershell -Command \"Get-ChildItem -Path ''C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\src'' -Recurse -Include ''*.ts'',''*.js'',''*.svelte'' -Exclude ''node_modules'' | Measure-Object -Property Length -Sum | Select-Object Count,@{Name=''TotalBytes'';Expression={$_Sum}},@{Name=''TotalKB'';Expression={[math]::Round\\($_Sum/1KB,2\\)}}\")",
+      "Bash(npx:*)"
     ]
   }
 }
