@@ -118,4 +118,6 @@ export interface AIChatContext {
   routeDuration?: number;
   vehicleType?: string;
   pointNames?: string;
+  currentLat?: number;
+  currentLng?: number;
 }

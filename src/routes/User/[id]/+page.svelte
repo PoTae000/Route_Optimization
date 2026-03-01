@@ -164,6 +164,7 @@
   let activeTab: 'points' | 'route' = 'points';
   let activePointId: number | null = null;
   let isNavigating = false;
+  let carMode = false;
   let mobileSidebarOpen = false;
   let mobileContentExpanded = false;
   let desktopSidebarCollapsed = false;
@@ -494,7 +495,9 @@
     routeDistance: optimizedRoute?.distance,
     routeDuration: optimizedRoute?.duration,
     vehicleType,
-    pointNames: allDeliveryPoints.map((p: any) => p.name).join(', ')
+    pointNames: allDeliveryPoints.map((p: any) => p.name).join(', '),
+    currentLat: currentLocation?.lat,
+    currentLng: currentLocation?.lng
   } as AIChatContext;
 
   // Resize map when settings/addForm opens/closes (sidebar hides/shows)
@@ -2162,6 +2165,16 @@
       showWeatherRadar = true;
     } catch (err) {
       showNotification('โหลดเรดาร์ฝนไม่สำเร็จ', 'error');
+    }
+  }
+
+  function toggleCarMode() {
+    carMode = !carMode;
+    if (carMode) {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+      mobileSidebarOpen = false;
+    } else {
+      document.exitFullscreen?.().catch(() => {});
     }
   }
 
@@ -7724,7 +7737,10 @@ out center body;`;
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </svelte:head>
 
-<div class="app-container">
+<div class="app-container" class:car-mode={carMode}>
+  {#if carMode}
+    <button class="car-mode-exit" on:click={toggleCarMode}>✕ ออกโหมดรถ</button>
+  {/if}
   <!-- Settings Panel -->
   <SettingsPanel
     bind:show={showSettings}
@@ -8088,7 +8104,7 @@ out center body;`;
   />
 
   <!-- Sidebar -->
-  {#if !isNavigating && !aiChatOpen}
+  {#if !isNavigating && !aiChatOpen && !carMode}
     <aside class="sidebar" class:collapsed={!mobileSidebarOpen || showSettings || showAddForm} class:desktop-collapsed={desktopSidebarCollapsed || showSettings || showAddForm}>
       <!-- Mobile toggle handle -->
       <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; if (!mobileSidebarOpen) mobileContentExpanded = false; smoothMapResize(); }}>
@@ -8525,10 +8541,12 @@ out center body;`;
             <div class="comp-col">เวลา</div>
             <div class="comp-col">ค่าเชื้อเพลิง</div>
             <div class="comp-col">ทางด่วน</div>
+            <div class="comp-col">รวม</div>
             {#if showTraffic}<div class="comp-col">การจราจร</div>{/if}
             <div class="comp-col">เลือก</div>
           </div>
           {#each routeAlternatives as alt, i}
+            {@const totalCost = Math.round(getFuelCostForRoute(alt.distance, alt.duration) + (alt.tollEstimate || 0))}
             <div class="comparison-row" class:selected={selectedRouteIndex === i} style="border-left: 3px solid {alt.color}">
               <div class="comp-col label" style="color: {alt.color}">{alt.label}</div>
               <div class="comp-col">{(alt.distance / 1000).toFixed(1)} กม.</div>
@@ -8539,6 +8557,16 @@ out center body;`;
                   <span style="color: #f59e0b">฿{alt.tollEstimate}</span>
                 {:else}
                   <span style="color: #00ff88">ฟรี</span>
+                {/if}
+              </div>
+              <div class="comp-col total-cost">
+                <strong>฿{totalCost}</strong>
+                {#if selectedRouteIndex !== undefined && selectedRouteIndex !== i}
+                  {@const selectedTotal = Math.round(getFuelCostForRoute(routeAlternatives[selectedRouteIndex].distance, routeAlternatives[selectedRouteIndex].duration) + (routeAlternatives[selectedRouteIndex].tollEstimate || 0))}
+                  {@const diff = totalCost - selectedTotal}
+                  <span class="cost-diff" style="color: {diff > 0 ? '#ff6b6b' : diff < 0 ? '#00ff88' : '#71717a'}">
+                    {diff > 0 ? '+' : ''}{diff}
+                  </span>
                 {/if}
               </div>
               {#if showTraffic}
@@ -8557,10 +8585,19 @@ out center body;`;
           {#if routeAlternatives.length >= 2}
             {@const fastest = routeAlternatives.reduce((a, b) => a.duration < b.duration ? a : b)}
             {@const shortest = routeAlternatives.reduce((a, b) => a.distance < b.distance ? a : b)}
-            {@const cheapest = routeAlternatives.reduce((a, b) => getFuelCostForRoute(a.distance, a.duration) + a.tollEstimate < getFuelCostForRoute(b.distance, b.duration) + b.tollEstimate ? a : b)}
+            {@const cheapest = routeAlternatives.reduce((a, b) => getFuelCostForRoute(a.distance, a.duration) + (a.tollEstimate || 0) < getFuelCostForRoute(b.distance, b.duration) + (b.tollEstimate || 0) ? a : b)}
+            {@const cheapestTotal = Math.round(getFuelCostForRoute(cheapest.distance, cheapest.duration) + (cheapest.tollEstimate || 0))}
+            {@const fastestTotal = Math.round(getFuelCostForRoute(fastest.distance, fastest.duration) + (fastest.tollEstimate || 0))}
             <div class="summary-badges">
               <span class="summary-badge" style="color: {fastest.color}">🚀 เร็วสุด: {fastest.label}</span>
               <span class="summary-badge" style="color: {cheapest.color}">💰 ถูกสุด: {cheapest.label}</span>
+              {#if fastest !== cheapest}
+                {@const savingAmount = fastestTotal - cheapestTotal}
+                {@const timeDiff = Math.round((cheapest.duration - fastest.duration) / 60)}
+                {#if savingAmount > 0}
+                  <span class="summary-badge" style="color: #f59e0b">📊 ประหยัด ฿{savingAmount} แต่ช้ากว่า {timeDiff} นาที</span>
+                {/if}
+              {/if}
             </div>
           {/if}
         </div>
@@ -8569,7 +8606,7 @@ out center body;`;
   {/if}
 
   <!-- Desktop Sidebar Toggle Button (fixed position) -->
-  {#if !isNavigating && !showSettings && !showAddForm}
+  {#if !isNavigating && !showSettings && !showAddForm && !carMode}
     <button class="desktop-sidebar-toggle" class:sidebar-hidden={desktopSidebarCollapsed} on:click={() => { desktopSidebarCollapsed = !desktopSidebarCollapsed; smoothMapResize(); }} title={desktopSidebarCollapsed ? 'แสดงเมนู [M]' : 'ซ่อนเมนู [M]'}>
       {#if desktopSidebarCollapsed}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -8624,7 +8661,7 @@ out center body;`;
       {/if}
     </div>
 
-    {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker && !aiChatOpen}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker && !aiChatOpen && !carMode}
       <div class="map-top-left-group">
         <div class="map-stats glass-card" class:route-active={optimizedRoute}>
           <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? deliveryPoints.length : '...'}</span><span class="map-stat-label">จุดแวะ</span></div>
@@ -8660,14 +8697,14 @@ out center body;`;
     {/if}
 
     <!-- Add Point Mode Toggle (hidden when route is calculated) -->
-    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute && !showStartPointPicker && !aiChatOpen}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute && !showStartPointPicker && !aiChatOpen && !carMode}
       <button class="add-point-toggle glass-card" class:active={addPointMode} on:click={() => { addPointMode = !addPointMode; if (map) map.getContainer().style.cursor = addPointMode ? 'crosshair' : ''; if (!addPointMode && clickMarker) { clickMarker.remove(); clickMarker = null; } }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         <span>{addPointMode ? 'ปักหมุดอยู่...' : 'เพิ่มจุด'}</span>
       </button>
     {/if}
 
-    {#if !isNavigating && !optimizedRoute && addPointMode && !aiChatOpen}
+    {#if !isNavigating && !optimizedRoute && addPointMode && !aiChatOpen && !carMode}
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
     {/if}
 
@@ -8700,7 +8737,7 @@ out center body;`;
     <!-- ==================== FLOATING PANELS ON MAP ==================== -->
 
     <!-- Floating Search Bar -->
-    {#if !aiChatOpen}
+    {#if !aiChatOpen && !carMode}
     <SearchPanel
       {isNavigating}
       {directDestination}
@@ -8721,7 +8758,7 @@ out center body;`;
     {/if}
 
     <!-- Floating Route Preferences -->
-    {#if !isNavigating && !aiChatOpen}
+    {#if !isNavigating && !aiChatOpen && !carMode}
       <div class="map-prefs-float glass-card">
         <div class="float-pref-chips">
           <button class="float-pref-chip" class:active={routePreference === 'fastest'} on:click={() => toggleRoutePreference('fastest')}>🚀 เร็วสุด</button>
@@ -8735,6 +8772,7 @@ out center body;`;
           <button class="float-toggle-chip" class:active={autoRerouteEnabled} on:click={() => { autoRerouteEnabled = !autoRerouteEnabled; localStorage.setItem(getUserKey('autoRerouteEnabled'), String(autoRerouteEnabled)); }} title="คำนวณใหม่อัตโนมัติ">🔄</button>
           <button class="float-toggle-chip gps-refresh-btn" class:spinning={isRefreshingGps} on:click={refreshGpsPosition} title="รีเฟรช GPS (±{Math.round(accuracy)}m)">📍</button>
           <button class="float-toggle-chip" class:active={showWeatherRadar} on:click={toggleWeatherRadar} title="เรดาร์ฝน">🌧️</button>
+          <button class="float-toggle-chip" class:active={carMode} on:click={toggleCarMode} title="โหมดรถยนต์">🚗</button>
         </div>
       </div>
 
@@ -8911,7 +8949,7 @@ out center body;`;
     <!-- Vehicle Toggle moved to map-top-left-group -->
 
     <!-- Floating Saved Routes (if any) -->
-    {#if !isNavigating && savedRoutes.length > 0 && !aiChatOpen}
+    {#if !isNavigating && savedRoutes.length > 0 && !aiChatOpen && !carMode}
       <div class="map-saved-float glass-card">
         <button class="float-saved-toggle" on:click={() => showSavedRoutes = !showSavedRoutes}>
           ⭐ บันทึก ({savedRoutes.length})
@@ -12251,7 +12289,7 @@ out center body;`;
 }
 .comparison-row {
   display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr;
+  grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr 1fr;
   gap: 10px;
   padding: 12px 14px;
   border-radius: 10px;
@@ -12274,6 +12312,8 @@ out center body;`;
 .comparison-row.selected { background: rgba(0, 255, 136, 0.08); border-color: rgba(0, 255, 136, 0.2); }
 .comp-col { font-size: 13px; color: #e4e4e7; }
 .comp-col.label { font-weight: 600; }
+.comp-col.total-cost { display: flex; flex-direction: column; gap: 2px; }
+.cost-diff { font-size: 11px; font-weight: 500; }
 .comp-select-btn {
   padding: 6px 12px;
   background: rgba(255, 255, 255, 0.05);
@@ -12635,9 +12675,9 @@ out center body;`;
   .speed-warning-icon { font-size: 24px; }
   .speed-warning-text { font-size: 12px; }
   .saved-routes-panel { padding: 8px 16px; max-height: 150px; }
-  .comparison-row { grid-template-columns: 1.2fr 1fr 1fr 1fr; }
+  .comparison-row { grid-template-columns: 1.2fr 1fr 1fr 1fr 1fr; }
   .comparison-row .comp-col:nth-child(5),
-  .comparison-row .comp-col:nth-child(6) { display: none; }
+  .comparison-row .comp-col:nth-child(7) { display: none; }
   .route-comparison-panel { padding: 16px; max-width: 95%; }
   .direct-nav-bar { flex-direction: column; gap: 8px; }
   .btn-navigate-direct { width: 100%; justify-content: center; }
@@ -12647,8 +12687,9 @@ out center body;`;
   .pref-chips { flex-direction: column; }
   .pref-chip { width: 100%; justify-content: center; }
   .route-option-stats { flex-direction: column; gap: 4px; }
-  .comparison-row { grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 8px 10px; }
-  .comparison-row .comp-col:nth-child(4) { display: none; }
+  .comparison-row { grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; padding: 8px 10px; }
+  .comparison-row .comp-col:nth-child(4),
+  .comparison-row .comp-col:nth-child(5) { display: none; }
 }
 
 /* ==================== FLOATING MAP PANELS ==================== */
@@ -14412,6 +14453,46 @@ out center body;`;
   background: rgba(59, 130, 246, 0.15) !important;
   border-color: rgba(59, 130, 246, 0.5) !important;
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), inset 0 0 20px rgba(59, 130, 246, 0.1) !important;
+}
+
+/* ==================== CAR MODE ==================== */
+.car-mode-exit {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 1500;
+  padding: 10px 18px;
+  border-radius: 12px;
+  background: rgba(15, 15, 25, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e4e4e7;
+  font-size: 14px;
+  font-family: 'Kanit', sans-serif;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.car-mode-exit:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+.car-mode .map-myloc-btn, .car-mode .map-cam-btn {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+}
+.car-mode .map-myloc-btn svg, .car-mode .map-cam-btn svg {
+  width: 28px;
+  height: 28px;
+}
+.car-mode .map-nav-btn {
+  padding: 16px 32px;
+  font-size: 18px;
+  border-radius: 24px;
+}
+.car-mode .map-nav-btn svg {
+  width: 20px;
+  height: 20px;
 }
 
 </style>

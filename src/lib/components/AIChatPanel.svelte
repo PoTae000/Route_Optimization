@@ -23,7 +23,9 @@
     { label: 'สรุปวันนี้', text: 'สรุปสถานะเส้นทางวันนี้' },
     { label: 'ไปไหนก่อนดี?', text: 'ดูจุดแวะทั้งหมดแล้วแนะนำว่าควรไปจุดไหนก่อน' },
     { label: 'เส้นทางไหนดี?', text: 'แนะนำเส้นทางที่ดีที่สุดสำหรับจุดแวะปัจจุบัน' },
-    { label: 'ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' }
+    { label: 'ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' },
+    { label: 'แนะนำที่เที่ยว', text: 'แนะนำสถานที่ท่องเที่ยวที่น่าสนใจใกล้ตำแหน่งปัจจุบัน 5 ที่' },
+    { label: 'คาเฟ่ใกล้ๆ', text: 'แนะนำคาเฟ่หรือร้านกาแฟที่น่านั่งใกล้ตำแหน่งปัจจุบัน 5 ที่' }
   ];
 
   function togglePanel() {
@@ -182,7 +184,7 @@
             </svg>
           </div>
           <p>สวัสดี! ฉันเป็นผู้ช่วย AI</p>
-          <p class="ai-welcome-sub">ถามอะไรก็ได้เกี่ยวกับเส้นทางจัดส่ง</p>
+          <p class="ai-welcome-sub">ถามอะไรก็ได้เกี่ยวกับเส้นทางและสถานที่</p>
           <div class="ai-quick-chips">
             {#each quickChips as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
@@ -203,7 +205,7 @@
         <!-- Quick chips after messages -->
         {#if !isStreaming}
           <div class="ai-quick-chips ai-chips-inline">
-            {#each quickChips.slice(0, 2) as chip}
+            {#each quickChips.slice(0, 3) as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
             {/each}
           </div>
