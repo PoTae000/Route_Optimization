@@ -476,7 +476,7 @@
   .ai-chat-panel {
     left: 8px;
     right: auto;
-    bottom: 140px;
+    bottom: 110px;
     width: calc(100vw - 16px);
     height: 60vh;
     border-radius: 12px;
