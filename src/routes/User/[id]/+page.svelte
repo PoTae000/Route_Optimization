@@ -8080,7 +8080,7 @@ out center body;`;
   />
 
   <!-- Sidebar -->
-  {#if !isNavigating}
+  {#if !isNavigating && !aiChatOpen}
     <aside class="sidebar" class:collapsed={!mobileSidebarOpen || showSettings || showAddForm} class:desktop-collapsed={desktopSidebarCollapsed || showSettings || showAddForm}>
       <!-- Mobile toggle handle -->
       <button class="sidebar-toggle" on:click={() => { mobileSidebarOpen = !mobileSidebarOpen; if (!mobileSidebarOpen) mobileContentExpanded = false; smoothMapResize(); }}>
@@ -8616,7 +8616,7 @@ out center body;`;
       {/if}
     </div>
 
-    {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !showStartPointPicker && !aiChatOpen}
       <div class="map-top-left-group">
         <div class="map-stats glass-card" class:route-active={optimizedRoute}>
           <div class="map-stat"><span class="map-stat-value">{isDataLoaded ? deliveryPoints.length : '...'}</span><span class="map-stat-label">จุดแวะ</span></div>
@@ -8652,14 +8652,14 @@ out center body;`;
     {/if}
 
     <!-- Add Point Mode Toggle (hidden when route is calculated) -->
-    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute && !showStartPointPicker}
+    {#if !isNavigating && !isSearchFocused && !directDestination && !optimizedRoute && !showStartPointPicker && !aiChatOpen}
       <button class="add-point-toggle glass-card" class:active={addPointMode} on:click={() => { addPointMode = !addPointMode; if (map) map.getContainer().style.cursor = addPointMode ? 'crosshair' : ''; if (!addPointMode && clickMarker) { clickMarker.remove(); clickMarker = null; } }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         <span>{addPointMode ? 'ปักหมุดอยู่...' : 'เพิ่มจุด'}</span>
       </button>
     {/if}
 
-    {#if !isNavigating && !optimizedRoute && addPointMode}
+    {#if !isNavigating && !optimizedRoute && addPointMode && !aiChatOpen}
       <div class="map-info glass-card"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>คลิกที่แผนที่เพื่อเพิ่มจุดแวะ</span></div>
     {/if}
 
@@ -8682,7 +8682,7 @@ out center body;`;
     {/if}
 
     <!-- Floating Navigate Button (mobile) -->
-    {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination && !showIncidentsPanel}
+    {#if optimizedRoute && !isNavigating && !isSearchFocused && !directDestination && !showIncidentsPanel && !aiChatOpen}
       <button class="map-nav-btn glass-card" on:click={() => { if (allDeliveryPoints.length > 0) startNavigation(); }} title="เริ่มนำทาง">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
         <span>นำทาง</span>
@@ -8692,6 +8692,7 @@ out center body;`;
     <!-- ==================== FLOATING PANELS ON MAP ==================== -->
 
     <!-- Floating Search Bar -->
+    {#if !aiChatOpen}
     <SearchPanel
       {isNavigating}
       {directDestination}
@@ -8709,9 +8710,10 @@ out center body;`;
       on:selectStartPoint={(e) => setCustomStartFromSearch(e.detail)}
       on:closeStartPointSearch={() => { showStartPointPicker = false; if (!useCustomStartPoint) clearCustomStartPoint(); }}
     />
+    {/if}
 
     <!-- Floating Route Preferences -->
-    {#if !isNavigating}
+    {#if !isNavigating && !aiChatOpen}
       <div class="map-prefs-float glass-card">
         <div class="float-pref-chips">
           <button class="float-pref-chip" class:active={routePreference === 'fastest'} on:click={() => toggleRoutePreference('fastest')}>🚀 เร็วสุด</button>
@@ -8901,7 +8903,7 @@ out center body;`;
     <!-- Vehicle Toggle moved to map-top-left-group -->
 
     <!-- Floating Saved Routes (if any) -->
-    {#if !isNavigating && savedRoutes.length > 0}
+    {#if !isNavigating && savedRoutes.length > 0 && !aiChatOpen}
       <div class="map-saved-float glass-card">
         <button class="float-saved-toggle" on:click={() => showSavedRoutes = !showSavedRoutes}>
           ⭐ บันทึก ({savedRoutes.length})
@@ -13219,7 +13221,7 @@ out center body;`;
   .map-poi-float .poi-search-btn { font-size: 10px; padding: 4px 8px; }
   .poi-modal { width: 95%; max-width: 360px; padding: 14px; }
   .map-top-left-group { flex-direction: column; gap: 6px; }
-  .map-vehicle-float { padding: 4px; }
+  .map-vehicle-float { display: none; }
   .float-vehicle-btn { padding: 5px 10px; font-size: 12px; }
   .map-saved-float { bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 40px); }
 }
@@ -13246,7 +13248,7 @@ out center body;`;
   .poi-modal { width: 95%; padding: 12px; }
   .poi-chip { font-size: 10px; padding: 3px 8px; }
   .map-top-left-group { flex-direction: column; gap: 4px; top: 14px; left: 10px; }
-  .map-vehicle-float { padding: 3px; }
+  .map-vehicle-float { display: none; }
   .float-vehicle-btn { padding: 4px 8px; font-size: 11px; gap: 4px; }
   .float-vehicle-label { display: none; }
   .map-saved-float { bottom: 14px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 30px); }
