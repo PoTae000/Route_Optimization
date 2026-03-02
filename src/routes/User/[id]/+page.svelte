@@ -3942,30 +3942,33 @@
           }
 
           try {
-            const query = `[out:json][timeout:10];(node${osmTag}${nameFilter}(around:${radius},${lat},${lng}););out body 10;`;
+            // ค้นหาทั้ง node, way, relation + ใช้ out center เพื่อให้ way/relation มีพิกัดกลาง
+            const query = `[out:json][timeout:10];(node${osmTag}${nameFilter}(around:${radius},${lat},${lng});way${osmTag}${nameFilter}(around:${radius},${lat},${lng});relation${osmTag}${nameFilter}(around:${radius},${lat},${lng}););out center 10;`;
             const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
               method: 'POST',
               body: 'data=' + encodeURIComponent(query)
             });
             const ovData = await ovRes.json();
-            const elements = ovData.elements || [];
+            const elements = (ovData.elements || []).filter((el: any) => {
+              // node มี lat/lon ตรง, way/relation มี center.lat/center.lon
+              return (el.lat && el.lon) || (el.center?.lat && el.center?.lon);
+            }).map((el: any) => ({
+              ...el,
+              lat: el.lat || el.center?.lat,
+              lon: el.lon || el.center?.lon
+            }));
 
             if (elements.length === 0) {
               showNotification(`ไม่พบ ${nearbyKeyword || nearbyType} ใกล้เคียง`, 'warning');
             } else {
-              // แสดงผลลัพธ์บนแผนที่ด้วย markers ชั่วคราว
               // ลบ markers เก่าก่อน
               if ((window as any).__nearbyMarkers) {
                 (window as any).__nearbyMarkers.forEach((m: any) => m.remove());
               }
               (window as any).__nearbyMarkers = [];
 
-              const typeIcons: Record<string, string> = {
-                convenience_store: '🏪', cafe: '☕', restaurant: '🍽️', fuel: '⛽',
-                hospital: '🏥', atm: '💳', temple: '🛕', hotel: '🏨',
-                pharmacy: '💊', parking: '🅿️', supermarket: '🛒', bank: '🏦'
-              };
-              const icon = typeIcons[nearbyType] || '📍';
+              // เรียงตามระยะใกล้สุดก่อน
+              elements.sort((a: any, b: any) => getDistance(lat, lng, a.lat, a.lon) - getDistance(lat, lng, b.lat, b.lon));
 
               elements.forEach((el: any, idx: number) => {
                 const name = el.tags?.name || el.tags?.['name:th'] || `${nearbyKeyword || nearbyType} #${idx + 1}`;
@@ -3975,13 +3978,13 @@
                   const marker = L.marker([el.lat, el.lon], {
                     icon: L.divIcon({
                       className: '',
-                      html: `<div class="marker-pin" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6); box-shadow: 0 0 20px rgba(59,130,246,0.5); width: 38px; height: 38px; font-size: 18px;"><span>${icon}</span><div class="marker-name-label" style="background: rgba(59,130,246,0.9);">${name} (${distText})</div></div>`,
+                      html: `<div class="marker-pin" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6); box-shadow: 0 0 20px rgba(59,130,246,0.5); width: 38px; height: 38px; font-size: 18px;"><span>${idx + 1}</span><div class="marker-name-label" style="background: rgba(59,130,246,0.9);">${name} (${distText})</div></div>`,
                       iconSize: [38, 38],
-                      iconAnchor: [19, 19]
+                      iconAnchor: [19, 38]
                     }),
                     zIndexOffset: 800
                   }).addTo(map);
-                  marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)"></div><div class="popup-header"><div class="popup-badge" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)">${icon}</div><div class="popup-header-text"><h4>${name}</h4><span class="popup-tag" style="color: #818cf8">${distText}</span></div></div></div>`, { className: 'dark-popup' });
+                  marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)"></div><div class="popup-header"><div class="popup-badge" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)">${idx + 1}</div><div class="popup-header-text"><h4>${name}</h4><span class="popup-tag" style="color: #818cf8">${distText}</span></div></div></div>`, { className: 'dark-popup' });
                   (window as any).__nearbyMarkers.push(marker);
                 }
               });
@@ -9074,10 +9077,10 @@ out center body;`;
     {#if !isNavigating && !aiChatOpen && !carMode}
       <div class="map-prefs-float glass-card">
         <div class="float-pref-chips">
-          <button class="float-pref-chip" class:active={routePreference === 'fastest'} on:click={() => toggleRoutePreference('fastest')}>🚀 เร็วสุด</button>
-          <button class="float-pref-chip" class:active={routePreference === 'shortest'} on:click={() => toggleRoutePreference('shortest')}>📏 สั้นสุด</button>
-          <button class="float-pref-chip" class:active={routePreference === 'no_tolls'} on:click={() => toggleRoutePreference('no_tolls')}>🚫 เลี่ยงทางด่วน</button>
-          <button class="float-pref-chip" class:active={routePreference === 'no_highways'} on:click={() => toggleRoutePreference('no_highways')}>🏘️ เลี่ยงมอเตอร์เวย์</button>
+          <button class="float-pref-chip" class:active={routePreference === 'fastest'} on:click={() => toggleRoutePreference('fastest')}>เร็วสุด</button>
+          <button class="float-pref-chip" class:active={routePreference === 'shortest'} on:click={() => toggleRoutePreference('shortest')}>สั้นสุด</button>
+          <button class="float-pref-chip" class:active={routePreference === 'no_tolls'} on:click={() => toggleRoutePreference('no_tolls')}>เลี่ยงด่วน</button>
+          <button class="float-pref-chip" class:active={routePreference === 'no_highways'} on:click={() => toggleRoutePreference('no_highways')}>เลี่ยงมอเตอร์เวย์</button>
         </div>
         <div class="float-pref-toggles">
           <button class="float-toggle-chip" class:active={showTraffic} on:click={toggleTraffic} title="แสดงการจราจร [T]">🚦</button>
@@ -11012,10 +11015,10 @@ out center body;`;
   :global(.drag-hint) { position: absolute; top: -8px; right: -8px; width: 16px; height: 16px; background: #fb923c; border-radius: 50%; font-size: 9px; display: flex; align-items: center; justify-content: center; color: white; border: 2px solid rgba(0,0,0,0.3); }
   @keyframes drag-pulse { 0%, 100% { border-color: #fb923c; } 50% { border-color: #fdba74; } }
   :global(.route-pin) { width: 48px; height: 48px; font-size: 17px; border-width: 3px; }
-  :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%) rotate(var(--map-counter-rotate, 0deg)); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
+  :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
   :global(.marker-name-label) {
-    position: absolute; top: -26px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
+    position: absolute; top: -26px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
     transform-origin: bottom center;
     background: rgba(102,126,234,0.9); color: #fff;
     font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px;
