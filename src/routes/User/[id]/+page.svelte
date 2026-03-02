@@ -4605,7 +4605,8 @@
         const nearIdx = lastRouteIndex;
         const distToRoute = getDistance(latitude, longitude, cachedRouteCoords[nearIdx][0], cachedRouteCoords[nearIdx][1]);
         // Snap threshold scales with GPS accuracy (poor GPS = more aggressive snap)
-        const snapThreshold = Math.max(30, Math.min(acc * 1.5, 200));
+        // จำกัดที่ 80m เพื่อป้องกัน snap ที่ไกลเกินจนดูเหมือนวาร์ป
+        const snapThreshold = Math.max(30, Math.min(acc * 1.2, 80));
         if (distToRoute < snapThreshold && nearIdx < cachedRouteCoords.length - 1) {
           const [lat1, lng1] = cachedRouteCoords[nearIdx];
           const [lat2, lng2] = cachedRouteCoords[nearIdx + 1];
@@ -4627,10 +4628,16 @@
       if (animReady) {
         const jumpDist = getDistance(animCurrentLat, animCurrentLng, snapLat, snapLng);
         const timeSec = animDuration / 1000;
-        const maxJump = Math.max((currentSpeed / 3.6) * timeSec * 4, 200); // 4x speed or 200m min
-        if (jumpDist > maxJump && jumpDist > 500) {
-          // GPS jumped impossibly far - extend animation duration to smooth it
-          animDuration = Math.min(animDuration * 2, 3000);
+        const maxReasonable = Math.max((currentSpeed / 3.6) * timeSec * 3, 50); // 3x speed or 50m min
+        if (jumpDist > maxReasonable) {
+          // GPS jumped too far — extend animation to smooth instead of teleport
+          animDuration = Math.min(Math.max(animDuration * 1.5, 1500), 3000);
+        }
+        // Completely reject impossible jumps (> 8x expected distance and > 200m)
+        if (jumpDist > maxReasonable * 3 && jumpDist > 200) {
+          // Ignore this GPS update entirely — hold current position
+          snapLat = animCurrentLat;
+          snapLng = animCurrentLng;
         }
       }
 
@@ -4706,11 +4713,18 @@
     const showHeading = currentHeading !== null || _deviceCompassHeading !== null;
 
     if (currentLocationMarker) {
-      currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
+      // ขณะนำทาง ให้ animation loop (startSmoothLoop) จัดการตำแหน่ง marker
+      // อัพเดทตรงนี้เฉพาะตอนไม่ได้นำทาง เพื่อไม่ให้ marker วาร์ป
+      if (!isNavigating || !animReady) {
+        currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
+      }
       if (headingMarkerElement) {
         const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
         if (beam) {
-          beam.style.transform = `rotate(${headingDeg}deg)`;
+          // ขณะนำทาง heading จะ smooth โดย animation loop
+          if (!isNavigating || !animReady) {
+            beam.style.transform = `rotate(${headingDeg}deg)`;
+          }
           beam.style.opacity = showHeading ? '1' : '0';
         }
       }
@@ -5825,6 +5839,98 @@
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
     });
+  }
+
+  // Patch leaflet-rotate touchGestures เพื่อแยก pinch-zoom ออกจาก rotation
+  // ปัญหา: plugin ดั้งเดิมทำ zoom + rotation พร้อมกันโดยไม่มี threshold
+  // ทำให้ pinch zoom นิ้วเอียงนิดเดียวก็หมุนแผนที่
+  function patchTouchGestureRotation() {
+    const m = map as any;
+    if (!m?.touchGestures) return;
+    const tg = m.touchGestures;
+    const origOnTouchMove = tg._onTouchMove;
+    if (!origOnTouchMove) return;
+
+    // State สำหรับแยก gesture
+    let gestureDecided = false;
+    let gestureIsRotation = false;
+    let accumAngleDeg = 0;
+    let accumScaleRatio = 0;
+    let sampleCount = 0;
+
+    const origOnTouchStart = tg._onTouchStart;
+    tg._onTouchStart = function(e: TouchEvent) {
+      // Reset gesture state
+      gestureDecided = false;
+      gestureIsRotation = false;
+      accumAngleDeg = 0;
+      accumScaleRatio = 0;
+      sampleCount = 0;
+      origOnTouchStart.call(this, e);
+    };
+
+    tg._onTouchMove = function(e: TouchEvent) {
+      if (!e.touches || e.touches.length !== 2 || !(this._zooming || this._rotating)) {
+        return;
+      }
+
+      const p1 = m.mouseEventToContainerPoint(e.touches[0]);
+      const p2 = m.mouseEventToContainerPoint(e.touches[1]);
+      const vector = p1.subtract(p2);
+      const currentDist = p1.distanceTo(p2);
+
+      // คำนวณ angle delta จาก start
+      if (this._rotating && this._startDist > 0) {
+        const theta = Math.atan(vector.x / vector.y);
+        let angleDelta = (theta - this._startTheta) * (180 / Math.PI);
+        if (vector.y < 0) angleDelta += 180;
+        // Normalize to [-180, 180]
+        angleDelta = ((angleDelta + 540) % 360) - 180;
+
+        const scaleRatio = Math.abs(currentDist / this._startDist - 1);
+
+        if (!gestureDecided) {
+          accumAngleDeg += Math.abs(angleDelta);
+          accumScaleRatio += scaleRatio;
+          sampleCount++;
+
+          // ตัดสินหลังรวบรวมข้อมูลพอ (5 samples)
+          if (sampleCount >= 5) {
+            const avgAngle = accumAngleDeg / sampleCount;
+            const avgScale = accumScaleRatio / sampleCount;
+
+            // ถ้ามุมหมุนเฉลี่ย > 8 องศา และ มุม > scale*80 → เป็นการหมุน
+            // ถ้า scale เปลี่ยนเยอะ แต่มุมเปลี่ยนน้อย → เป็น zoom
+            if (avgAngle > 8 && avgAngle > avgScale * 80) {
+              gestureIsRotation = true;
+            } else {
+              gestureIsRotation = false;
+            }
+            gestureDecided = true;
+          }
+        }
+
+        // ยังไม่ตัดสินหรือ gesture เป็น zoom → suppress rotation
+        if (!gestureDecided || !gestureIsRotation) {
+          // ปิด rotation ชั่วคราวแล้วเรียก original
+          const wasRotating = this._rotating;
+          this._rotating = false;
+          origOnTouchMove.call(this, e);
+          this._rotating = wasRotating;
+          return;
+        }
+      }
+
+      // Gesture เป็น rotation → เรียกปกติ (ทั้ง zoom + rotation)
+      origOnTouchMove.call(this, e);
+    };
+
+    const origOnTouchEnd = tg._onTouchEnd;
+    tg._onTouchEnd = function(e: TouchEvent) {
+      gestureDecided = false;
+      gestureIsRotation = false;
+      origOnTouchEnd.call(this, e);
+    };
   }
 
   // ล็อค/ปลดล็อค rotation ตามสถานะเส้นทาง
@@ -7623,6 +7729,8 @@ out center body;`;
 
       // ═══ Camera rotation listener (leaflet-rotate) ═══
       setupCamRotateListener();
+      // ═══ Patch: แยก pinch-zoom ไม่ให้หมุนแผนที่ แต่สองนิ้วหมุนยังทำงานปกติ ═══
+      patchTouchGestureRotation();
 
       // ═══ Follow mode: disable on manual drag ═══
       map.on('dragstart', () => { if (!isNavigating) isFollowMode = false; });
