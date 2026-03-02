@@ -5841,95 +5841,74 @@
     });
   }
 
-  // Patch leaflet-rotate touchGestures เพื่อแยก pinch-zoom ออกจาก rotation
-  // ปัญหา: plugin ดั้งเดิมทำ zoom + rotation พร้อมกันโดยไม่มี threshold
-  // ทำให้ pinch zoom นิ้วเอียงนิดเดียวก็หมุนแผนที่
+  // Patch leaflet-rotate: pinch-zoom ห้ามหมุนเด็ดขาด, สองนิ้วหมุนถึงจะหมุนได้
   function patchTouchGestureRotation() {
     const m = map as any;
     if (!m?.touchGestures) return;
     const tg = m.touchGestures;
-    const origOnTouchMove = tg._onTouchMove;
-    if (!origOnTouchMove) return;
+    const origMove = tg._onTouchMove;
+    const origStart = tg._onTouchStart;
+    const origEnd = tg._onTouchEnd;
+    if (!origMove) return;
 
-    // State สำหรับแยก gesture
-    let gestureDecided = false;
-    let gestureIsRotation = false;
-    let accumAngleDeg = 0;
-    let accumScaleRatio = 0;
-    let sampleCount = 0;
+    let gesture: 'undecided' | 'zoom' | 'rotate' = 'undecided';
+    let startAngle = 0;
+    let bearingAtStart = 0; // เก็บ bearing ตอน touchstart เพื่อ restore ถ้า zoom
 
-    const origOnTouchStart = tg._onTouchStart;
     tg._onTouchStart = function(e: TouchEvent) {
-      // Reset gesture state
-      gestureDecided = false;
-      gestureIsRotation = false;
-      accumAngleDeg = 0;
-      accumScaleRatio = 0;
-      sampleCount = 0;
-      origOnTouchStart.call(this, e);
+      gesture = 'undecided';
+      bearingAtStart = m.getBearing?.() || 0;
+      origStart.call(this, e);
+      if (e.touches?.length === 2) {
+        const p1 = m.mouseEventToContainerPoint(e.touches[0]);
+        const p2 = m.mouseEventToContainerPoint(e.touches[1]);
+        startAngle = Math.atan2(p1.x - p2.x, p1.y - p2.y);
+      }
     };
 
     tg._onTouchMove = function(e: TouchEvent) {
-      if (!e.touches || e.touches.length !== 2 || !(this._zooming || this._rotating)) {
+      if (!e.touches || e.touches.length !== 2 || !(this._zooming || this._rotating)) return;
+
+      if (this._rotating && gesture === 'undecided' && this._startDist > 0) {
+        const p1 = m.mouseEventToContainerPoint(e.touches[0]);
+        const p2 = m.mouseEventToContainerPoint(e.touches[1]);
+        const dist = p1.distanceTo(p2);
+        const angle = Math.atan2(p1.x - p2.x, p1.y - p2.y);
+        const scaleDelta = Math.abs(dist / this._startDist - 1);
+        let angleDeg = Math.abs(angle - startAngle) * (180 / Math.PI);
+        if (angleDeg > 180) angleDeg = 360 - angleDeg;
+
+        // scale เปลี่ยนแม้แค่ 2% → zoom ทันที lock rotation ตลอด gesture
+        if (scaleDelta > 0.02) {
+          gesture = 'zoom';
+          // คืน bearing เดิมกันรั่ว
+          if (m.setBearing) m.setBearing(bearingAtStart);
+        }
+        // มุมหมุน > 15° โดยที่ scale แทบไม่เปลี่ยน → rotation จริง
+        else if (angleDeg > 15 && scaleDelta < 0.02) {
+          gesture = 'rotate';
+        }
+      }
+
+      // ไม่ใช่ rotation ชัดเจน → suppress rotation เด็ดขาด
+      if (this._rotating && gesture !== 'rotate') {
+        const was = this._rotating;
+        this._rotating = false;
+        origMove.call(this, e);
+        this._rotating = was;
+        // ถ้าเป็น zoom ให้ force bearing คืนค่าเดิมทุก frame
+        if (gesture === 'zoom' && m.setBearing) {
+          m.setBearing(bearingAtStart);
+        }
         return;
       }
 
-      const p1 = m.mouseEventToContainerPoint(e.touches[0]);
-      const p2 = m.mouseEventToContainerPoint(e.touches[1]);
-      const vector = p1.subtract(p2);
-      const currentDist = p1.distanceTo(p2);
-
-      // คำนวณ angle delta จาก start
-      if (this._rotating && this._startDist > 0) {
-        const theta = Math.atan(vector.x / vector.y);
-        let angleDelta = (theta - this._startTheta) * (180 / Math.PI);
-        if (vector.y < 0) angleDelta += 180;
-        // Normalize to [-180, 180]
-        angleDelta = ((angleDelta + 540) % 360) - 180;
-
-        const scaleRatio = Math.abs(currentDist / this._startDist - 1);
-
-        if (!gestureDecided) {
-          accumAngleDeg += Math.abs(angleDelta);
-          accumScaleRatio += scaleRatio;
-          sampleCount++;
-
-          // ตัดสินหลังรวบรวมข้อมูลพอ (5 samples)
-          if (sampleCount >= 5) {
-            const avgAngle = accumAngleDeg / sampleCount;
-            const avgScale = accumScaleRatio / sampleCount;
-
-            // ถ้ามุมหมุนเฉลี่ย > 8 องศา และ มุม > scale*80 → เป็นการหมุน
-            // ถ้า scale เปลี่ยนเยอะ แต่มุมเปลี่ยนน้อย → เป็น zoom
-            if (avgAngle > 8 && avgAngle > avgScale * 80) {
-              gestureIsRotation = true;
-            } else {
-              gestureIsRotation = false;
-            }
-            gestureDecided = true;
-          }
-        }
-
-        // ยังไม่ตัดสินหรือ gesture เป็น zoom → suppress rotation
-        if (!gestureDecided || !gestureIsRotation) {
-          // ปิด rotation ชั่วคราวแล้วเรียก original
-          const wasRotating = this._rotating;
-          this._rotating = false;
-          origOnTouchMove.call(this, e);
-          this._rotating = wasRotating;
-          return;
-        }
-      }
-
-      // Gesture เป็น rotation → เรียกปกติ (ทั้ง zoom + rotation)
-      origOnTouchMove.call(this, e);
+      origMove.call(this, e);
     };
 
-    const origOnTouchEnd = tg._onTouchEnd;
     tg._onTouchEnd = function(e: TouchEvent) {
-      gestureDecided = false;
-      gestureIsRotation = false;
-      origOnTouchEnd.call(this, e);
+      gesture = 'undecided';
+      origEnd.call(this, e);
     };
   }
 
