@@ -11080,7 +11080,7 @@ out center body;`;
 
 
   .toast {
-    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 8px;
     padding: 10px 14px 10px 12px; border-radius: 12px;
     font-size: 12px; font-weight: 500; z-index: 9999;
