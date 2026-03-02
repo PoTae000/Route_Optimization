@@ -77,7 +77,16 @@
       deleteAll: '-',
       vehicle: 'V',
       shareETA: 'S',
-      carMode: 'C'
+      carMode: 'C',
+      clearNearby: 'x',
+      toggleTraffic: 'T',
+      toggleVoice: 'V',
+      zoomIn: '+',
+      zoomOut: '-',
+      openGoogleMaps: 'G',
+      routePreference: 'R',
+      myLocation: 'L',
+      summary: 'i'
     };
     return icons[type] || '*';
   }
@@ -96,7 +105,16 @@
       deleteAll: 'ลบจุดทั้งหมด',
       vehicle: `เปลี่ยนเป็น${action.params.type === 'ev' ? 'รถไฟฟ้า' : 'รถน้ำมัน'}`,
       shareETA: 'แชร์เวลาถึง',
-      carMode: 'โหมดรถยนต์'
+      carMode: 'โหมดรถยนต์',
+      clearNearby: 'ล้างผลค้นหา',
+      toggleTraffic: 'เปิด/ปิดจราจร',
+      toggleVoice: 'เปิด/ปิดเสียง',
+      zoomIn: 'ซูมเข้า',
+      zoomOut: 'ซูมออก',
+      openGoogleMaps: 'เปิด Google Maps',
+      routePreference: `เปลี่ยนเส้นทาง ${action.params.pref || ''}`.trim(),
+      myLocation: 'ตำแหน่งปัจจุบัน',
+      summary: 'สรุปสถานะ'
     };
     return labels[action.type] || action.type;
   }

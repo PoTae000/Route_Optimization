@@ -4130,6 +4130,56 @@
         case 'carMode':
           toggleCarMode();
           break;
+        case 'clearNearby':
+          if ((window as any).__nearbyMarkers) {
+            (window as any).__nearbyMarkers.forEach((m: any) => m.remove());
+            (window as any).__nearbyMarkers = [];
+          }
+          lastNearbyResults = [];
+          lastNearbyResultsText = '';
+          showNotification('ล้างผลค้นหาแล้ว', 'success');
+          break;
+        case 'toggleTraffic':
+          toggleTraffic();
+          showNotification(showTraffic ? 'เปิดแสดงจราจรแล้ว' : 'ปิดแสดงจราจรแล้ว', 'success');
+          break;
+        case 'toggleVoice':
+          toggleVoice();
+          showNotification(voiceEnabled ? 'เปิดเสียงนำทางแล้ว' : 'ปิดเสียงนำทางแล้ว', 'success');
+          break;
+        case 'zoomIn':
+          map?.zoomIn();
+          break;
+        case 'zoomOut':
+          map?.zoomOut();
+          break;
+        case 'openGoogleMaps':
+          openInGoogleMaps();
+          break;
+        case 'routePreference': {
+          const pref = params.pref as typeof routePreference;
+          if (pref && ['fastest', 'shortest', 'no_tolls', 'no_highways'].includes(pref)) {
+            toggleRoutePreference(pref);
+            const prefLabels: Record<string, string> = { fastest: 'เร็วสุด', shortest: 'สั้นสุด', no_tolls: 'เลี่ยงด่วน', no_highways: 'เลี่ยงมอเตอร์เวย์' };
+            showNotification(`เปลี่ยนเส้นทาง: ${prefLabels[pref] || pref}`, 'success');
+          }
+          break;
+        }
+        case 'myLocation':
+          centerOnCurrentLocation();
+          break;
+        case 'summary': {
+          const summaryParts: string[] = [];
+          summaryParts.push(`จุดแวะ: ${allDeliveryPoints.length} จุด (ไปแล้ว ${allDeliveryPoints.filter(p => p.completed).length})`);
+          if (optimizedRoute) summaryParts.push(`ระยะทาง: ${(optimizedRoute.distance / 1000).toFixed(1)} กม., เวลา: ${Math.round(optimizedRoute.duration / 60)} นาที`);
+          summaryParts.push(`นำทาง: ${isNavigating ? 'กำลังนำทาง' : 'ไม่ได้นำทาง'}`);
+          summaryParts.push(`จราจร: ${showTraffic ? 'เปิด' : 'ปิด'}, เสียง: ${voiceEnabled ? 'เปิด' : 'ปิด'}`);
+          summaryParts.push(`เส้นทาง: ${routePreference}`);
+          if (aiChatPanelRef) {
+            aiChatPanelRef.injectNearbyResults(summaryParts.join('\n'));
+          }
+          break;
+        }
       }
     } catch (err: any) {
       showNotification(`ดำเนินการไม่สำเร็จ: ${err.message}`, 'error');
@@ -11030,7 +11080,7 @@ out center body;`;
 
 
   .toast {
-    position: fixed; bottom: 170px; left: 50%; transform: translateX(-50%);
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 8px;
     padding: 10px 14px 10px 12px; border-radius: 12px;
     font-size: 12px; font-weight: 500; z-index: 9999;
