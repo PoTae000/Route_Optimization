@@ -120,4 +120,5 @@ export interface AIChatContext {
   pointNames?: string;
   currentLat?: number;
   currentLng?: number;
+  nearbyResults?: string;
 }

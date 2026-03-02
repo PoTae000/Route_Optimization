@@ -486,6 +486,10 @@
   // perf: direct alias instead of .map(spread) - User page has no customer system
   $: allDeliveryPoints = deliveryPoints;
 
+  // Nearby search results for AI reference
+  let lastNearbyResults: {index: number; name: string; lat: number; lon: number; distance: string}[] = [];
+  let lastNearbyResultsText = '';
+
   // AI Chat context (reactive - updates when points/route/nav changes)
   $: aiChatContext = (() => {
     const bounds = map?.getBounds?.();
@@ -508,7 +512,8 @@
       mapBoundsNorth: bounds?.getNorth?.(),
       mapBoundsSouth: bounds?.getSouth?.(),
       mapBoundsEast: bounds?.getEast?.(),
-      mapBoundsWest: bounds?.getWest?.()
+      mapBoundsWest: bounds?.getWest?.(),
+      nearbyResults: lastNearbyResultsText || undefined
     } as AIChatContext;
   })();
 
@@ -1435,6 +1440,7 @@
   let aiSuggestion: AIRouteSuggestionData | null = null;
   let isAIPlanning = false;
   let aiChatOpen = false;
+  let aiChatPanelRef: AIChatPanel;
 
   // Save/Restore route state across page refresh
   function saveRouteState() {
@@ -4013,6 +4019,15 @@
               // เรียงตามระยะใกล้สุดก่อน
               elements.sort((a: any, b: any) => getDistance(lat, lng, a.lat, a.lon) - getDistance(lat, lng, b.lat, b.lon));
 
+              // เก็บผลลัพธ์สำหรับ AI อ้างอิง
+              lastNearbyResults = elements.map((el: any, idx: number) => {
+                const name = el.tags?.name || el.tags?.['name:th'] || `${nearbyKeyword || nearbyType} #${idx + 1}`;
+                const dist = getDistance(lat, lng, el.lat, el.lon);
+                const distText = dist < 1 ? `${Math.round(dist * 1000)}m` : `${dist.toFixed(1)}km`;
+                return { index: idx + 1, name, lat: el.lat, lon: el.lon, distance: distText };
+              });
+              lastNearbyResultsText = lastNearbyResults.map(r => `${r.index}. ${r.name} (${r.distance})`).join(', ');
+
               elements.forEach((el: any, idx: number) => {
                 const name = el.tags?.name || el.tags?.['name:th'] || `${nearbyKeyword || nearbyType} #${idx + 1}`;
                 const dist = getDistance(lat, lng, el.lat, el.lon);
@@ -4040,6 +4055,12 @@
               }
               showNotification(`พบ ${elements.length} แห่ง ใกล้คุณ`, 'success');
 
+              // Inject nearby results into AI chat
+              if (aiChatPanelRef) {
+                const resultLines = lastNearbyResults.map(r => `${r.index}. ${r.name} (${r.distance})`).join('\n');
+                aiChatPanelRef.injectNearbyResults(resultLines);
+              }
+
               // ลบ markers อัตโนมัติหลัง 60 วินาที
               setTimeout(() => {
                 if ((window as any).__nearbyMarkers) {
@@ -4051,6 +4072,18 @@
           } catch (err) {
             showNotification('ค้นหาสถานที่ไม่สำเร็จ', 'error');
           }
+          break;
+        }
+        case 'addNearbyPoint': {
+          const idx = parseInt(params.index);
+          if (!idx || idx < 1 || idx > lastNearbyResults.length) {
+            showNotification(`ไม่พบจุดที่ ${idx} ในผลลัพธ์`, 'error');
+            break;
+          }
+          const nr = lastNearbyResults[idx - 1];
+          await addPointFromAI(nr.name, nr.lat, nr.lon, nr.name);
+          showNotification(`เพิ่มจุด "${nr.name}" สำเร็จ`, 'success');
+          if (map) map.setView([nr.lat, nr.lon], 15, { animate: true });
           break;
         }
         case 'vehicle':
@@ -9322,7 +9355,7 @@ out center body;`;
 
 <!-- AI Chat Panel (floating) -->
 {#if aiAvailable && !isNavigating}
-  <AIChatPanel context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} />
+  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} />
 {/if}
 
 <!-- AI Route Suggestion Modal -->

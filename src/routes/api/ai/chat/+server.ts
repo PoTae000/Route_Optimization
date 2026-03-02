@@ -37,7 +37,8 @@ ${context.vehicleType ? `- ยานพาหนะ: ${context.vehicleType === '
 ${context.pointNames ? `- รายชื่อจุดแวะ: ${context.pointNames}` : ''}
 ${context.currentLat && context.currentLng ? `- ตำแหน่ง GPS ปัจจุบัน: ${context.currentLat.toFixed(5)}, ${context.currentLng.toFixed(5)}` : ''}
 ${context.mapCenterLat && context.mapCenterLng ? `- แผนที่กำลังดูบริเวณ: ${context.mapCenterLat.toFixed(5)}, ${context.mapCenterLng.toFixed(5)} (zoom ${context.mapZoom ?? '?'})` : ''}
-${context.mapBoundsNorth ? `- ขอบแผนที่: เหนือ ${context.mapBoundsNorth.toFixed(5)}, ใต้ ${context.mapBoundsSouth.toFixed(5)}, ตะวันออก ${context.mapBoundsEast.toFixed(5)}, ตะวันตก ${context.mapBoundsWest.toFixed(5)}` : ''}`
+${context.mapBoundsNorth ? `- ขอบแผนที่: เหนือ ${context.mapBoundsNorth.toFixed(5)}, ใต้ ${context.mapBoundsSouth.toFixed(5)}, ตะวันออก ${context.mapBoundsEast.toFixed(5)}, ตะวันตก ${context.mapBoundsWest.toFixed(5)}` : ''}
+${context.nearbyResults ? `- ผลลัพธ์ค้นหาล่าสุด: ${context.nearbyResults}` : ''}`
       : '';
 
     const systemPrompt = `คุณคือ "ผู้ช่วย AI" อัจฉริยะ ในแอปนำทางและวางแผนเส้นทางของไทย
@@ -68,6 +69,7 @@ ACTION — สั่งการระบบ:
 <<ACTION:searchAndAdd|query=ชื่อสถานที่>> — ค้นหาและเพิ่มจุดแวะ
 <<ACTION:addPoint|name=ชื่อ|lat=LAT|lng=LNG>> — เพิ่มจุดที่พิกัด
 <<ACTION:searchNearby|type=ประเภท|keyword=คำค้น>> — ค้นหาสถานที่ใกล้ผู้ใช้ (เช่น type=convenience_store keyword=7-Eleven, type=cafe, type=restaurant, type=fuel, type=hospital, type=atm, type=temple, type=hotel, type=pharmacy, type=parking)
+<<ACTION:addNearbyPoint|index=N>> — เพิ่มจุดแวะจากผลลัพธ์ searchNearby ที่ลำดับ N (ใช้ได้เมื่อมีผลลัพธ์ nearby อยู่)
 <<ACTION:navigate>> — เริ่มนำทาง
 <<ACTION:stopNav>> — หยุดนำทาง
 <<ACTION:calcRoute>> — คำนวณเส้นทาง
@@ -86,6 +88,12 @@ ACTION — สั่งการระบบ:
 ผู้ใช้: "หาปั๊มน้ำมันใกล้ๆ"
 ตอบ: "หาปั๊มน้ำมันใกล้ตำแหน่งคุณให้เลย <<ACTION:searchNearby|type=fuel|keyword=>>"
 
+ผู้ใช้: "เพิ่มจุดที่ 2" (เมื่อมีผลลัพธ์ nearby อยู่)
+ตอบ: "เพิ่มจุดที่ 2 ให้แล้วนะ <<ACTION:addNearbyPoint|index=2>>"
+
+ผู้ใช้: "เพิ่มจุดที่ 1 กับ 3" (เมื่อมีผลลัพธ์ nearby อยู่)
+ตอบ: "เพิ่มจุดที่ 1 และ 3 ให้แล้วนะ <<ACTION:addNearbyPoint|index=1>> <<ACTION:addNearbyPoint|index=3>>"
+
 ผู้ใช้: "เพิ่มจุดที่สยามพารากอน"
 ตอบ: "เพิ่มจุดแวะที่สยามพารากอนให้แล้วนะ <<ACTION:searchAndAdd|query=สยามพารากอน กรุงเทพ>>"
 
@@ -100,6 +108,9 @@ ACTION — สั่งการระบบ:
 - ใส่ ACTION tag เฉพาะเมื่อผู้ใช้สั่งให้ทำจริงๆ
 - ถ้าแค่ถามข้อมูลทั่วไป ไม่ต้องใส่ ACTION
 - เมื่อผู้ใช้ขอ "หา...ใกล้ฉัน/ใกล้ๆ" ให้ใช้ searchNearby เสมอ เพราะจะค้นหาจากแผนที่จริง
+- เมื่อ searchNearby เจอผลลัพธ์ ระบบจะแสดงรายการให้ผู้ใช้เห็นอัตโนมัติ ไม่ต้องเพิ่มจุดเอง รอให้ผู้ใช้เลือกก่อน
+- เมื่อผู้ใช้บอก "เพิ่มจุดที่ N" และมีผลลัพธ์ nearby อยู่ ให้ใช้ addNearbyPoint|index=N
+- ถ้าผู้ใช้บอก "เพิ่มทั้งหมด" ให้ใช้ addNearbyPoint หลายตัว ตามจำนวนผลลัพธ์
 - ห้ามใช้ addPoint กับพิกัดที่เดาเอง ถ้าไม่รู้พิกัดแน่ชัด ให้ใช้ searchAndAdd แทนเสมอ (ระบบจะค้นหาพิกัดจริงจาก Nominatim)
 - ห้ามแต่งพิกัด lat/lng เอง เด็ดขาด ใช้ searchAndAdd หรือ searchNearby เท่านั้น
 - ตอบได้ทุกเรื่อง ไม่จำกัดแค่เรื่องเส้นทาง

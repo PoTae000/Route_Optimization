@@ -228,6 +228,13 @@
     messageActions = {};
     executedActions = new Set();
   }
+
+  // Public: inject nearby search results as assistant message
+  export function injectNearbyResults(resultLines: string) {
+    const content = `พบสถานที่ใกล้เคียง:\n${resultLines}\n\nบอกได้เลยว่าอยากเพิ่มจุดไหน เช่น "เพิ่มจุดที่ 1"`;
+    messages = [...messages, { role: 'assistant', content }];
+    scrollToBottom();
+  }
 </script>
 
 <!-- Floating toggle button -->
