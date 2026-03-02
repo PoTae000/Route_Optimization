@@ -154,4 +154,24 @@ export interface TripRecapData {
   startTime: Date;
   endTime: Date;
   aiSummary?: string;
+  // F17: Trip Cost Split
+  fuelCost?: number;
+  tollCost?: number;
+}
+
+// F18: Elevation Profile
+export interface ElevationPoint {
+  dist: number;  // distance along route in km
+  elev: number;  // elevation in meters
+}
+
+// F8: Smart Shortcut
+export interface LearnedShortcut {
+  fromLat: number;
+  fromLng: number;
+  toLat: number;
+  toLng: number;
+  savedMinutes: number;
+  count: number;
+  lastUsed: number;
 }

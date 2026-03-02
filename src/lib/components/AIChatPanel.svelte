@@ -31,6 +31,22 @@
   let speechRecognition: any = null;
   let interimTranscript = '';
 
+  // TTS Toggle — ปิด/เปิดเสียง AI ตอบ
+  let aiSpeakEnabled = true;
+  function loadTTSSetting() {
+    try {
+      const v = localStorage.getItem(`aiTTS_${userId}`);
+      if (v !== null) aiSpeakEnabled = v === '1';
+    } catch {}
+  }
+  function saveTTSSetting() {
+    try { localStorage.setItem(`aiTTS_${userId}`, aiSpeakEnabled ? '1' : '0'); } catch {}
+  }
+  function toggleAISpeak() {
+    aiSpeakEnabled = !aiSpeakEnabled;
+    saveTTSSetting();
+  }
+
   // Vision (B1)
   let pendingImage: { base64: string; mimeType: string; preview: string } | null = null;
   let fileInput: HTMLInputElement;
@@ -102,6 +118,7 @@
   }
 
   onMount(() => {
+    loadTTSSetting();
     loadMessages();
     if (messages.length > 0) {
       scrollToBottom();
@@ -183,6 +200,8 @@
     { label: 'จุดชมวิว', text: 'หาจุดชมวิวและที่เที่ยวระหว่างทาง' },
     // C5: Toll Calculator
     { label: 'ค่าทางด่วน', text: 'คำนวณค่าทางด่วนให้หน่อย' },
+    // F18: Elevation Profile
+    { label: 'ความสูงเส้นทาง', text: 'แสดงกราฟความสูงของเส้นทาง' },
     // C2: Night Safety (night only)
     { label: 'ที่พักใกล้ๆ', text: 'หาที่พัก/โรงแรมใกล้ฉัน', nightOnly: true },
   ];
@@ -243,7 +262,8 @@
       playlistSuggestion: 'M',
       fuelPrice: '$',
       scenicSearch: 'V',
-      tollCompare: 'B'
+      tollCompare: 'B',
+      showElevation: 'E'
     };
     return icons[type] || '*';
   }
@@ -275,7 +295,8 @@
       playlistSuggestion: 'เพลย์ลิสต์แนะนำ',
       fuelPrice: 'ราคาน้ำมัน',
       scenicSearch: 'ค้นหาจุดชมวิว',
-      tollCompare: 'เปรียบเทียบค่าทางด่วน'
+      tollCompare: 'เปรียบเทียบค่าทางด่วน',
+      showElevation: 'แสดงกราฟความสูง'
     };
     return labels[action.type] || action.type;
   }
@@ -570,10 +591,12 @@
             }
           }
         }
-        // C1: Auto-speak AI response (strip ACTION tags)
-        const speakText = stripActions(lastMsg.content).replace(/[#*_~`>|]/g, '').trim();
-        if (speakText) {
-          dispatch('speak', { text: speakText });
+        // C1: Auto-speak AI response (strip ACTION tags) — check TTS toggle
+        if (aiSpeakEnabled) {
+          const speakText = stripActions(lastMsg.content).replace(/[#*_~`>|]/g, '').trim();
+          if (speakText) {
+            dispatch('speak', { text: speakText });
+          }
         }
       }
 
@@ -647,11 +670,21 @@
           </div>
         </div>
       </div>
-      {#if messages.length > 0}
-        <button class="ai-clear-btn" on:click={clearChat} title="ล้างแชท">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+      <div class="ai-header-actions">
+        <!-- TTS Toggle -->
+        <button class="ai-tts-btn" class:muted={!aiSpeakEnabled} on:click={toggleAISpeak} title={aiSpeakEnabled ? 'ปิดเสียง AI' : 'เปิดเสียง AI'}>
+          {#if aiSpeakEnabled}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+          {/if}
         </button>
-      {/if}
+        {#if messages.length > 0}
+          <button class="ai-clear-btn" on:click={clearChat} title="ล้างแชท">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          </button>
+        {/if}
+      </div>
     </div>
 
     <div class="ai-chat-messages" bind:this={messagesContainer}>
@@ -890,6 +923,25 @@
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+.ai-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-tts-btn {
+  background: none;
+  border: none;
+  color: #4ade80;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.ai-tts-btn:hover { background: rgba(0, 255, 136, 0.1); }
+.ai-tts-btn.muted { color: #71717a; }
+.ai-tts-btn.muted:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
 
 .ai-clear-btn {
   background: none;

@@ -14,7 +14,7 @@
   import AIChatPanel from '$lib/components/AIChatPanel.svelte';
   import AIRouteSuggestion from '$lib/components/AIRouteSuggestion.svelte';
   import TripRecap from '$lib/components/TripRecap.svelte';
-  import type { AIRouteSuggestionData, AIChatContext, TripRecapData, TripPattern } from '$lib/types';
+  import type { AIRouteSuggestionData, AIChatContext, TripRecapData, TripPattern, ElevationPoint, LearnedShortcut } from '$lib/types';
   import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch } from '$lib/utils/osrm';
 
   // Silence all console output in production
@@ -1613,6 +1613,217 @@
   let tripRecordCoords: [number, number][] = [];
   let showTripRecap = false;
   let tripRecapData: TripRecapData | null = null;
+
+  // ═══ F18: Elevation Profile ═══
+  let elevationData: ElevationPoint[] = [];
+  let showElevation = false;
+
+  async function fetchElevationProfile() {
+    if (!optimizedRoute?.route?.geometry?.coordinates) return;
+    const coords = optimizedRoute.route.geometry.coordinates;
+    // Sample ~50 points along route
+    const sampleCount = Math.min(50, coords.length);
+    const step = Math.max(1, Math.floor(coords.length / sampleCount));
+    const lats: number[] = [];
+    const lngs: number[] = [];
+    const dists: number[] = [];
+    let cumDist = 0;
+    for (let i = 0; i < coords.length; i += step) {
+      lats.push(coords[i][1]);
+      lngs.push(coords[i][0]);
+      if (dists.length > 0) {
+        const prevIdx = Math.max(0, i - step);
+        const R = 6371;
+        const dLat = (coords[i][1] - coords[prevIdx][1]) * Math.PI / 180;
+        const dLng = (coords[i][0] - coords[prevIdx][0]) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(coords[prevIdx][1] * Math.PI / 180) * Math.cos(coords[i][1] * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+        cumDist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+      dists.push(cumDist);
+    }
+    try {
+      const res = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`);
+      const data = await res.json();
+      if (data.elevation && Array.isArray(data.elevation)) {
+        elevationData = data.elevation.map((elev: number, i: number) => ({ dist: dists[i], elev }));
+        showElevation = true;
+      }
+    } catch {}
+  }
+
+  function getElevationStats() {
+    if (elevationData.length === 0) return { min: 0, max: 0, totalUp: 0, totalDown: 0, steepWarnings: 0 };
+    let min = Infinity, max = -Infinity, totalUp = 0, totalDown = 0, steepWarnings = 0;
+    for (let i = 0; i < elevationData.length; i++) {
+      const e = elevationData[i].elev;
+      if (e < min) min = e;
+      if (e > max) max = e;
+      if (i > 0) {
+        const diff = e - elevationData[i - 1].elev;
+        const distDiff = (elevationData[i].dist - elevationData[i - 1].dist) * 1000; // km to m
+        if (diff > 0) totalUp += diff;
+        else totalDown += Math.abs(diff);
+        if (distDiff > 0) {
+          const grade = Math.abs(diff) / distDiff * 100;
+          if (grade > 8) steepWarnings++;
+        }
+      }
+    }
+    return { min: Math.round(min), max: Math.round(max), totalUp: Math.round(totalUp), totalDown: Math.round(totalDown), steepWarnings };
+  }
+
+  function getElevationColor(grade: number): string {
+    if (grade < 3) return '#4ade80';
+    if (grade < 6) return '#fbbf24';
+    if (grade < 8) return '#f97316';
+    return '#ef4444';
+  }
+
+  // ═══ F8: Smart Shortcut Learner ═══
+  let learnedShortcuts: LearnedShortcut[] = [];
+
+  function loadShortcuts() {
+    try {
+      const raw = localStorage.getItem(`shortcuts_${currentUser?.id || 'guest'}`);
+      if (raw) learnedShortcuts = JSON.parse(raw);
+    } catch { learnedShortcuts = []; }
+  }
+
+  function saveShortcuts() {
+    try { localStorage.setItem(`shortcuts_${currentUser?.id || 'guest'}`, JSON.stringify(learnedShortcuts.slice(-50))); } catch {}
+  }
+
+  function saveShortcutIfFaster() {
+    if (!navigationStartTime || !currentLocation || tripRecordCoords.length < 5) return;
+    if (!optimizedRoute?.duration) return;
+    const actualDuration = (Date.now() - navigationStartTime.getTime()) / 1000; // seconds
+    const osrmDuration = optimizedRoute.duration; // seconds
+    if (actualDuration < osrmDuration * 0.85 && tripRecordCoords.length >= 2) {
+      const from = tripRecordCoords[0];
+      const to = tripRecordCoords[tripRecordCoords.length - 1];
+      const savedMin = (osrmDuration - actualDuration) / 60;
+      // Check if shortcut already exists (within 500m radius)
+      const existing = learnedShortcuts.find(s =>
+        getDistance(s.fromLat, s.fromLng, from[0], from[1]) < 0.5 &&
+        getDistance(s.toLat, s.toLng, to[0], to[1]) < 0.5
+      );
+      if (existing) {
+        existing.count++;
+        existing.savedMinutes = Math.round((existing.savedMinutes + savedMin) / 2);
+        existing.lastUsed = Date.now();
+      } else {
+        learnedShortcuts.push({
+          fromLat: from[0], fromLng: from[1],
+          toLat: to[0], toLng: to[1],
+          savedMinutes: Math.round(savedMin),
+          count: 1, lastUsed: Date.now()
+        });
+      }
+      saveShortcuts();
+    }
+  }
+
+  function checkForShortcuts() {
+    if (learnedShortcuts.length === 0 || !optimizedRoute?.route?.geometry?.coordinates) return;
+    const coords = optimizedRoute.route.geometry.coordinates;
+    const startCoord = coords[0];
+    const endCoord = coords[coords.length - 1];
+    for (const s of learnedShortcuts) {
+      if (s.count >= 2 &&
+          getDistance(s.fromLat, s.fromLng, startCoord[1], startCoord[0]) < 2 &&
+          getDistance(s.toLat, s.toLng, endCoord[1], endCoord[0]) < 2) {
+        showNotification(`มีทางลัดที่เคยใช้ ประหยัด ~${s.savedMinutes} นาที (ใช้แล้ว ${s.count} ครั้ง)`, 'success');
+        return;
+      }
+    }
+  }
+
+  // ═══ F15: Hands-free Full Voice ═══
+  let handsfreeMode = false;
+  let handsfreeRecognition: any = null;
+
+  function parseVoiceCommand(text: string): boolean {
+    const t = text.trim().toLowerCase();
+    const commands: [RegExp, () => void, string][] = [
+      [/หาปั๊ม|ปั๊มน้ำมัน/, () => handleAIAction({ detail: { type: 'searchNearby', params: { type: 'fuel', keyword: '' } } } as any), 'หาปั๊มน้ำมันให้'],
+      [/หาเซเว่น|เซเว่น|ร้านสะดวกซื้อ/, () => handleAIAction({ detail: { type: 'searchNearby', params: { type: 'convenience_store', keyword: '7-Eleven' } } } as any), 'หาร้านสะดวกซื้อให้'],
+      [/หาร้านอาหาร|ร้านข้าว/, () => handleAIAction({ detail: { type: 'searchNearby', params: { type: 'restaurant', keyword: '' } } } as any), 'หาร้านอาหารให้'],
+      [/หาคาเฟ่|คาเฟ่/, () => handleAIAction({ detail: { type: 'searchNearby', params: { type: 'cafe', keyword: '' } } } as any), 'หาคาเฟ่ให้'],
+      [/ซูมเข้า/, () => { if (map) map.zoomIn(); }, 'ซูมเข้าแล้ว'],
+      [/ซูมออก/, () => { if (map) map.zoomOut(); }, 'ซูมออกแล้ว'],
+      [/หยุดนำทาง|หยุด$/, () => { if (isNavigating) stopNavigation(); }, 'หยุดนำทางแล้ว'],
+      [/ปิดเสียง/, () => { voiceEnabled = false; }, 'ปิดเสียงแล้ว'],
+      [/เปิดเสียง/, () => { voiceEnabled = true; }, 'เปิดเสียงแล้ว'],
+      [/สรุป/, () => handleAIAction({ detail: { type: 'summary', params: {} } } as any), 'กำลังสรุปให้'],
+      [/ค่าทางด่วน|ค่าด่วน/, () => handleAIAction({ detail: { type: 'tollCompare', params: {} } } as any), 'กำลังเทียบค่าทางด่วน'],
+      [/ราคาน้ำมัน/, () => handleAIAction({ detail: { type: 'fuelPrice', params: {} } } as any), 'กำลังดูราคาน้ำมัน'],
+    ];
+    for (const [pattern, action, response] of commands) {
+      if (pattern.test(t)) {
+        action();
+        speak(response);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function startHandsfree() {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      showNotification('เบราว์เซอร์ไม่รองรับ Speech Recognition', 'error');
+      return;
+    }
+    handsfreeRecognition = new SpeechRecognition();
+    handsfreeRecognition.lang = 'th-TH';
+    handsfreeRecognition.continuous = true;
+    handsfreeRecognition.interimResults = false;
+    handsfreeRecognition.maxAlternatives = 1;
+
+    handsfreeRecognition.onresult = (event: any) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          const text = event.results[i][0].transcript;
+          const matched = parseVoiceCommand(text);
+          if (!matched) {
+            speak('ส่งให้ AI แล้ว');
+            if (aiChatPanelRef) aiChatPanelRef.triggerMessage(text);
+          }
+        }
+      }
+    };
+
+    handsfreeRecognition.onend = () => {
+      // Auto-restart if still in handsfree mode
+      if (handsfreeMode && handsfreeRecognition) {
+        try { handsfreeRecognition.start(); } catch {}
+      }
+    };
+
+    handsfreeRecognition.onerror = (event: any) => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        stopHandsfree();
+        showNotification('ไม่ได้รับอนุญาตใช้ไมค์', 'error');
+      }
+    };
+
+    handsfreeMode = true;
+    handsfreeRecognition.start();
+    showNotification('เปิด Hands-free แล้ว พูดคำสั่งได้เลย', 'success');
+  }
+
+  function stopHandsfree() {
+    handsfreeMode = false;
+    if (handsfreeRecognition) {
+      try { handsfreeRecognition.stop(); } catch {}
+      handsfreeRecognition = null;
+    }
+  }
+
+  function toggleHandsfree() {
+    if (handsfreeMode) stopHandsfree();
+    else startHandsfree();
+  }
 
   function recordTripCoord() {
     if (!isNavigating || !currentLocation) return;
@@ -3741,6 +3952,10 @@
       } else {
         showNotification('คำนวณเส้นทางสำเร็จ', 'success');
       }
+      // F18: Fetch elevation profile in background
+      fetchElevationProfile();
+      // F8: Check for learned shortcuts
+      checkForShortcuts();
       // Reset add point mode and hide sidebar after successful route calculation
       if (addPointMode) { addPointMode = false; if (map) map.getContainer().style.cursor = ''; if (clickMarker) { clickMarker.remove(); clickMarker = null; } }
       if (typeof window !== 'undefined' && window.innerWidth <= 1024) {
@@ -4415,6 +4630,20 @@
           }
           break;
         }
+        // F18: Elevation Profile
+        case 'showElevation': {
+          if (!optimizedRoute?.route?.geometry) {
+            showNotification('ยังไม่มีเส้นทาง คำนวณก่อน', 'warning');
+            break;
+          }
+          if (elevationData.length === 0) {
+            showNotification('กำลังดึงข้อมูลความสูง...', 'success');
+            await fetchElevationProfile();
+          } else {
+            showElevation = !showElevation;
+          }
+          break;
+        }
         // C5: Toll Compare
         case 'tollCompare': {
           if (routeAlternatives.length === 0) {
@@ -4993,6 +5222,12 @@
     // B2: Stop proactive alerts
     if (proactiveInterval) { clearInterval(proactiveInterval); proactiveInterval = null; }
 
+    // F8: Learn shortcuts from this trip
+    saveShortcutIfFaster();
+
+    // F15: Stop handsfree if running
+    if (handsfreeMode) stopHandsfree();
+
     // B5: Show Trip Recap if drove > 2 minutes
     if (navigationStartTime && tripRecordCoords.length > 5) {
       const duration = Date.now() - navigationStartTime.getTime();
@@ -5011,6 +5246,10 @@
         const avgSpd = totalDist > 0 ? (totalDist / 1000) / (duration / 3600000) : 0;
         const successCount = deliveryHistory.filter(d => d.status === 'success').length;
 
+        // F17: Calculate fuel and toll costs for trip recap
+        const tripFuelCost = getFuelCostForRoute(totalDist, duration / 1000);
+        const tripTollCost = optimizedRoute?.tollEstimate || (routeAlternatives.length > 0 ? routeAlternatives[0]?.tollEstimate || 0 : 0);
+
         tripRecapData = {
           coords: tripRecordCoords,
           distance: totalDist,
@@ -5020,7 +5259,9 @@
           stopsCount: allDeliveryPoints.length,
           deliveriesSuccess: successCount,
           startTime: navigationStartTime,
-          endTime: new Date()
+          endTime: new Date(),
+          fuelCost: Math.round(tripFuelCost),
+          tollCost: Math.round(tripTollCost)
         };
 
         // Get AI summary in background
@@ -8124,6 +8365,17 @@ out center body;`;
         e.preventDefault();
         toggleTraffic();
         break;
+      case 'w': // F15: Hands-free toggle
+        e.preventDefault();
+        toggleHandsfree();
+        break;
+      case 'e': // F18: Elevation toggle
+        if (optimizedRoute) {
+          e.preventDefault();
+          if (elevationData.length > 0) showElevation = !showElevation;
+          else fetchElevationProfile();
+        }
+        break;
       case 'a': // เพิ่มจุดแวะ
         if (!optimizedRoute && !isNavigating) {
           e.preventDefault();
@@ -8551,6 +8803,9 @@ out center body;`;
 
       // Keyboard shortcuts
       window.addEventListener('keydown', handleKeyboardShortcuts);
+
+      // F8: Load learned shortcuts
+      loadShortcuts();
 
       // Session timeout (30 นาที ไม่ active → logout)
       setupSessionTimeout();
@@ -9874,6 +10129,76 @@ out center body;`;
     {/if}
   </div>
 </div>
+
+<!-- F18: Elevation Profile Panel -->
+{#if showElevation && elevationData.length > 0}
+  {@const eStats = getElevationStats()}
+  {@const elevMaxElev = Math.max(...elevationData.map(d => d.elev))}
+  {@const elevMinElev = Math.min(...elevationData.map(d => d.elev))}
+  {@const elevMaxDist = elevationData[elevationData.length - 1]?.dist || 1}
+  {@const elevRange = elevMaxElev - elevMinElev || 1}
+  <div class="elevation-panel">
+    <div class="elevation-header">
+      <span class="elevation-title">กราฟความสูง</span>
+      <div class="elevation-stats-row">
+        <span class="elev-stat">สูงสุด {eStats.max} ม.</span>
+        <span class="elev-stat">ต่ำสุด {eStats.min} ม.</span>
+        <span class="elev-stat">ขึ้น {eStats.totalUp} ม.</span>
+        <span class="elev-stat">ลง {eStats.totalDown} ม.</span>
+      </div>
+      {#if eStats.steepWarnings > 0}
+        <span class="elev-steep-warn">ช่วงชันมาก ({eStats.steepWarnings} จุด)</span>
+      {/if}
+      <button class="elevation-close" on:click={() => showElevation = false}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <svg class="elevation-chart" viewBox="0 0 400 100" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="elevGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(74, 222, 128, 0.4)"/>
+          <stop offset="100%" stop-color="rgba(74, 222, 128, 0.02)"/>
+        </linearGradient>
+      </defs>
+      <path d="M{elevationData.map(d => `${(d.dist / elevMaxDist) * 400},${100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}`).join(' L')} L400,100 L0,100 Z" fill="url(#elevGrad)"/>
+      <polyline fill="none" stroke="#4ade80" stroke-width="1.5" points="{elevationData.map(d => `${(d.dist / elevMaxDist) * 400},${100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}`).join(' ')}"/>
+      {#each elevationData as d, i}
+        {#if i > 0 && Math.abs(d.elev - elevationData[i-1].elev) / ((d.dist - elevationData[i-1].dist) * 10 || 1) > 8}
+          <circle cx="{(d.dist / elevMaxDist) * 400}" cy="{100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}" r="2.5" fill="#ef4444"/>
+        {/if}
+      {/each}
+    </svg>
+    <div class="elevation-x-axis">
+      <span>0 กม.</span>
+      <span>{(elevationData[elevationData.length - 1]?.dist || 0).toFixed(1)} กม.</span>
+    </div>
+  </div>
+{/if}
+
+<!-- F15: Hands-free indicator -->
+{#if handsfreeMode}
+  <div class="handsfree-indicator">
+    <span class="handsfree-dot"></span>
+    <span>Hands-free</span>
+  </div>
+{/if}
+
+<!-- F15: Hands-free toggle button (show during navigation) -->
+{#if isNavigating}
+  <button class="handsfree-btn" class:active={handsfreeMode} on:click={toggleHandsfree} title="Hands-free Voice">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+      <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+      <line x1="12" y1="19" x2="12" y2="23"/>
+      <line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>
+    {#if handsfreeMode}
+      <svg class="handsfree-wave" viewBox="0 0 16 16" width="10" height="10">
+        <path d="M1 8 Q4 2, 8 8 Q12 14, 15 8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+    {/if}
+  </button>
+{/if}
 
 <!-- AI Chat Panel (floating) -->
 {#if aiAvailable}
@@ -15457,6 +15782,138 @@ out center body;`;
   padding: 4px 10px; border-radius: 6px;
   background: rgba(59, 130, 246, 0.15);
   white-space: nowrap;
+}
+
+/* ═══ F18: Elevation Profile ═══ */
+.elevation-panel {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 380px;
+  max-width: 90vw;
+  background: rgba(26, 26, 46, 0.95);
+  border: 1px solid rgba(0, 255, 136, 0.2);
+  border-radius: 12px;
+  padding: 10px 14px;
+  z-index: 1400;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  animation: chatSlideUp 0.25s ease;
+}
+@keyframes chatSlideUp { from { transform: translateX(-50%) translateY(10px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+.elevation-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.elevation-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #4ade80;
+}
+.elevation-stats-row {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+.elev-stat {
+  font-size: 10px;
+  color: #a1a1aa;
+  background: rgba(255,255,255,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.elev-steep-warn {
+  font-size: 10px;
+  color: #ef4444;
+  font-weight: 600;
+}
+.elevation-close {
+  background: none;
+  border: none;
+  color: #71717a;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  margin-left: auto;
+}
+.elevation-close:hover { color: #e4e4e7; background: rgba(255,255,255,0.08); }
+.elevation-chart {
+  width: 100%;
+  height: 80px;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+}
+.elevation-x-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #71717a;
+  margin-top: 2px;
+}
+
+/* ═══ F15: Hands-free Voice ═══ */
+.handsfree-indicator {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4ade80;
+  z-index: 1600;
+  animation: hfPulse 2s ease-in-out infinite;
+}
+@keyframes hfPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.3); }
+  50% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+}
+.handsfree-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ade80;
+  animation: listeningPulse 1s ease-in-out infinite;
+}
+.handsfree-btn {
+  position: fixed;
+  bottom: 100px;
+  left: 16px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(26, 26, 46, 0.85);
+  color: #a1a1aa;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  z-index: 1500;
+  transition: all 0.2s;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.handsfree-btn:hover { color: #4ade80; border-color: rgba(0,255,136,0.3); background: rgba(0,255,136,0.08); }
+.handsfree-btn.active {
+  color: #4ade80;
+  border-color: rgba(0, 255, 136, 0.5);
+  background: rgba(0, 255, 136, 0.15);
+  animation: hfPulse 2s ease-in-out infinite;
+}
+.handsfree-wave {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
 }
 
 </style>
