@@ -3911,6 +3911,102 @@
           showNotification('ลบจุดแวะทั้งหมดแล้ว', 'success');
           break;
         }
+        case 'searchNearby': {
+          // ค้นหาสถานที่ใกล้ผู้ใช้ผ่าน Overpass API
+          if (!currentLocation) { showNotification('ไม่ทราบตำแหน่ง GPS ปัจจุบัน', 'error'); break; }
+          const nearbyType = params.type || '';
+          const nearbyKeyword = params.keyword || '';
+          const radius = 2000; // 2km
+          const lat = currentLocation.lat;
+          const lng = currentLocation.lng;
+
+          // Map type to Overpass tags
+          const tagMap: Record<string, string> = {
+            convenience_store: '["shop"="convenience"]',
+            cafe: '["amenity"="cafe"]',
+            restaurant: '["amenity"="restaurant"]',
+            fuel: '["amenity"="fuel"]',
+            hospital: '["amenity"="hospital"]',
+            atm: '["amenity"="atm"]',
+            temple: '["amenity"="place_of_worship"]["religion"="buddhist"]',
+            hotel: '["tourism"="hotel"]',
+            pharmacy: '["amenity"="pharmacy"]',
+            parking: '["amenity"="parking"]',
+            supermarket: '["shop"="supermarket"]',
+            bank: '["amenity"="bank"]'
+          };
+          const osmTag = tagMap[nearbyType] || `["amenity"="${nearbyType}"]`;
+          let nameFilter = '';
+          if (nearbyKeyword) {
+            nameFilter = `["name"~"${nearbyKeyword}",i]`;
+          }
+
+          try {
+            const query = `[out:json][timeout:10];(node${osmTag}${nameFilter}(around:${radius},${lat},${lng}););out body 10;`;
+            const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+              method: 'POST',
+              body: 'data=' + encodeURIComponent(query)
+            });
+            const ovData = await ovRes.json();
+            const elements = ovData.elements || [];
+
+            if (elements.length === 0) {
+              showNotification(`ไม่พบ ${nearbyKeyword || nearbyType} ใกล้เคียง`, 'warning');
+            } else {
+              // แสดงผลลัพธ์บนแผนที่ด้วย markers ชั่วคราว
+              // ลบ markers เก่าก่อน
+              if ((window as any).__nearbyMarkers) {
+                (window as any).__nearbyMarkers.forEach((m: any) => m.remove());
+              }
+              (window as any).__nearbyMarkers = [];
+
+              const typeIcons: Record<string, string> = {
+                convenience_store: '🏪', cafe: '☕', restaurant: '🍽️', fuel: '⛽',
+                hospital: '🏥', atm: '💳', temple: '🛕', hotel: '🏨',
+                pharmacy: '💊', parking: '🅿️', supermarket: '🛒', bank: '🏦'
+              };
+              const icon = typeIcons[nearbyType] || '📍';
+
+              elements.forEach((el: any, idx: number) => {
+                const name = el.tags?.name || el.tags?.['name:th'] || `${nearbyKeyword || nearbyType} #${idx + 1}`;
+                const dist = getDistance(lat, lng, el.lat, el.lon);
+                const distText = dist < 1 ? `${Math.round(dist * 1000)}m` : `${dist.toFixed(1)}km`;
+                if (L && map) {
+                  const marker = L.marker([el.lat, el.lon], {
+                    icon: L.divIcon({
+                      className: '',
+                      html: `<div class="marker-pin" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6); box-shadow: 0 0 20px rgba(59,130,246,0.5); width: 38px; height: 38px; font-size: 18px;"><span>${icon}</span><div class="marker-name-label" style="background: rgba(59,130,246,0.9);">${name} (${distText})</div></div>`,
+                      iconSize: [38, 38],
+                      iconAnchor: [19, 19]
+                    }),
+                    zIndexOffset: 800
+                  }).addTo(map);
+                  marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)"></div><div class="popup-header"><div class="popup-badge" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6)">${icon}</div><div class="popup-header-text"><h4>${name}</h4><span class="popup-tag" style="color: #818cf8">${distText}</span></div></div></div>`, { className: 'dark-popup' });
+                  (window as any).__nearbyMarkers.push(marker);
+                }
+              });
+
+              // Fit bounds to show all results
+              if (map && elements.length > 0) {
+                const bounds = L.latLngBounds(elements.map((el: any) => [el.lat, el.lon]));
+                bounds.extend([lat, lng]);
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+              }
+              showNotification(`พบ ${elements.length} แห่ง ใกล้คุณ`, 'success');
+
+              // ลบ markers อัตโนมัติหลัง 60 วินาที
+              setTimeout(() => {
+                if ((window as any).__nearbyMarkers) {
+                  (window as any).__nearbyMarkers.forEach((m: any) => m.remove());
+                  (window as any).__nearbyMarkers = [];
+                }
+              }, 60000);
+            }
+          } catch (err) {
+            showNotification('ค้นหาสถานที่ไม่สำเร็จ', 'error');
+          }
+          break;
+        }
         case 'vehicle':
           if (params.type && params.type !== vehicleType) toggleVehicleType();
           break;
@@ -5838,7 +5934,16 @@
       const bearing = (map as any).getBearing?.() || 0;
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
+      // Counter-rotate ตัวหนังสือ/label/popup ไม่ให้กลับหัวตอนหมุนแผนที่
+      counterRotateMapLabels(bearing);
     });
+  }
+
+  function counterRotateMapLabels(bearing: number) {
+    // ใช้ CSS custom property --map-counter-rotate เพื่อไม่ override transform เดิม
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
+    mapEl.style.setProperty('--map-counter-rotate', `${-bearing}deg`);
   }
 
   // Patch leaflet-rotate: pinch-zoom ห้ามหมุนเด็ดขาด, สองนิ้วหมุนถึงจะหมุนได้
@@ -6722,19 +6827,19 @@ out center body;`;
     if (!mapRef) return;
     _prefetchAbort?.abort();
     _prefetchAbort = new AbortController();
+    // จำกัด cache ไม่ให้ memory leak
+    if (_prefetchedTiles.size > 500) _prefetchedTiles.clear();
     const signal = _prefetchAbort.signal;
     const center = mapRef.getCenter();
     const curZoom = mapRef.getZoom();
     const subs = 'abcd';
     const queue: string[] = [];
 
-    // Prefetch zoom ±1 พอประมาณ (OSM tiles)
+    // Prefetch แค่ zoom ±1 radius เล็ก — ลด load ไม่ให้แผนที่หน่วง
     const zoomConfigs = [
-      { z: curZoom,     radius: 3 },  // ปัจจุบัน
-      { z: curZoom - 1, radius: 3 },  // ซูมออก 1
-      { z: curZoom + 1, radius: 3 },  // ซูมเข้า 1
-      { z: curZoom - 2, radius: 2 },
-      { z: curZoom + 2, radius: 2 },
+      { z: curZoom,     radius: 2 },  // ปัจจุบัน
+      { z: curZoom - 1, radius: 1 },  // ซูมออก 1
+      { z: curZoom + 1, radius: 1 },  // ซูมเข้า 1
     ];
 
     for (const { z, radius } of zoomConfigs) {
@@ -6756,18 +6861,18 @@ out center body;`;
 
     if (queue.length === 0) return;
 
-    // โหลดเบื้องหลัง batch 6 ทุก 80ms
+    // โหลดเบื้องหลัง batch 4 ทุก 200ms — ไม่แย่ง bandwidth กับ map
     let idx = 0;
     function loadBatch() {
       if (signal.aborted || idx >= queue.length) return;
-      const batch = queue.slice(idx, idx + 6);
-      idx += 6;
+      const batch = queue.slice(idx, idx + 4);
+      idx += 4;
       batch.forEach(url => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
       });
-      setTimeout(loadBatch, 80);
+      setTimeout(loadBatch, 200);
     }
     loadBatch();
   }
@@ -9776,7 +9881,7 @@ out center body;`;
   }
   :global(.custom-start-pulse-2) { animation-delay: 1s; }
   :global(.custom-start-label) {
-    position: absolute; top: -28px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
+    position: absolute; top: -28px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
     transform-origin: bottom center;
     background: rgba(0,255,136,0.9); color: #0a0a0f;
     font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
@@ -10791,12 +10896,13 @@ out center body;`;
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
   :global(.leaflet-fade-anim .leaflet-tile) { will-change: transform, opacity; transition: opacity 0.08s linear !important; }
   :global(.leaflet-fade-anim .leaflet-popup) { transition: none !important; }
+  :global(.leaflet-popup) { transform: rotate(var(--map-counter-rotate, 0deg)); }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
 
   .toast {
-    position: fixed; bottom: 170px; right: 16px;
+    position: fixed; bottom: 170px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 8px;
     padding: 10px 14px 10px 12px; border-radius: 12px;
     font-size: 12px; font-weight: 500; z-index: 9999;
@@ -10805,9 +10911,9 @@ out center body;`;
     max-width: 320px;
   }
   @keyframes toastSlideIn {
-    0% { opacity: 0; transform: translateX(40px) scale(0.9); }
-    60% { transform: translateX(-4px) scale(1.02); }
-    100% { opacity: 1; transform: translateX(0) scale(1); }
+    0% { opacity: 0; transform: translateX(-50%) scale(0.9); }
+    60% { transform: translateX(-50%) scale(1.02); }
+    100% { opacity: 1; transform: translateX(-50%) scale(1); }
   }
 
   .toast-glow { display: none; }
@@ -10897,8 +11003,8 @@ out center body;`;
     border: 3px solid rgba(255, 255, 255, 0.5); position: relative;
     transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
     text-shadow: 0 1px 3px rgba(0,0,0,0.5);
-    transform: scale(var(--marker-scale, 1));
-    transform-origin: center bottom;
+    transform: scale(var(--marker-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
+    transform-origin: center center;
   }
   :global(.marker-pin:hover) { filter: brightness(1.15); }
   :global(.marker-pin.draggable) { border-color: #fb923c; cursor: grab; animation: drag-pulse 1.5s ease-in-out infinite; }
@@ -10906,10 +11012,10 @@ out center body;`;
   :global(.drag-hint) { position: absolute; top: -8px; right: -8px; width: 16px; height: 16px; background: #fb923c; border-radius: 50%; font-size: 9px; display: flex; align-items: center; justify-content: center; color: white; border: 2px solid rgba(0,0,0,0.3); }
   @keyframes drag-pulse { 0%, 100% { border-color: #fb923c; } 50% { border-color: #fdba74; } }
   :global(.route-pin) { width: 48px; height: 48px; font-size: 17px; border-width: 3px; }
-  :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
+  :global(.marker-label) { position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%) rotate(var(--map-counter-rotate, 0deg)); background: rgba(0, 0, 0, 0.8); padding: 2px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
   :global(.target-label) { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important; animation: pulse-label 1.5s ease-in-out infinite; }
   :global(.marker-name-label) {
-    position: absolute; top: -26px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
+    position: absolute; top: -26px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
     transform-origin: bottom center;
     background: rgba(102,126,234,0.9); color: #fff;
     font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px;

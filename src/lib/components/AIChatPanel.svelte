@@ -24,14 +24,16 @@
   let executedActions: Set<string> = new Set();
 
   const quickChips = [
-    { label: 'สรุปวันนี้', text: 'สรุปสถานะเส้นทางวันนี้' },
-    { label: 'ไปไหนก่อนดี?', text: 'ดูจุดแวะทั้งหมดแล้วแนะนำว่าควรไปจุดไหนก่อน' },
-    { label: 'เส้นทางไหนดี?', text: 'แนะนำเส้นทางที่ดีที่สุดสำหรับจุดแวะปัจจุบัน' },
-    { label: 'ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' },
-    { label: 'แนะนำที่เที่ยว', text: 'แนะนำสถานที่ท่องเที่ยวที่น่าสนใจใกล้ตำแหน่งปัจจุบัน 5 ที่' },
-    { label: 'คาเฟ่ใกล้ๆ', text: 'แนะนำคาเฟ่หรือร้านกาแฟที่น่านั่งใกล้ตำแหน่งปัจจุบัน 5 ที่' },
-    { label: 'คำนวณเส้นทาง', text: 'คำนวณเส้นทางให้หน่อย' },
-    { label: 'เริ่มนำทาง', text: 'เริ่มนำทางเลย' }
+    { label: '🏪 เซเว่นใกล้ฉัน', text: 'หาเซเว่นใกล้ฉันหน่อย' },
+    { label: '⛽ ปั๊มน้ำมัน', text: 'หาปั๊มน้ำมันใกล้ๆ' },
+    { label: '☕ คาเฟ่ใกล้ๆ', text: 'หาคาเฟ่ใกล้ฉันหน่อย' },
+    { label: '🍽️ ร้านอาหาร', text: 'หาร้านอาหารใกล้ฉัน' },
+    { label: '📊 สรุปวันนี้', text: 'สรุปสถานะเส้นทางวันนี้' },
+    { label: '🗺️ คำนวณเส้นทาง', text: 'คำนวณเส้นทางให้หน่อย' },
+    { label: '🧭 เริ่มนำทาง', text: 'เริ่มนำทางเลย' },
+    { label: '💡 ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' },
+    { label: '🏥 โรงพยาบาล', text: 'หาโรงพยาบาลใกล้ฉัน' },
+    { label: '🅿️ ที่จอดรถ', text: 'หาที่จอดรถใกล้ฉัน' },
   ];
 
   // ═══ Action parsing utilities ═══
@@ -65,6 +67,7 @@
     const icons: Record<string, string> = {
       searchAndAdd: '+',
       addPoint: '+',
+      searchNearby: '📍',
       navigate: '>',
       stopNav: '||',
       calcRoute: '~',
@@ -83,6 +86,7 @@
     const labels: Record<string, string> = {
       searchAndAdd: `ค้นหาและเพิ่ม "${action.params.query || ''}"`,
       addPoint: `เพิ่มจุด "${action.params.name || ''}"`,
+      searchNearby: `ค้นหา ${action.params.keyword || action.params.type || 'สถานที่'} ใกล้เคียง`,
       navigate: 'เริ่มนำทาง',
       stopNav: 'หยุดนำทาง',
       calcRoute: 'คำนวณเส้นทาง',
@@ -274,7 +278,7 @@
             </svg>
           </div>
           <p>สวัสดี! ฉันเป็นผู้ช่วย AI</p>
-          <p class="ai-welcome-sub">สั่งได้ทุกอย่าง: เพิ่มจุด, คำนวณเส้นทาง, นำทาง, ลบจุด</p>
+          <p class="ai-welcome-sub">ถามได้ทุกเรื่อง! หาร้านใกล้ๆ, วางแผนเส้นทาง, ความรู้ทั่วไป</p>
           <div class="ai-quick-chips">
             {#each quickChips as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
@@ -308,7 +312,7 @@
         <!-- Quick chips after messages -->
         {#if !isStreaming}
           <div class="ai-quick-chips ai-chips-inline">
-            {#each quickChips.slice(0, 4) as chip}
+            {#each quickChips.slice(0, 6) as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
             {/each}
           </div>
@@ -321,7 +325,7 @@
         bind:this={inputElement}
         bind:value={inputText}
         on:keydown={handleKeydown}
-        placeholder="สั่ง AI ได้เลย... เช่น เพิ่มจุดแวะที่..."
+        placeholder="ถามอะไรก็ได้... หาร้าน, ความรู้, สั่งนำทาง"
         disabled={isStreaming}
         autocomplete="off"
       />

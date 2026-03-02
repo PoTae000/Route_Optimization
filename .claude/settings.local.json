@@ -38,7 +38,10 @@
       "Bash(npx tsc:*)",
       "Bash(npm ls:*)",
       "Bash(powershell -Command \"Get-ChildItem -Path ''C:\\\\Users\\\\MaFuckingGod\\\\Desktop\\\\System\\\\src'' -Recurse -Include ''*.ts'',''*.js'',''*.svelte'' -Exclude ''node_modules'' | Measure-Object -Property Length -Sum | Select-Object Count,@{Name=''TotalBytes'';Expression={$_Sum}},@{Name=''TotalKB'';Expression={[math]::Round\\($_Sum/1KB,2\\)}}\")",
-      "Bash(npx:*)"
+      "Bash(npx:*)",
+      "Bash(git stash:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash pop:*)"
     ]
   }
 }
