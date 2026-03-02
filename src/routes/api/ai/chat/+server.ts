@@ -169,6 +169,31 @@ ACTION — สั่งการระบบ:
     if (!res.ok) {
       const errText = await res.text();
       console.error('Groq chat error:', res.status, errText);
+
+      // Parse rate limit error for user-friendly message
+      if (res.status === 429) {
+        let waitMsg = 'AI ถูกจำกัดการใช้งานชั่วคราว กรุณารอสักครู่แล้วลองใหม่';
+        try {
+          const errJson = JSON.parse(errText);
+          const msg = errJson?.error?.message || '';
+          const timeMatch = msg.match(/try again in (\d+h)?(\d+m)?(\d+(?:\.\d+)?s)?/);
+          if (timeMatch) {
+            const hours = timeMatch[1] ? parseInt(timeMatch[1]) : 0;
+            const mins = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+            const secs = timeMatch[3] ? Math.ceil(parseFloat(timeMatch[3])) : 0;
+            const parts: string[] = [];
+            if (hours > 0) parts.push(`${hours} ชั่วโมง`);
+            if (mins > 0) parts.push(`${mins} นาที`);
+            if (secs > 0 && hours === 0) parts.push(`${secs} วินาที`);
+            waitMsg = `AI ใช้งานครบโควต้าแล้ว กรุณารออีก ${parts.join(' ')} แล้วลองใหม่`;
+          }
+        } catch {}
+        return new Response(JSON.stringify({ error: waitMsg }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
       return new Response(JSON.stringify({ error: `AI error: ${res.status}` }), {
         status: 502,
         headers: { 'Content-Type': 'application/json' }
