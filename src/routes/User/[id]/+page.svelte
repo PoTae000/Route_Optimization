@@ -3924,12 +3924,22 @@
         }
         case 'searchNearby': {
           // ค้นหาสถานที่ใกล้ผู้ใช้ผ่าน Overpass API
-          if (!currentLocation) { showNotification('ไม่ทราบตำแหน่ง GPS ปัจจุบัน', 'error'); break; }
+          // ใช้ GPS ถ้ามี ถ้าไม่มีใช้จุดกลางแผนที่
           const nearbyType = params.type || '';
           const nearbyKeyword = params.keyword || '';
           const radius = 2000; // 2km
-          const lat = currentLocation.lat;
-          const lng = currentLocation.lng;
+          let lat: number, lng: number;
+          if (currentLocation) {
+            lat = currentLocation.lat;
+            lng = currentLocation.lng;
+          } else if (map) {
+            const c = map.getCenter();
+            lat = c.lat;
+            lng = c.lng;
+          } else {
+            showNotification('ไม่ทราบตำแหน่งปัจจุบัน', 'error');
+            break;
+          }
 
           // Map type to Overpass tags
           const tagMap: Record<string, string> = {
@@ -3948,20 +3958,10 @@
           };
           const osmTag = tagMap[nearbyType] || `["amenity"="${nearbyType}"]`;
 
-          // สร้าง query ที่ค้นหาจาก name หรือ brand (7-Eleven ใน OSM ไทยใช้ brand เป็นหลัก)
-          function buildOverpassQuery(tag: string, keyword: string, r: number) {
-            if (keyword) {
-              // ค้นหาจาก name OR brand
-              const nameQ = `${tag}["name"~"${keyword}",i]`;
-              const brandQ = `${tag}["brand"~"${keyword}",i]`;
-              return `[out:json][timeout:15];(node${nameQ}(around:${r},${lat},${lng});way${nameQ}(around:${r},${lat},${lng});node${brandQ}(around:${r},${lat},${lng});way${brandQ}(around:${r},${lat},${lng}););out center 15;`;
-            }
-            return `[out:json][timeout:15];(node${tag}(around:${r},${lat},${lng});way${tag}(around:${r},${lat},${lng}););out center 15;`;
-          }
-
           try {
-            // ลองค้นหาด้วย keyword ก่อน
-            let query = buildOverpassQuery(osmTag, nearbyKeyword, radius);
+            // ค้นหาตาม type ตรงๆ ไม่ filter ชื่อ (ชื่อใน OSM ไม่แน่นอน)
+            // เรียงตามระยะใกล้สุดแทน
+            const query = `[out:json][timeout:15];(node${osmTag}(around:${radius},${lat},${lng});way${osmTag}(around:${radius},${lat},${lng}););out center 20;`;
             let ovRes = await fetch('https://overpass-api.de/api/interpreter', {
               method: 'POST',
               body: 'data=' + encodeURIComponent(query)
@@ -3975,12 +3975,12 @@
               lon: el.lon || el.center?.lon
             }));
 
-            // ถ้าหาไม่เจอด้วย keyword → retry โดยไม่ใส่ keyword (หาแค่ type) + ขยายรัศมี
-            if (elements.length === 0 && nearbyKeyword) {
-              query = buildOverpassQuery(osmTag, '', radius * 2);
+            // ถ้าหาไม่เจอ → ขยายรัศมีเป็น 2 เท่า
+            if (elements.length === 0) {
+              const query2 = `[out:json][timeout:15];(node${osmTag}(around:${radius * 2},${lat},${lng});way${osmTag}(around:${radius * 2},${lat},${lng}););out center 20;`;
               ovRes = await fetch('https://overpass-api.de/api/interpreter', {
                 method: 'POST',
-                body: 'data=' + encodeURIComponent(query)
+                body: 'data=' + encodeURIComponent(query2)
               });
               ovData = await ovRes.json();
               elements = (ovData.elements || []).filter((el: any) => {
