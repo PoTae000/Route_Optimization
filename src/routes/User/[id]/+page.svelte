@@ -4324,14 +4324,82 @@
         case 'searchAndAdd': {
           const query = params.query;
           if (!query) break;
-          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&countrycodes=th`);
-          const results = await res.json();
-          if (results.length > 0) {
-            const r = results[0];
-            const shortName = r.display_name.split(',')[0];
-            await addPointFromAI(shortName, parseFloat(r.lat), parseFloat(r.lon), r.display_name);
+
+          // Multi-strategy search: try many approaches until one works
+          let found: { lat: number; lon: number; display_name: string } | null = null;
+
+          // Strategy 1: Nominatim exact query (TH only, limit 5)
+          try {
+            const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=th`);
+            const d1 = await r1.json();
+            if (d1.length > 0) found = d1[0];
+          } catch {}
+
+          // Strategy 2: Nominatim without country restriction
+          if (!found) {
+            try {
+              const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
+              const d2 = await r2.json();
+              if (d2.length > 0) found = d2[0];
+            } catch {}
+          }
+
+          // Strategy 3: Append "ประเทศไทย" to query
+          if (!found) {
+            try {
+              const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ' ประเทศไทย')}&limit=5`);
+              const d3 = await r3.json();
+              if (d3.length > 0) found = d3[0];
+            } catch {}
+          }
+
+          // Strategy 4: Simplify query — take first part before space/comma, search broader
+          if (!found) {
+            const simplified = query.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
+            if (simplified !== query) {
+              try {
+                const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=5&countrycodes=th`);
+                const d4 = await r4.json();
+                if (d4.length > 0) found = d4[0];
+              } catch {}
+            }
+          }
+
+          // Strategy 5: Overpass API — search by name tag (catches POIs that Nominatim misses)
+          if (!found) {
+            try {
+              const nameQuery = query.replace(/["\\]/g, '');
+              const searchLat = currentLocation?.lat || (map ? map.getCenter().lat : 13.75);
+              const searchLng = currentLocation?.lng || (map ? map.getCenter().lng : 100.5);
+              const ovQuery = `[out:json][timeout:10];(node["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng});way["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng}););out center 1;`;
+              const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+                method: 'POST',
+                body: 'data=' + encodeURIComponent(ovQuery)
+              });
+              const ovData = await ovRes.json();
+              const el = ovData.elements?.[0];
+              if (el) {
+                const elLat = el.lat || el.center?.lat;
+                const elLon = el.lon || el.center?.lon;
+                if (elLat && elLon) {
+                  found = { lat: elLat, lon: elLon, display_name: el.tags?.name || query };
+                }
+              }
+            } catch {}
+          }
+
+          // Strategy 6: Last resort — use map center with the query name so user can still add it
+          if (!found && map) {
+            const c = map.getCenter();
+            found = { lat: c.lat, lon: c.lng, display_name: query + ' (ตำแหน่งโดยประมาณ)' };
+            showNotification(`ไม่พบพิกัดแน่ชัดของ "${query}" — ใช้ตำแหน่งกลางแผนที่`, 'warning');
+          }
+
+          if (found) {
+            const shortName = found.display_name.split(',')[0];
+            await addPointFromAI(shortName, parseFloat(String(found.lat)), parseFloat(String(found.lon)), found.display_name);
             showNotification(`เพิ่มจุด "${shortName}" สำเร็จ`, 'success');
-            if (map) map.setView([parseFloat(r.lat), parseFloat(r.lon)], 15, { animate: true });
+            if (map) map.setView([parseFloat(String(found.lat)), parseFloat(String(found.lon))], 15, { animate: true });
           } else {
             showNotification(`ไม่พบ "${query}"`, 'error');
           }
