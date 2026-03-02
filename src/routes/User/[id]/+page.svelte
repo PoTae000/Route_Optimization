@@ -192,6 +192,10 @@
   let _nonNavBeamTarget = 0; // beam heading target (non-navigation)
   let _nonNavBeamCurrent = 0; // beam heading current (non-navigation, smoothed)
   let _nonNavBeamRaf: number | null = null; // rAF for non-nav beam
+  // Smooth GPS position for non-navigation mode (prevents marker jitter/warp)
+  let _nonNavPosTarget = { lat: 0, lng: 0 };
+  let _nonNavPosCurrent = { lat: 0, lng: 0 };
+  let _nonNavPosInited = false;
   let currentTargetIndex = 0;
   let remainingDistance = 0;
   let remainingTime = 0;
@@ -706,19 +710,38 @@
     stopNonNavBeamLoop();
   }
 
-  // Smooth beam rotation loop สำหรับตอนไม่ navigate (lerp 60fps แทน direct set)
+  // Smooth beam rotation + position loop สำหรับตอนไม่ navigate (lerp 60fps)
   function startNonNavBeamLoop() {
     if (_nonNavBeamRaf !== null) return;
     function tick() {
       _nonNavBeamRaf = requestAnimationFrame(tick);
-      if (isNavigating || !headingMarkerElement) return;
-      // Lerp heading smoothly
+      if (isNavigating) return;
+
+      // Smooth position lerp (ป้องกัน marker กระตุก/วาร์ป)
+      if (_nonNavPosInited && currentLocationMarker) {
+        const dLat = _nonNavPosTarget.lat - _nonNavPosCurrent.lat;
+        const dLng = _nonNavPosTarget.lng - _nonNavPosCurrent.lng;
+        if (Math.abs(dLat) > 0.0000001 || Math.abs(dLng) > 0.0000001) {
+          _nonNavPosCurrent.lat += dLat * 0.12;
+          _nonNavPosCurrent.lng += dLng * 0.12;
+          currentLocationMarker.setLatLng([_nonNavPosCurrent.lat, _nonNavPosCurrent.lng]);
+          // Follow mode: pan map ตามตำแหน่ง smooth
+          if (isFollowMode && map) {
+            map.panTo([_nonNavPosCurrent.lat, _nonNavPosCurrent.lng], { animate: false });
+          }
+        }
+      }
+
+      // Smooth beam heading lerp
+      if (!headingMarkerElement) return;
       let diff = ((_nonNavBeamTarget - _nonNavBeamCurrent + 540) % 360) - 180;
-      if (Math.abs(diff) < 0.3) return; // ไม่ขยับถ้าเปลี่ยนน้อยมาก
-      _nonNavBeamCurrent = ((_nonNavBeamCurrent + diff * 0.08) + 360) % 360;
+      if (Math.abs(diff) > 0.3) {
+        _nonNavBeamCurrent = ((_nonNavBeamCurrent + diff * 0.08) + 360) % 360;
+      }
       const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
       if (beam) {
-        beam.style.transform = `rotate(${_nonNavBeamCurrent}deg)`;
+        const mapBearing = (map as any)?.getBearing?.() || 0;
+        beam.style.transform = `rotate(${_nonNavBeamCurrent - mapBearing}deg)`;
         beam.style.opacity = '1';
       }
     }
@@ -4544,6 +4567,12 @@
       headingMarkerElement = currentLocationMarker.getElement();
       _nonNavBeamCurrent = hdeg;
       _nonNavBeamTarget = hdeg;
+      // Re-init non-nav smooth position from current location
+      if (currentLocation) {
+        _nonNavPosTarget = { lat: currentLocation.lat, lng: currentLocation.lng };
+        _nonNavPosCurrent = { lat: currentLocation.lat, lng: currentLocation.lng };
+        _nonNavPosInited = true;
+      }
       // Restart compass + beam loop หลังหยุดนำทาง
       startDeviceCompass();
       map.setView([currentLocation.lat, currentLocation.lng], 16);
@@ -4900,18 +4929,21 @@
     const showHeading = currentHeading !== null || _deviceCompassHeading !== null;
 
     if (currentLocationMarker) {
-      // ขณะนำทาง ให้ animation loop (startSmoothLoop) จัดการตำแหน่ง marker
-      // อัพเดทตรงนี้เฉพาะตอนไม่ได้นำทาง เพื่อไม่ให้ marker วาร์ป
-      if (!isNavigating || !animReady) {
+      // นำทาง: animation loop จัดการ | ไม่นำทาง: nonNavBeamLoop จัดการ smooth position
+      // set ตรงนี้เฉพาะตอนไม่มี smooth loop (initial หรือ animReady=false)
+      if (!isNavigating && !_nonNavPosInited) {
+        currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
+      } else if (isNavigating && !animReady) {
         currentLocationMarker.setLatLng([currentLocation.lat, currentLocation.lng]);
       }
       if (headingMarkerElement) {
         const beam = headingMarkerElement.querySelector('.heading-beam') as HTMLElement;
         if (beam) {
-          // ขณะนำทาง heading จะ smooth โดย animation loop
-          if (!isNavigating || !animReady) {
+          // heading smooth จัดการโดย animation loop (nav) หรือ nonNavBeamLoop (non-nav)
+          if (isNavigating && !animReady) {
             beam.style.transform = `rotate(${headingDeg}deg)`;
           }
+          // ไม่ set beam transform ตอนไม่นำทาง — nonNavBeamLoop จัดการอยู่แล้ว
           beam.style.opacity = showHeading ? '1' : '0';
         }
       }
@@ -7923,6 +7955,15 @@ out center body;`;
             }
             // Update location when not navigating (navigation has its own watch)
             if (!isNavigating) {
+              // Outlier rejection: ถ้ากระโดดไกลผิดปกติ ให้ ignore
+              if (_nonNavPosInited) {
+                const jumpDist = getDistance(_nonNavPosCurrent.lat, _nonNavPosCurrent.lng, latitude, longitude);
+                // ถ้ากระโดด > 500m ทันที (GPS glitch) ให้ข้ามไป
+                if (jumpDist > 0.5 && acc > 50) {
+                  return;
+                }
+              }
+
               currentLocation = { lat: latitude, lng: longitude, heading, speed };
               accuracy = acc;
               if (heading !== null && !isNaN(heading) && speed && speed > 1) {
@@ -7930,11 +7971,17 @@ out center body;`;
               } else if (_deviceCompassHeading !== null) {
                 currentHeading = _deviceCompassHeading;
               }
-              updateCurrentLocationMarker();
-              // Follow mode: auto-pan map to GPS position
-              if (isFollowMode && map) {
-                map.panTo([latitude, longitude], { animate: true });
+
+              // ตั้ง target สำหรับ smooth loop (ไม่ set marker ตรงๆ)
+              _nonNavPosTarget = { lat: latitude, lng: longitude };
+              if (!_nonNavPosInited) {
+                // ครั้งแรก: snap ทันทีไม่ต้อง lerp
+                _nonNavPosCurrent = { lat: latitude, lng: longitude };
+                _nonNavPosInited = true;
               }
+
+              updateCurrentLocationMarker();
+              // follow mode panTo จัดการใน beam loop แล้ว (smooth 60fps)
             }
           },
           (err) => {
@@ -7947,7 +7994,7 @@ out center body;`;
               showNotification('กรุณาอนุญาตการเข้าถึง GPS', 'error');
             }
           },
-          { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
         );
       }
 
