@@ -159,12 +159,6 @@ export interface TripRecapData {
   tollCost?: number;
 }
 
-// F18: Elevation Profile
-export interface ElevationPoint {
-  dist: number;  // distance along route in km
-  elev: number;  // elevation in meters
-}
-
 // F8: Smart Shortcut
 export interface LearnedShortcut {
   fromLat: number;

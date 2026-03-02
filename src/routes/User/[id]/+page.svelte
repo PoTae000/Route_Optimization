@@ -14,7 +14,7 @@
   import AIChatPanel from '$lib/components/AIChatPanel.svelte';
   import AIRouteSuggestion from '$lib/components/AIRouteSuggestion.svelte';
   import TripRecap from '$lib/components/TripRecap.svelte';
-  import type { AIRouteSuggestionData, AIChatContext, TripRecapData, TripPattern, ElevationPoint, LearnedShortcut } from '$lib/types';
+  import type { AIRouteSuggestionData, AIChatContext, TripRecapData, TripPattern, LearnedShortcut } from '$lib/types';
   import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch } from '$lib/utils/osrm';
 
   // Silence all console output in production
@@ -1614,71 +1614,6 @@
   let showTripRecap = false;
   let tripRecapData: TripRecapData | null = null;
 
-  // ═══ F18: Elevation Profile ═══
-  let elevationData: ElevationPoint[] = [];
-  let showElevation = false;
-
-  async function fetchElevationProfile() {
-    if (!optimizedRoute?.route?.geometry?.coordinates) return;
-    const coords = optimizedRoute.route.geometry.coordinates;
-    // Sample ~50 points along route
-    const sampleCount = Math.min(50, coords.length);
-    const step = Math.max(1, Math.floor(coords.length / sampleCount));
-    const lats: number[] = [];
-    const lngs: number[] = [];
-    const dists: number[] = [];
-    let cumDist = 0;
-    for (let i = 0; i < coords.length; i += step) {
-      lats.push(coords[i][1]);
-      lngs.push(coords[i][0]);
-      if (dists.length > 0) {
-        const prevIdx = Math.max(0, i - step);
-        const R = 6371;
-        const dLat = (coords[i][1] - coords[prevIdx][1]) * Math.PI / 180;
-        const dLng = (coords[i][0] - coords[prevIdx][0]) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos(coords[prevIdx][1] * Math.PI / 180) * Math.cos(coords[i][1] * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-        cumDist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      }
-      dists.push(cumDist);
-    }
-    try {
-      const res = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`);
-      const data = await res.json();
-      if (data.elevation && Array.isArray(data.elevation)) {
-        elevationData = data.elevation.map((elev: number, i: number) => ({ dist: dists[i], elev }));
-        showElevation = true;
-      }
-    } catch {}
-  }
-
-  function getElevationStats() {
-    if (elevationData.length === 0) return { min: 0, max: 0, totalUp: 0, totalDown: 0, steepWarnings: 0 };
-    let min = Infinity, max = -Infinity, totalUp = 0, totalDown = 0, steepWarnings = 0;
-    for (let i = 0; i < elevationData.length; i++) {
-      const e = elevationData[i].elev;
-      if (e < min) min = e;
-      if (e > max) max = e;
-      if (i > 0) {
-        const diff = e - elevationData[i - 1].elev;
-        const distDiff = (elevationData[i].dist - elevationData[i - 1].dist) * 1000; // km to m
-        if (diff > 0) totalUp += diff;
-        else totalDown += Math.abs(diff);
-        if (distDiff > 0) {
-          const grade = Math.abs(diff) / distDiff * 100;
-          if (grade > 8) steepWarnings++;
-        }
-      }
-    }
-    return { min: Math.round(min), max: Math.round(max), totalUp: Math.round(totalUp), totalDown: Math.round(totalDown), steepWarnings };
-  }
-
-  function getElevationColor(grade: number): string {
-    if (grade < 3) return '#4ade80';
-    if (grade < 6) return '#fbbf24';
-    if (grade < 8) return '#f97316';
-    return '#ef4444';
-  }
-
   // ═══ F8: Smart Shortcut Learner ═══
   let learnedShortcuts: LearnedShortcut[] = [];
 
@@ -2164,6 +2099,51 @@
 
   function cancelAddPoint() {
     confirmAddPoint = null;
+  }
+
+  // ═══ Batch Confirm for Trip Planning ═══
+  let batchConfirmPoints: { name: string; address: string; lat: number; lng: number; selected: boolean }[] = [];
+  let batchConfirmLoading = false;
+
+  async function executeBatchConfirm() {
+    const selected = batchConfirmPoints.filter(p => p.selected);
+    if (selected.length === 0) { batchConfirmPoints = []; return; }
+    batchConfirmLoading = true;
+    let addedCount = 0;
+    for (const pt of selected) {
+      try {
+        const payload = { name: pt.name, address: pt.address, lat: pt.lat, lng: pt.lng, priority: 3, user_id: currentUser?.id };
+        const res = await fetch(`${API_URL}/points`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data && !data.error && res.ok) addedCount++;
+      } catch {}
+    }
+    await loadDeliveryPoints();
+    batchConfirmPoints = [];
+    batchConfirmLoading = false;
+    showNotification(`เพิ่ม ${addedCount} จุดแวะสำเร็จ`, 'success');
+  }
+
+  function cancelBatchConfirm() {
+    batchConfirmPoints = [];
+    batchConfirmLoading = false;
+  }
+
+  function toggleBatchPoint(index: number) {
+    batchConfirmPoints[index].selected = !batchConfirmPoints[index].selected;
+    batchConfirmPoints = [...batchConfirmPoints];
+  }
+
+  function selectAllBatch() {
+    batchConfirmPoints = batchConfirmPoints.map(p => ({ ...p, selected: true }));
+  }
+
+  function deselectAllBatch() {
+    batchConfirmPoints = batchConfirmPoints.map(p => ({ ...p, selected: false }));
   }
 
   let isAddingPoint = false;
@@ -3979,8 +3959,6 @@
       } else {
         showNotification('คำนวณเส้นทางสำเร็จ', 'success');
       }
-      // F18: Fetch elevation profile in background
-      fetchElevationProfile();
       // F8: Check for learned shortcuts
       checkForShortcuts();
       // Reset add point mode and hide sidebar after successful route calculation
@@ -4321,6 +4299,91 @@
     const { type, params } = e.detail;
     try {
       switch (type) {
+        case 'batchSearchAndAdd': {
+          // Batch search all queries in parallel, then show one confirm modal
+          const queries = (params.queries || '').split('|||').filter(Boolean);
+          if (queries.length === 0) break;
+          showNotification(`กำลังค้นหา ${queries.length} จุดแวะ...`, 'success');
+
+          const searchOne = async (q: string): Promise<{ name: string; address: string; lat: number; lng: number } | null> => {
+            let found: { lat: number; lon: number; display_name: string } | null = null;
+            // Strategy 1: Nominatim TH
+            try {
+              const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=th`);
+              const d1 = await r1.json();
+              if (d1.length > 0) found = d1[0];
+            } catch {}
+            // Strategy 2: Nominatim no country
+            if (!found) {
+              try {
+                const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5`);
+                const d2 = await r2.json();
+                if (d2.length > 0) found = d2[0];
+              } catch {}
+            }
+            // Strategy 3: Append ประเทศไทย
+            if (!found) {
+              try {
+                const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=5`);
+                const d3 = await r3.json();
+                if (d3.length > 0) found = d3[0];
+              } catch {}
+            }
+            // Strategy 4: Simplify query
+            if (!found) {
+              const simplified = q.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
+              if (simplified !== q) {
+                try {
+                  const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=5&countrycodes=th`);
+                  const d4 = await r4.json();
+                  if (d4.length > 0) found = d4[0];
+                } catch {}
+              }
+            }
+            // Strategy 5: Overpass API
+            if (!found) {
+              try {
+                const nameQuery = q.replace(/["\\]/g, '');
+                const searchLat = currentLocation?.lat || (map ? map.getCenter().lat : 13.75);
+                const searchLng = currentLocation?.lng || (map ? map.getCenter().lng : 100.5);
+                const ovQuery = `[out:json][timeout:10];(node["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng});way["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng}););out center 1;`;
+                const ovRes = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(ovQuery) });
+                const ovData = await ovRes.json();
+                const el = ovData.elements?.[0];
+                if (el) {
+                  const elLat = el.lat || el.center?.lat;
+                  const elLon = el.lon || el.center?.lon;
+                  if (elLat && elLon) found = { lat: elLat, lon: elLon, display_name: el.tags?.name || q };
+                }
+              } catch {}
+            }
+            // Strategy 6: map center fallback
+            if (!found && map) {
+              const c = map.getCenter();
+              found = { lat: c.lat, lon: c.lng, display_name: q + ' (โดยประมาณ)' };
+            }
+            if (found) {
+              return { name: found.display_name.split(',')[0], address: found.display_name, lat: parseFloat(String(found.lat)), lng: parseFloat(String(found.lon)) };
+            }
+            return null;
+          };
+
+          // Search all in parallel (but stagger to avoid rate limit)
+          const results: { name: string; address: string; lat: number; lng: number }[] = [];
+          for (let i = 0; i < queries.length; i++) {
+            const result = await searchOne(queries[i]);
+            if (result) results.push(result);
+            // Small delay to avoid Nominatim rate limit
+            if (i < queries.length - 1) await new Promise(r => setTimeout(r, 300));
+          }
+
+          if (results.length > 0) {
+            batchConfirmPoints = results.map(r => ({ ...r, selected: true }));
+          } else {
+            showNotification('ไม่พบจุดแวะที่ค้นหา', 'error');
+          }
+          break;
+        }
         case 'searchAndAdd': {
           const query = params.query;
           if (!query) break;
@@ -4730,20 +4793,6 @@
             }
           } catch (err: any) {
             showNotification('ค้นหาจุดชมวิวล้มเหลว', 'error');
-          }
-          break;
-        }
-        // F18: Elevation Profile
-        case 'showElevation': {
-          if (!optimizedRoute?.route?.geometry) {
-            showNotification('ยังไม่มีเส้นทาง คำนวณก่อน', 'warning');
-            break;
-          }
-          if (elevationData.length === 0) {
-            showNotification('กำลังดึงข้อมูลความสูง...', 'success');
-            await fetchElevationProfile();
-          } else {
-            showElevation = !showElevation;
           }
           break;
         }
@@ -8475,13 +8524,6 @@ out center body;`;
         e.preventDefault();
         toggleHandsfree();
         break;
-      case 'e': // F18: Elevation toggle
-        if (optimizedRoute) {
-          e.preventDefault();
-          if (elevationData.length > 0) showElevation = !showElevation;
-          else fetchElevationProfile();
-        }
-        break;
       case 'a': // เพิ่มจุดแวะ
         if (!optimizedRoute && !isNavigating) {
           e.preventDefault();
@@ -10254,47 +10296,36 @@ out center body;`;
   </div>
 {/if}
 
-<!-- F18: Elevation Profile Panel -->
-{#if showElevation && elevationData.length > 0}
-  {@const eStats = getElevationStats()}
-  {@const elevMaxElev = Math.max(...elevationData.map(d => d.elev))}
-  {@const elevMinElev = Math.min(...elevationData.map(d => d.elev))}
-  {@const elevMaxDist = elevationData[elevationData.length - 1]?.dist || 1}
-  {@const elevRange = elevMaxElev - elevMinElev || 1}
-  <div class="elevation-panel">
-    <div class="elevation-header">
-      <span class="elevation-title">กราฟความสูง</span>
-      <div class="elevation-stats-row">
-        <span class="elev-stat">สูงสุด {eStats.max} ม.</span>
-        <span class="elev-stat">ต่ำสุด {eStats.min} ม.</span>
-        <span class="elev-stat">ขึ้น {eStats.totalUp} ม.</span>
-        <span class="elev-stat">ลง {eStats.totalDown} ม.</span>
+<!-- Batch Confirm Add Points Modal (Trip Planning) -->
+{#if batchConfirmPoints.length > 0}
+  <div class="confirm-add-overlay" on:click|self={cancelBatchConfirm}>
+    <div class="batch-confirm-card">
+      <div class="batch-confirm-title">เพิ่มจุดแวะทริป ({batchConfirmPoints.filter(p => p.selected).length}/{batchConfirmPoints.length})</div>
+      <div class="batch-confirm-actions-top">
+        <button class="batch-sel-btn" on:click={selectAllBatch}>เลือกทั้งหมด</button>
+        <button class="batch-sel-btn" on:click={deselectAllBatch}>ไม่เลือกทั้งหมด</button>
       </div>
-      {#if eStats.steepWarnings > 0}
-        <span class="elev-steep-warn">ช่วงชันมาก ({eStats.steepWarnings} จุด)</span>
-      {/if}
-      <button class="elevation-close" on:click={() => showElevation = false}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M6 18L18 6M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <svg class="elevation-chart" viewBox="0 0 400 100" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="elevGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="rgba(74, 222, 128, 0.4)"/>
-          <stop offset="100%" stop-color="rgba(74, 222, 128, 0.02)"/>
-        </linearGradient>
-      </defs>
-      <path d="M{elevationData.map(d => `${(d.dist / elevMaxDist) * 400},${100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}`).join(' L')} L400,100 L0,100 Z" fill="url(#elevGrad)"/>
-      <polyline fill="none" stroke="#4ade80" stroke-width="1.5" points="{elevationData.map(d => `${(d.dist / elevMaxDist) * 400},${100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}`).join(' ')}"/>
-      {#each elevationData as d, i}
-        {#if i > 0 && Math.abs(d.elev - elevationData[i-1].elev) / ((d.dist - elevationData[i-1].dist) * 10 || 1) > 8}
-          <circle cx="{(d.dist / elevMaxDist) * 400}" cy="{100 - ((d.elev - elevMinElev) / elevRange) * 80 - 10}" r="2.5" fill="#ef4444"/>
-        {/if}
-      {/each}
-    </svg>
-    <div class="elevation-x-axis">
-      <span>0 กม.</span>
-      <span>{(elevationData[elevationData.length - 1]?.dist || 0).toFixed(1)} กม.</span>
+      <div class="batch-confirm-list">
+        {#each batchConfirmPoints as pt, i}
+          <div class="batch-point-row" class:deselected={!pt.selected} on:click={() => toggleBatchPoint(i)}>
+            <div class="batch-check" class:checked={pt.selected}>
+              {#if pt.selected}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="12" height="12"><path d="M5 13l4 4L19 7"/></svg>
+              {/if}
+            </div>
+            <div class="batch-point-info">
+              <div class="batch-point-name">{pt.name}</div>
+              <div class="batch-point-coord">{pt.lat.toFixed(4)}, {pt.lng.toFixed(4)}</div>
+            </div>
+          </div>
+        {/each}
+      </div>
+      <div class="confirm-add-actions">
+        <button class="confirm-add-btn confirm-yes" on:click={executeBatchConfirm} disabled={batchConfirmLoading || batchConfirmPoints.filter(p => p.selected).length === 0}>
+          {#if batchConfirmLoading}กำลังเพิ่ม...{:else}เพิ่ม {batchConfirmPoints.filter(p => p.selected).length} จุด{/if}
+        </button>
+        <button class="confirm-add-btn confirm-no" on:click={cancelBatchConfirm} disabled={batchConfirmLoading}>ยกเลิก</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -15979,75 +16010,78 @@ out center body;`;
 }
 .confirm-no:hover { background: rgba(255, 255, 255, 0.1); color: #e4e4e7; }
 
-/* ═══ F18: Elevation Profile ═══ */
-.elevation-panel {
-  position: fixed;
-  bottom: 100px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 380px;
+/* ═══ Batch Confirm (Trip Planning) ═══ */
+.batch-confirm-card {
+  width: 360px;
   max-width: 90vw;
-  background: rgba(26, 26, 46, 0.95);
-  border: 1px solid rgba(0, 255, 136, 0.2);
-  border-radius: 12px;
-  padding: 10px 14px;
-  z-index: 1400;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  animation: chatSlideUp 0.25s ease;
+  max-height: 80vh;
+  background: rgba(26, 26, 46, 0.97);
+  border: 1px solid rgba(0, 255, 136, 0.25);
+  border-radius: 14px;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.2s ease;
+  display: flex;
+  flex-direction: column;
 }
-@keyframes chatSlideUp { from { transform: translateX(-50%) translateY(10px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
-.elevation-header {
+.batch-confirm-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #e4e4e7;
+  margin-bottom: 8px;
+}
+.batch-confirm-actions-top {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.batch-sel-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: #a1a1aa;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.batch-sel-btn:hover { background: rgba(255, 255, 255, 0.1); color: #e4e4e7; }
+.batch-confirm-list {
+  overflow-y: auto;
+  max-height: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.batch-point-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-.elevation-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: #4ade80;
-}
-.elevation-stats-row {
-  display: flex;
-  gap: 8px;
-  flex: 1;
-}
-.elev-stat {
-  font-size: 10px;
-  color: #a1a1aa;
-  background: rgba(255,255,255,0.06);
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.elev-steep-warn {
-  font-size: 10px;
-  color: #ef4444;
-  font-weight: 600;
-}
-.elevation-close {
-  background: none;
-  border: none;
-  color: #71717a;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 255, 136, 0.04);
+  border: 1px solid rgba(0, 255, 136, 0.1);
   cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  margin-left: auto;
+  transition: all 0.15s;
 }
-.elevation-close:hover { color: #e4e4e7; background: rgba(255,255,255,0.08); }
-.elevation-chart {
-  width: 100%;
-  height: 80px;
-  border-radius: 6px;
-  background: rgba(0,0,0,0.2);
-}
-.elevation-x-axis {
+.batch-point-row:hover { background: rgba(0, 255, 136, 0.08); }
+.batch-point-row.deselected { opacity: 0.45; background: rgba(255, 255, 255, 0.02); border-color: rgba(255, 255, 255, 0.06); }
+.batch-check {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  border: 2px solid rgba(0, 255, 136, 0.3);
   display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  color: #71717a;
-  margin-top: 2px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
 }
+.batch-check.checked { background: rgba(0, 255, 136, 0.2); border-color: #4ade80; color: #4ade80; }
+.batch-point-info { flex: 1; min-width: 0; }
+.batch-point-name { font-size: 13px; color: #e4e4e7; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.batch-point-coord { font-size: 10px; color: #71717a; }
 
 /* ═══ F15: Hands-free Voice ═══ */
 .handsfree-indicator {

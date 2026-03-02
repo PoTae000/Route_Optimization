@@ -204,8 +204,6 @@
     { label: 'จุดชมวิว', text: 'หาจุดชมวิวและที่เที่ยวระหว่างทาง' },
     // C5: Toll Calculator
     { label: 'ค่าทางด่วน', text: 'คำนวณค่าทางด่วนให้หน่อย' },
-    // F18: Elevation Profile
-    { label: 'ความสูงเส้นทาง', text: 'แสดงกราฟความสูงของเส้นทาง' },
     // C2: Night Safety (night only)
     { label: 'ที่พักใกล้ๆ', text: 'หาที่พัก/โรงแรมใกล้ฉัน', nightOnly: true },
   ];
@@ -267,7 +265,7 @@
       fuelPrice: '$',
       scenicSearch: 'V',
       tollCompare: 'B',
-      showElevation: 'E'
+      batchSearchAndAdd: '+'
     };
     return icons[type] || '*';
   }
@@ -300,7 +298,7 @@
       fuelPrice: 'ราคาน้ำมัน',
       scenicSearch: 'ค้นหาจุดชมวิว',
       tollCompare: 'เปรียบเทียบค่าทางด่วน',
-      showElevation: 'แสดงกราฟความสูง'
+      batchSearchAndAdd: `เพิ่มจุดแวะ ${(action.params.queries || '').split('|||').length} จุด`
     };
     return labels[action.type] || action.type;
   }
@@ -586,11 +584,41 @@
         if (actions.length > 0) {
           const msgIdx = messages.length - 1;
           messageActions = { ...messageActions, [msgIdx]: actions };
-          for (const action of actions) {
+
+          // Batch multiple searchAndAdd into a single dispatch
+          const searchAndAddActions = actions.filter(a => a.type === 'searchAndAdd');
+          const otherActions = actions.filter(a => a.type !== 'searchAndAdd');
+
+          if (searchAndAddActions.length > 1) {
+            const queries = searchAndAddActions.map(a => a.params.query).filter(Boolean);
+            const batchKey = `${msgIdx}-batchSearchAndAdd-${queries.join('|')}`;
+            if (!executedActions.has(batchKey)) {
+              executedActions.add(batchKey);
+              executedActions = executedActions;
+              dispatch('action', { type: 'batchSearchAndAdd', params: { queries: queries.join('|||') } });
+            }
+            // Mark individual searchAndAdd as executed so they don't fire separately
+            for (const action of searchAndAddActions) {
+              const actionKey = `${msgIdx}-${action.type}-${JSON.stringify(action.params)}`;
+              executedActions.add(actionKey);
+            }
+            executedActions = executedActions;
+          } else {
+            for (const action of searchAndAddActions) {
+              const actionKey = `${msgIdx}-${action.type}-${JSON.stringify(action.params)}`;
+              if (!executedActions.has(actionKey)) {
+                executedActions.add(actionKey);
+                executedActions = executedActions;
+                dispatch('action', { type: action.type, params: action.params });
+              }
+            }
+          }
+
+          for (const action of otherActions) {
             const actionKey = `${msgIdx}-${action.type}-${JSON.stringify(action.params)}`;
             if (!executedActions.has(actionKey)) {
               executedActions.add(actionKey);
-              executedActions = executedActions; // trigger reactivity
+              executedActions = executedActions;
               dispatch('action', { type: action.type, params: action.params });
             }
           }
