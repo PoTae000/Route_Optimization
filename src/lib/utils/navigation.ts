@@ -81,8 +81,59 @@ export function detectTollRoad(route: any): boolean {
   return false;
 }
 
+export function countTollSegments(route: any): number {
+  if (!route?.legs) return 0;
+  let segments = 0;
+  let inToll = false;
+  for (const leg of route.legs) {
+    if (!leg?.steps) continue;
+    for (const step of leg.steps) {
+      const name = (step.name || '').toLowerCase();
+      const ref = (step.ref || '').toLowerCase();
+      const isToll = name.includes('expressway') || name.includes('ทางด่วน') ||
+                     name.includes('toll') || ref.includes('expressway');
+      if (isToll && !inToll) {
+        segments++;
+        inToll = true;
+      } else if (!isToll) {
+        inToll = false;
+      }
+    }
+  }
+  return segments;
+}
+
+export function getMotorwayDistance(route: any): number {
+  if (!route?.legs) return 0;
+  let motorwayDist = 0;
+  for (const leg of route.legs) {
+    if (!leg?.steps) continue;
+    for (const step of leg.steps) {
+      const name = (step.name || '').toLowerCase();
+      const ref = (step.ref || '').toLowerCase();
+      if (name.includes('motorway') || name.includes('มอเตอร์เวย์') ||
+          ref.includes('motorway') || ref.includes('มอเตอร์เวย์')) {
+        motorwayDist += step.distance || 0;
+      }
+    }
+  }
+  return motorwayDist / 1000; // return km
+}
+
 export function estimateTollCost(route: any): number {
-  const distKm = route.distance / 1000;
   if (!detectTollRoad(route)) return 0;
-  return Math.round(distKm * 2.5 + 25);
+  // Thai expressway/motorway rate estimation
+  const tollSegments = countTollSegments(route);
+  const motorwayKm = getMotorwayDistance(route);
+  // Bangkok expressway: avg 50 baht per toll booth
+  const expresswayTolls = tollSegments * 50;
+  // Motorway: 1.25 baht/km + 10 baht entry fee
+  const motorwayTolls = motorwayKm > 0 ? (motorwayKm * 1.25 + 10) : 0;
+  const total = expresswayTolls + motorwayTolls;
+  // Fallback: if no segments detected but toll road exists, use old formula
+  if (total === 0) {
+    const distKm = route.distance / 1000;
+    return Math.round(distKm * 2.5 + 25);
+  }
+  return Math.round(total);
 }

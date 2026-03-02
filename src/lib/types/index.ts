@@ -123,6 +123,14 @@ export interface AIChatContext {
   currentLat?: number;
   currentLng?: number;
   nearbyResults?: string;
+  // C2: Night Safety
+  currentHour?: number;
+  // C3: Fuel Price
+  fuelType?: string;
+  currentFuelPrice?: number;
+  // C5: Toll Calculator
+  tollEstimate?: number;
+  routeHasTolls?: boolean;
 }
 
 // Trip pattern for destination prediction (B4)

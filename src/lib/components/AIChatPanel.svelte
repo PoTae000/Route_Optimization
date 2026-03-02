@@ -26,6 +26,11 @@
   let activeAbortController: AbortController | null = null;
   let lastUserId: string | number = userId;
 
+  // C1: Voice Copilot
+  let isListening = false;
+  let speechRecognition: any = null;
+  let interimTranscript = '';
+
   // Vision (B1)
   let pendingImage: { base64: string; mimeType: string; preview: string } | null = null;
   let fileInput: HTMLInputElement;
@@ -153,7 +158,13 @@
     ];
   }
 
-  const quickChips = [
+  // C2: check if it's nighttime
+  $: isNightTime = (() => {
+    const h = new Date().getHours();
+    return h >= 18 || h < 6;
+  })();
+
+  const quickChips: { label: string; text: string; nightOnly?: boolean }[] = [
     { label: 'เซเว่นใกล้ฉัน', text: 'หาเซเว่นใกล้ฉันหน่อย' },
     { label: 'ปั๊มน้ำมัน', text: 'หาปั๊มน้ำมันใกล้ๆ' },
     { label: 'คาเฟ่ใกล้ๆ', text: 'หาคาเฟ่ใกล้ฉันหน่อย' },
@@ -166,7 +177,17 @@
     { label: 'แนะนำเพลง', text: 'แนะนำเพลย์ลิสต์สำหรับทริปนี้' },
     { label: 'โรงพยาบาล', text: 'หาโรงพยาบาลใกล้ฉัน' },
     { label: 'ที่จอดรถ', text: 'หาที่จอดรถใกล้ฉัน' },
+    // C3: Fuel Price
+    { label: 'ราคาน้ำมัน', text: 'ราคาน้ำมันวันนี้เท่าไหร่' },
+    // C4: Scenic Route
+    { label: 'จุดชมวิว', text: 'หาจุดชมวิวและที่เที่ยวระหว่างทาง' },
+    // C5: Toll Calculator
+    { label: 'ค่าทางด่วน', text: 'คำนวณค่าทางด่วนให้หน่อย' },
+    // C2: Night Safety (night only)
+    { label: 'ที่พักใกล้ๆ', text: 'หาที่พัก/โรงแรมใกล้ฉัน', nightOnly: true },
   ];
+
+  $: visibleChips = quickChips.filter(c => !c.nightOnly || isNightTime);
 
   // ═══ Action parsing utilities ═══
 
@@ -219,7 +240,10 @@
       routePreference: 'R',
       myLocation: 'L',
       summary: 'i',
-      playlistSuggestion: 'M'
+      playlistSuggestion: 'M',
+      fuelPrice: '$',
+      scenicSearch: 'V',
+      tollCompare: 'B'
     };
     return icons[type] || '*';
   }
@@ -248,7 +272,10 @@
       routePreference: `เปลี่ยนเส้นทาง ${action.params.pref || ''}`.trim(),
       myLocation: 'ตำแหน่งปัจจุบัน',
       summary: 'สรุปสถานะ',
-      playlistSuggestion: 'เพลย์ลิสต์แนะนำ'
+      playlistSuggestion: 'เพลย์ลิสต์แนะนำ',
+      fuelPrice: 'ราคาน้ำมัน',
+      scenicSearch: 'ค้นหาจุดชมวิว',
+      tollCompare: 'เปรียบเทียบค่าทางด่วน'
     };
     return labels[action.type] || action.type;
   }
@@ -339,6 +366,73 @@
     if (text) {
       isOpen = true;
       setTimeout(() => sendMessage(text), 200);
+    }
+  }
+
+  // ═══ C1: Voice Copilot — Speech Recognition ═══
+  function startListening() {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      dispatch('action', { type: 'notification', params: { message: 'เบราว์เซอร์ไม่รองรับ Speech Recognition', level: 'error' } });
+      return;
+    }
+    speechRecognition = new SpeechRecognition();
+    speechRecognition.lang = 'th-TH';
+    speechRecognition.continuous = false;
+    speechRecognition.interimResults = true;
+    speechRecognition.maxAlternatives = 1;
+
+    speechRecognition.onresult = (event: any) => {
+      let interim = '';
+      let final = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          final += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+      if (final) {
+        inputText = final;
+        interimTranscript = '';
+      } else {
+        interimTranscript = interim;
+      }
+    };
+
+    speechRecognition.onend = () => {
+      isListening = false;
+      interimTranscript = '';
+      // Auto-send if there's text
+      if (inputText.trim()) {
+        sendMessage();
+      }
+    };
+
+    speechRecognition.onerror = (event: any) => {
+      console.warn('Speech recognition error:', event.error);
+      isListening = false;
+      interimTranscript = '';
+    };
+
+    speechRecognition.start();
+    isListening = true;
+  }
+
+  function stopListening() {
+    if (speechRecognition) {
+      speechRecognition.stop();
+    }
+    isListening = false;
+    interimTranscript = '';
+  }
+
+  function toggleListening() {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
     }
   }
 
@@ -476,6 +570,11 @@
             }
           }
         }
+        // C1: Auto-speak AI response (strip ACTION tags)
+        const speakText = stripActions(lastMsg.content).replace(/[#*_~`>|]/g, '').trim();
+        if (speakText) {
+          dispatch('speak', { text: speakText });
+        }
       }
 
       saveMessages();
@@ -576,7 +675,7 @@
           {/if}
 
           <div class="ai-quick-chips">
-            {#each quickChips as chip}
+            {#each visibleChips as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
             {/each}
           </div>
@@ -622,7 +721,7 @@
         <!-- Quick chips after messages -->
         {#if !isStreaming}
           <div class="ai-quick-chips ai-chips-inline">
-            {#each quickChips.slice(0, 6) as chip}
+            {#each visibleChips.slice(0, 8) as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
             {/each}
           </div>
@@ -640,6 +739,14 @@
       </div>
     {/if}
 
+    <!-- C1: Listening indicator -->
+    {#if isListening}
+      <div class="ai-listening-bar">
+        <span class="ai-listening-dot"></span>
+        <span>กำลังฟัง...{interimTranscript ? ` "${interimTranscript}"` : ''}</span>
+      </div>
+    {/if}
+
     <div class="ai-chat-input">
       <!-- B1: Camera button -->
       <button class="ai-camera-btn" on:click={openImagePicker} disabled={isStreaming} title="ส่งรูปถาม AI">
@@ -652,10 +759,19 @@
         bind:this={inputElement}
         bind:value={inputText}
         on:keydown={handleKeydown}
-        placeholder={pendingImage ? 'ถามเกี่ยวกับรูปนี้...' : 'ถามอะไรก็ได้... หาร้าน, ส่งรูป, วางแผนทริป'}
-        disabled={isStreaming}
+        placeholder={isListening ? 'พูดได้เลย...' : (pendingImage ? 'ถามเกี่ยวกับรูปนี้...' : 'ถามอะไรก็ได้... หาร้าน, ส่งรูป, วางแผนทริป')}
+        disabled={isStreaming || isListening}
         autocomplete="off"
       />
+      <!-- C1: Mic button -->
+      <button class="ai-mic-btn" class:listening={isListening} on:click={toggleListening} disabled={isStreaming} title="พูดกับ AI">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+          <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
       <button class="ai-send-btn" on:click={() => sendMessage()} disabled={isStreaming || (!inputText.trim() && !pendingImage)}>
         <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
       </button>
@@ -1133,6 +1249,57 @@
   transition: all 0.2s;
   flex-shrink: 0;
 }
+/* C1: Mic button */
+.ai-mic-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #71717a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.ai-mic-btn:hover:not(:disabled) { color: #ef4444; border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.08); }
+.ai-mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ai-mic-btn.listening {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.15);
+  animation: micPulse 1.5s ease-in-out infinite;
+}
+@keyframes micPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+}
+
+/* C1: Listening indicator bar */
+.ai-listening-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: #ef4444;
+  border-top: 1px solid rgba(239, 68, 68, 0.15);
+  background: rgba(239, 68, 68, 0.05);
+}
+.ai-listening-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: listeningPulse 1s ease-in-out infinite;
+}
+@keyframes listeningPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
 .ai-send-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .ai-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 

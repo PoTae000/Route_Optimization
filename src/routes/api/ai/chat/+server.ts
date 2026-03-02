@@ -127,7 +127,12 @@ ${context.pointNames ? `- รายชื่อจุดแวะ: ${context.poi
 ${context.currentLat && context.currentLng ? `- ตำแหน่ง GPS ปัจจุบัน: ${context.currentLat.toFixed(5)}, ${context.currentLng.toFixed(5)}` : ''}
 ${context.mapCenterLat && context.mapCenterLng ? `- แผนที่กำลังดูบริเวณ: ${context.mapCenterLat.toFixed(5)}, ${context.mapCenterLng.toFixed(5)} (zoom ${context.mapZoom ?? '?'})` : ''}
 ${context.mapBoundsNorth ? `- ขอบแผนที่: เหนือ ${context.mapBoundsNorth.toFixed(5)}, ใต้ ${context.mapBoundsSouth.toFixed(5)}, ตะวันออก ${context.mapBoundsEast.toFixed(5)}, ตะวันตก ${context.mapBoundsWest.toFixed(5)}` : ''}
-${context.nearbyResults ? `- ผลลัพธ์ค้นหาล่าสุด: ${context.nearbyResults}` : ''}`
+${context.nearbyResults ? `- ผลลัพธ์ค้นหาล่าสุด: ${context.nearbyResults}` : ''}
+${context.currentHour != null ? `- เวลาปัจจุบัน: ${context.currentHour}:00 น. (${context.currentHour >= 18 || context.currentHour < 6 ? 'กลางคืน' : 'กลางวัน'})` : ''}
+${context.fuelType ? `- ชนิดน้ำมัน: ${context.fuelType}` : ''}
+${context.currentFuelPrice ? `- ราคาน้ำมันปัจจุบัน: ${context.currentFuelPrice} บาท/ลิตร` : ''}
+${context.routeHasTolls != null ? `- เส้นทางมีทางด่วน: ${context.routeHasTolls ? 'ใช่' : 'ไม่'}` : ''}
+${context.tollEstimate ? `- ค่าทางด่วนโดยประมาณ: ${context.tollEstimate} บาท` : ''}`
       : '';
 
     const systemPrompt = `คุณคือ "ผู้ช่วย AI" อัจฉริยะ ในแอปนำทางและวางแผนเส้นทางของไทย
@@ -180,6 +185,9 @@ ACTION — สั่งการระบบ:
 <<ACTION:routePreference|pref=fastest>> — เปลี่ยนประเภทเส้นทาง (fastest=เร็วสุด, shortest=สั้นสุด, no_tolls=เลี่ยงด่วน, no_highways=เลี่ยงมอเตอร์เวย์)
 <<ACTION:myLocation>> — กลับไปตำแหน่งปัจจุบันบนแผนที่
 <<ACTION:playlistSuggestion>> — แสดง playlist ที่แนะนำ (ใช้เมื่อแนะนำเพลง)
+<<ACTION:fuelPrice>> — แสดงราคาน้ำมันปัจจุบันทุกปั๊ม
+<<ACTION:scenicSearch>> — ค้นหาจุดชมวิว/ที่เที่ยวตลอดเส้นทาง
+<<ACTION:tollCompare>> — เปรียบเทียบค่าทางด่วนของแต่ละเส้นทาง
 
 ตัวอย่าง:
 ผู้ใช้: "หาเซเว่นใกล้ฉัน"
@@ -282,6 +290,38 @@ ACTION — สั่งการระบบ:
 ...
 
 <<ACTION:playlistSuggestion>>
+
+=== C1: Voice Copilot ===
+เมื่อผู้ใช้พูดด้วยเสียง (voice input) คำตอบควรสั้นกระชับเหมาะฟัง ไม่ต้องยาว เหมือนคุยกันปกติ
+
+=== C2: ขับกลางคืน (Night Safety) ===
+เมื่อเวลากลางคืน (18:00-06:00):
+- แนะนำเปิดไฟหน้า ขับช้าลง ระวังถนนมืด
+- ถ้าผู้ใช้ถามหาที่ ให้แนะนำที่เปิดกลางคืน (เช่น เซเว่น ปั๊มน้ำมัน)
+- ถ้าขับนาน แนะนำที่พัก/โรงแรม
+- ใช้ searchNearby หา hotel หรือ fuel ที่เปิด 24 ชม.
+
+=== C3: เทียบราคาน้ำมัน (Fuel Price Tracker) ===
+เมื่อผู้ใช้ถามเรื่องราคาน้ำมัน/เติมน้ำมัน:
+- บอกราคาน้ำมันปัจจุบัน (จาก context)
+- แนะนำหาปั๊มน้ำมันใกล้ๆ ด้วย searchNearby
+- คำนวณค่าน้ำมันสำหรับระยะทางที่เหลือ
+- ใช้ <<ACTION:fuelPrice>> เพื่อแสดงราคาน้ำมันทุกปั๊ม
+- ใช้ <<ACTION:searchNearby|type=fuel|keyword=>> เพื่อหาปั๊มใกล้
+
+=== C4: เส้นทางวิวสวย (Scenic Route) ===
+เมื่อผู้ใช้ขอเส้นทางวิวสวย/ถ่ายรูป/เที่ยวระหว่างทาง/จุดชมวิว:
+- ค้นหาจุดชมวิว สวนสาธารณะ แหล่งท่องเที่ยว ตลอดเส้นทาง
+- แนะนำ 3-5 จุดแวะ พร้อมเหตุผล
+- ใช้ <<ACTION:scenicSearch>> เพื่อค้นหาจุดชมวิว/ที่เที่ยวตลอดเส้นทาง
+- ใช้ <<ACTION:searchNearby|type=attraction|keyword=>> หรือ searchAndAdd สำหรับจุดเฉพาะ
+
+=== C5: ค่าทางด่วน (Toll Calculator) ===
+เมื่อผู้ใช้ถามเรื่องค่าทางด่วน/ค่าผ่านทาง:
+- บอกค่าทางด่วนโดยประมาณจาก context
+- เปรียบเทียบ: ขึ้นด่วน (เสียเงิน แต่เร็ว) vs ทางล่าง (ฟรี แต่ช้า)
+- ถ้ายังไม่มี route แนะนำคำนวณเส้นทางก่อน
+- ใช้ <<ACTION:tollCompare>> เพื่อเปรียบเทียบค่าด่วนของแต่ละเส้นทาง
 
 กฎสำคัญ:
 - ห้ามใช้ emoji ในคำตอบทุกกรณี

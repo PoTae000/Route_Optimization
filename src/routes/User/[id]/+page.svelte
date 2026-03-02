@@ -519,7 +519,15 @@
       mapBoundsSouth: bounds?.getSouth?.(),
       mapBoundsEast: bounds?.getEast?.(),
       mapBoundsWest: bounds?.getWest?.(),
-      nearbyResults: lastNearbyResultsText || undefined
+      nearbyResults: lastNearbyResultsText || undefined,
+      // C2: Night Safety
+      currentHour: new Date().getHours(),
+      // C3: Fuel Price
+      fuelType: selectedFuelType,
+      currentFuelPrice,
+      // C5: Toll Calculator
+      tollEstimate: routeAlternatives[selectedRouteIndex]?.tollEstimate || 0,
+      routeHasTolls: routeAlternatives[selectedRouteIndex]?.hasTolls || false
     } as AIChatContext;
   })();
 
@@ -1496,6 +1504,27 @@
       message: 'แบตเตอรี่ต่ำ หาที่ชาร์จไหม?',
       chatPrompt: 'หาสถานีชาร์จรถไฟฟ้าใกล้ฉัน',
       cooldown: 15 * 60 * 1000
+    },
+    // C2: Night Safety
+    {
+      id: 'night_driving',
+      check: () => {
+        const h = new Date().getHours();
+        return isNavigating && (h >= 21 || h <= 4);
+      },
+      message: 'ขับกลางคืนดึกแล้ว ระวังตัวด้วยนะ',
+      chatPrompt: 'ผู้ใช้ขับรถกลางคืนดึก ให้คำแนะนำความปลอดภัย แนะนำที่พักใกล้ๆถ้าเหนื่อย',
+      cooldown: 60 * 60 * 1000
+    },
+    {
+      id: 'night_start',
+      check: () => {
+        const h = new Date().getHours();
+        return isNavigating && h >= 18 && h < 21 && navigationStartTime != null && (Date.now() - navigationStartTime.getTime() < 5 * 60 * 1000);
+      },
+      message: 'เริ่มขับตอนค่ำ เปิดไฟหน้ารถด้วยนะ',
+      chatPrompt: 'ผู้ใช้เริ่มขับตอนค่ำ แนะนำความปลอดภัยขับกลางคืน',
+      cooldown: 24 * 60 * 60 * 1000
     }
   ];
 
@@ -4346,10 +4375,165 @@
         case 'playlistSuggestion':
           showNotification('เพลย์ลิสต์แนะนำพร้อมแล้ว', 'success');
           break;
+        // C3: Fuel Price
+        case 'fuelPrice': {
+          if (!oilPriceData) await fetchOilPrices();
+          if (oilPriceData?.stations) {
+            const lines: string[] = [`ราคาน้ำมัน ${selectedFuelType} วันนี้:`];
+            for (const sOpt of stationOptions) {
+              const station = oilPriceData.stations[sOpt.value];
+              if (station && station[selectedFuelType]) {
+                lines.push(`${sOpt.label}: ${station[selectedFuelType].price} บาท/ลิตร`);
+              }
+            }
+            if (aiChatPanelRef) aiChatPanelRef.injectNearbyResults(lines.join('\n'));
+            showNotification(`${selectedFuelType}: ${currentFuelPrice} บาท/ลิตร`, 'success');
+          } else {
+            showNotification('ไม่สามารถดึงราคาน้ำมันได้', 'warning');
+          }
+          break;
+        }
+        // C4: Scenic Route
+        case 'scenicSearch': {
+          if (!optimizedRoute?.route?.geometry) {
+            showNotification('ยังไม่มีเส้นทาง คำนวณเส้นทางก่อน', 'warning');
+            break;
+          }
+          showNotification('กำลังค้นหาจุดชมวิว...', 'success');
+          try {
+            const pois = await searchScenicAlongRoute();
+            if (pois.length > 0) {
+              showScenicPOIs(pois);
+              const poiLines = pois.map((p, i) => `${i + 1}. ${p.name} (${p.type}) - ${(p.distAlongRoute / 1000).toFixed(1)} กม.จากต้นทาง`);
+              if (aiChatPanelRef) aiChatPanelRef.injectNearbyResults(`จุดชมวิว/ที่เที่ยวตลอดเส้นทาง:\n${poiLines.join('\n')}\n\nบอกได้เลยว่าอยากแวะจุดไหน`);
+              showNotification(`พบ ${pois.length} จุดชมวิว/ที่เที่ยว`, 'success');
+            } else {
+              showNotification('ไม่พบจุดชมวิวตลอดเส้นทาง', 'warning');
+            }
+          } catch (err: any) {
+            showNotification('ค้นหาจุดชมวิวล้มเหลว', 'error');
+          }
+          break;
+        }
+        // C5: Toll Compare
+        case 'tollCompare': {
+          if (routeAlternatives.length === 0) {
+            showNotification('ยังไม่มีเส้นทาง คำนวณก่อน', 'warning');
+            break;
+          }
+          const compLines: string[] = ['เปรียบเทียบเส้นทาง:'];
+          routeAlternatives.forEach((r, i) => {
+            const fuelCost = getFuelCostForRoute(r.distance, r.duration);
+            const totalCost = fuelCost + (r.tollEstimate || 0);
+            compLines.push(`${i + 1}. ${r.label}: ${(r.distance / 1000).toFixed(1)} กม. / ${Math.round(r.duration / 60)} นาที / ค่าด่วน ${r.tollEstimate || 0} บาท / ค่าน้ำมัน ~${Math.round(fuelCost)} บาท / รวม ~${Math.round(totalCost)} บาท ${r.hasTolls ? '(มีทางด่วน)' : '(ไม่มีทางด่วน)'}`);
+          });
+          if (aiChatPanelRef) aiChatPanelRef.injectNearbyResults(compLines.join('\n'));
+          showNotification('กำลังเปรียบเทียบค่าทางด่วน...', 'success');
+          break;
+        }
       }
     } catch (err: any) {
       showNotification(`ดำเนินการไม่สำเร็จ: ${err.message}`, 'error');
     }
+  }
+
+  // ═══ C4: Scenic Route — search viewpoints/attractions along route ═══
+  async function searchScenicAlongRoute(): Promise<import('$lib/types').RoutePOI[]> {
+    if (!optimizedRoute?.route?.geometry?.coordinates) return [];
+    const coords = optimizedRoute.route.geometry.coordinates;
+    // Sample points every ~10km along route
+    const totalDist = optimizedRoute.distance || 0;
+    const sampleInterval = 10000; // 10km in meters
+    const sampleCount = Math.max(2, Math.min(8, Math.ceil(totalDist / sampleInterval)));
+    const step = Math.floor(coords.length / sampleCount);
+    const samplePoints: [number, number][] = [];
+    for (let i = 0; i < coords.length; i += step) {
+      samplePoints.push([coords[i][1], coords[i][0]]); // [lat, lng]
+    }
+    // Always include last point
+    const last = coords[coords.length - 1];
+    samplePoints.push([last[1], last[0]]);
+
+    // Build Overpass query for scenic POIs around sample points
+    const aroundClauses = samplePoints.map(([lat, lng]) =>
+      `(around:5000,${lat},${lng})`
+    );
+    const types = [
+      '["tourism"="viewpoint"]',
+      '["tourism"="attraction"]',
+      '["leisure"="park"]',
+      '["historic"]',
+      '["tourism"="museum"]'
+    ];
+    const queries = types.flatMap(tag =>
+      aroundClauses.map(around => `node${tag}${around};`)
+    );
+    const ovQuery = `[out:json][timeout:20];(${queries.join('')});out 30;`;
+
+    const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: 'data=' + encodeURIComponent(ovQuery)
+    });
+    const ovData = await ovRes.json();
+    const elements = (ovData.elements || []).filter((el: any) => el.lat && el.lon && (el.tags?.name || el.tags?.['name:th']));
+
+    // Deduplicate and calculate distance along route
+    const seen = new Set<string>();
+    const pois: import('$lib/types').RoutePOI[] = [];
+    for (const el of elements) {
+      const key = `${el.lat.toFixed(4)},${el.lon.toFixed(4)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const name = el.tags?.['name:th'] || el.tags?.name || 'Unknown';
+      const poiType = el.tags?.tourism === 'viewpoint' ? 'viewpoint' :
+                      el.tags?.tourism === 'attraction' ? 'attraction' :
+                      el.tags?.tourism === 'museum' ? 'museum' :
+                      el.tags?.leisure === 'park' ? 'park' :
+                      el.tags?.historic ? 'temple' : 'attraction';
+      // Estimate distance along route (find nearest route coord)
+      let minDist = Infinity;
+      let routeIdx = 0;
+      for (let i = 0; i < coords.length; i += Math.max(1, Math.floor(coords.length / 100))) {
+        const d = getDistance(el.lat, el.lon, coords[i][1], coords[i][0]);
+        if (d < minDist) { minDist = d; routeIdx = i; }
+      }
+      pois.push({
+        id: `scenic-${el.id}`,
+        type: poiType as any,
+        name,
+        lat: el.lat,
+        lng: el.lon,
+        routeIndex: routeIdx,
+        distFromRoute: minDist * 1000, // km to m
+        distAlongRoute: (routeIdx / coords.length) * (optimizedRoute.distance || 0),
+        tags: el.tags
+      });
+    }
+    // Sort by distance along route
+    pois.sort((a, b) => a.distAlongRoute - b.distAlongRoute);
+    return pois.slice(0, 15); // max 15 results
+  }
+
+  function showScenicPOIs(pois: import('$lib/types').RoutePOI[]) {
+    if (!L || !map) return;
+    // Remove old scenic markers
+    if ((window as any).__scenicMarkers) {
+      (window as any).__scenicMarkers.forEach((m: any) => m.remove());
+    }
+    (window as any).__scenicMarkers = [];
+    pois.forEach((poi, idx) => {
+      const marker = L.marker([poi.lat, poi.lng], {
+        icon: L.divIcon({
+          className: '',
+          html: `<div class="marker-pin" style="background: linear-gradient(135deg, #f59e0b, #ef4444); box-shadow: 0 0 20px rgba(245,158,11,0.5); width: 38px; height: 38px; font-size: 16px;"><span>${idx + 1}</span><div class="marker-name-label" style="background: rgba(245,158,11,0.9);">${poi.name}</div></div>`,
+          iconSize: [38, 38],
+          iconAnchor: [19, 38]
+        }),
+        zIndexOffset: 700
+      }).addTo(map);
+      marker.bindPopup(`<div class="custom-popup"><div class="popup-accent" style="background: linear-gradient(135deg, #f59e0b, #ef4444)"></div><div class="popup-header"><div class="popup-badge" style="background: linear-gradient(135deg, #f59e0b, #ef4444)">${idx + 1}</div><div class="popup-header-text"><h4>${poi.name}</h4><span class="popup-tag" style="color: #fbbf24">${poi.type} - ${(poi.distAlongRoute / 1000).toFixed(1)} กม.</span></div></div></div>`, { className: 'dark-popup' });
+      (window as any).__scenicMarkers.push(marker);
+    });
   }
 
   // ==================== GPS FUNCTIONS - COPIED EXACTLY FROM ORIGINAL ====================
@@ -9693,7 +9877,7 @@ out center body;`;
 
 <!-- AI Chat Panel (floating) -->
 {#if aiAvailable}
-  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} userId={currentUser?.id || 'guest'} {predictedDestination} />
+  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} on:speak={(e) => speak(e.detail.text)} userId={currentUser?.id || 'guest'} {predictedDestination} />
 {/if}
 
 <!-- B2: Proactive AI Toast -->
