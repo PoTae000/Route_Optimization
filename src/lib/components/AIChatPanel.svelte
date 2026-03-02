@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import type { AIChatMessage, AIChatContext } from '$lib/types';
+  import { renderMarkdown } from '$lib/utils/markdown';
 
   export let context: AIChatContext = {
     totalPoints: 0,
@@ -9,6 +10,8 @@
     hasRoute: false,
     isNavigating: false
   };
+
+  export let userId: string | number = 'guest';
 
   const dispatch = createEventDispatcher();
 
@@ -22,6 +25,102 @@
   // Track actions per message index
   let messageActions: Record<number, { type: string; params: Record<string, string> }[]> = {};
   let executedActions: Set<string> = new Set();
+
+  // ═══ Feature 3: Chat history persistence ═══
+
+  function getChatKey(): string {
+    return `aiChat_${userId}`;
+  }
+
+  function saveMessages() {
+    try {
+      const capped = messages.slice(-100);
+      const data = {
+        messages: capped,
+        messageActions,
+        executedActions: Array.from(executedActions)
+      };
+      localStorage.setItem(getChatKey(), JSON.stringify(data));
+    } catch {
+      // localStorage full or unavailable
+    }
+  }
+
+  function loadMessages() {
+    try {
+      const raw = localStorage.getItem(getChatKey());
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (data.messages && Array.isArray(data.messages)) {
+        messages = data.messages;
+      }
+      if (data.messageActions) {
+        messageActions = data.messageActions;
+      }
+      if (data.executedActions && Array.isArray(data.executedActions)) {
+        executedActions = new Set(data.executedActions);
+      }
+    } catch {
+      // corrupted data, ignore
+    }
+  }
+
+  onMount(() => {
+    loadMessages();
+    if (messages.length > 0) {
+      scrollToBottom();
+    }
+  });
+
+  // ═══ Feature 6: Context window management ═══
+
+  function summarizeOlderMessages(msgs: AIChatMessage[]): string {
+    const places: string[] = [];
+    const actionTypes = new Set<string>();
+    const userQuestions: string[] = [];
+
+    for (const msg of msgs) {
+      if (msg.role === 'user') {
+        userQuestions.push(msg.content.slice(0, 60));
+      }
+      if (msg.role === 'assistant') {
+        const actions = parseActions(msg.content);
+        for (const a of actions) {
+          actionTypes.add(a.type);
+          const place = a.params.query || a.params.name || a.params.keyword;
+          if (place) places.push(place);
+        }
+      }
+    }
+
+    const parts: string[] = ['[สรุปบทสนทนาก่อนหน้า]'];
+    if (places.length > 0) {
+      parts.push(`สถานที่ที่พูดถึง: ${[...new Set(places)].join(', ')}`);
+    }
+    if (actionTypes.size > 0) {
+      parts.push(`การกระทำที่ใช้: ${Array.from(actionTypes).join(', ')}`);
+    }
+    if (userQuestions.length > 0) {
+      const recent = userQuestions.slice(-5);
+      parts.push(`คำถามล่าสุด: ${recent.join(' | ')}`);
+    }
+    return parts.join('\n');
+  }
+
+  function buildContextMessages(): AIChatMessage[] {
+    // Exclude the last message (empty placeholder) — caller handles that
+    const allMsgs = messages.slice(0, -1);
+    if (allMsgs.length <= 12) {
+      return allMsgs;
+    }
+    const olderMsgs = allMsgs.slice(0, -10);
+    const recentMsgs = allMsgs.slice(-10);
+    const summary = summarizeOlderMessages(olderMsgs);
+    return [
+      { role: 'assistant', content: summary },
+      ...recentMsgs
+    ];
+  }
 
   const quickChips = [
     { label: 'เซเว่นใกล้ฉัน', text: 'หาเซเว่นใกล้ฉันหน่อย' },
@@ -152,7 +251,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: messages.slice(0, -1), // exclude empty placeholder
+          messages: buildContextMessages(),
           context
         })
       });
@@ -230,6 +329,7 @@
         }
       }
 
+      saveMessages();
       scrollToBottom();
     }
   }
@@ -245,12 +345,14 @@
     messages = [];
     messageActions = {};
     executedActions = new Set();
+    localStorage.removeItem(getChatKey());
   }
 
   // Public: inject nearby search results as assistant message
   export function injectNearbyResults(resultLines: string) {
     const content = `พบสถานที่ใกล้เคียง:\n${resultLines}\n\nบอกได้เลยว่าอยากเพิ่มจุดไหน เช่น "เพิ่มจุดที่ 1"`;
     messages = [...messages, { role: 'assistant', content }];
+    saveMessages();
     scrollToBottom();
   }
 </script>
@@ -279,7 +381,7 @@
           <div class="ai-chat-name">ผู้ช่วยเส้นทาง</div>
           <div class="ai-chat-status">
             {#if isStreaming}
-              <span class="ai-typing">กำลังพิมพ์...</span>
+              <span class="ai-typing">กำลังพิมพ์<span class="ai-dot">.</span><span class="ai-dot">.</span><span class="ai-dot">.</span></span>
             {:else}
               <span>พร้อมช่วยเหลือ</span>
             {/if}
@@ -318,7 +420,11 @@
             {/if}
             <div class="ai-msg-content">
               <div class="ai-msg-bubble">
-                {stripActions(msg.content) || '...'}
+                {#if msg.role === 'assistant'}
+                  {@html renderMarkdown(stripActions(msg.content)) || '...'}{#if isStreaming && i === messages.length - 1}<span class="ai-cursor"></span>{/if}
+                {:else}
+                  {msg.content}
+                {/if}
               </div>
               {#if msg.role === 'assistant' && messageActions[i]}
                 <div class="ai-action-cards">
@@ -442,10 +548,36 @@
 
 .ai-typing {
   color: #00ff88;
-  animation: pulse 1.5s infinite;
 }
 
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.ai-dot {
+  display: inline-block;
+  animation: dotPulse 1.4s infinite;
+}
+.ai-dot:nth-child(1) { animation-delay: 0s; }
+.ai-dot:nth-child(2) { animation-delay: 0.2s; }
+.ai-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dotPulse {
+  0%, 60%, 100% { opacity: 0.2; }
+  30% { opacity: 1; }
+}
+
+/* Feature 5: Blinking cursor during streaming */
+.ai-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: #00ff88;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: cursorBlink 0.8s infinite;
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
 
 .ai-clear-btn {
   background: none;
@@ -572,6 +704,56 @@
   color: #d4d4d8;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-bottom-left-radius: 4px;
+  white-space: normal;
+}
+
+/* Feature 4: Markdown styles inside assistant bubbles */
+.ai-msg-assistant .ai-msg-bubble :global(strong) {
+  color: #e4e4e7;
+  font-weight: 700;
+}
+.ai-msg-assistant .ai-msg-bubble :global(em) {
+  font-style: italic;
+  color: #a1a1aa;
+}
+.ai-msg-assistant .ai-msg-bubble :global(code) {
+  background: rgba(0, 255, 136, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #4ade80;
+}
+.ai-msg-assistant .ai-msg-bubble :global(pre) {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  overflow-x: auto;
+}
+.ai-msg-assistant .ai-msg-bubble :global(pre code) {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: #d4d4d8;
+  white-space: pre;
+}
+.ai-msg-assistant .ai-msg-bubble :global(ul),
+.ai-msg-assistant .ai-msg-bubble :global(ol) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.ai-msg-assistant .ai-msg-bubble :global(li) {
+  margin: 2px 0;
+}
+.ai-msg-assistant .ai-msg-bubble :global(a) {
+  color: #00ff88;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ai-msg-assistant .ai-msg-bubble :global(a:hover) {
+  color: #4ade80;
 }
 
 /* Action cards */

@@ -9464,7 +9464,7 @@ out center body;`;
 
 <!-- AI Chat Panel (floating) -->
 {#if aiAvailable && !isNavigating}
-  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} />
+  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} userId={currentUser?.id || 'guest'} />
 {/if}
 
 <!-- AI Route Suggestion Modal -->
