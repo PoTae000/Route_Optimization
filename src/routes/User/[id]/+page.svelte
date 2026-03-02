@@ -2146,6 +2146,26 @@
     if (optimizedRoute) optimizeRoute();
   }
 
+  // ═══ Confirm before adding point ═══
+  let confirmAddPoint: { name: string; address: string; lat: number; lng: number; priority: number; source: 'form' | 'ai' | 'quick'; onConfirm: () => Promise<void> } | null = null;
+
+  function requestAddPointConfirm(name: string, address: string, lat: number, lng: number, priority: number, source: 'form' | 'ai' | 'quick', onConfirm: () => Promise<void>) {
+    confirmAddPoint = { name, address, lat, lng, priority, source, onConfirm };
+    // Pan map to show the point
+    if (map) map.setView([lat, lng], 15, { animate: true });
+  }
+
+  async function executeConfirmedAdd() {
+    if (!confirmAddPoint) return;
+    const cb = confirmAddPoint.onConfirm;
+    confirmAddPoint = null;
+    await cb();
+  }
+
+  function cancelAddPoint() {
+    confirmAddPoint = null;
+  }
+
   let isAddingPoint = false;
   async function addDeliveryPoint() {
     if (isAddingPoint) return;
@@ -2159,42 +2179,49 @@
       showNotification(`จุด "${dup.name}" อยู่ตำแหน่งเดียวกันแล้ว`, 'warning');
       return;
     }
-    isAddingPoint = true;
-    try {
-      // Snap to nearest road (graceful — uses original coords if fails)
+
+    // Show confirm dialog before actually adding
+    const pointSnapshot = { ...newPoint };
+    requestAddPointConfirm(pointSnapshot.name, pointSnapshot.address, pointSnapshot.lat, pointSnapshot.lng, pointSnapshot.priority, 'form', async () => {
+      isAddingPoint = true;
       try {
-        const snapped = await callOSRMNearest(newPoint.lng, newPoint.lat);
-        if (snapped.distance < 500) { // only snap if within 500m of a road
-          newPoint = { ...newPoint, lat: parseFloat(snapped.lat.toFixed(6)), lng: parseFloat(snapped.lng.toFixed(6)) };
-          // Update click marker position
-          if (clickMarker && map) clickMarker.setLatLng([newPoint.lat, newPoint.lng]);
+        // Snap to nearest road (graceful — uses original coords if fails)
+        let snapLat = pointSnapshot.lat;
+        let snapLng = pointSnapshot.lng;
+        try {
+          const snapped = await callOSRMNearest(pointSnapshot.lng, pointSnapshot.lat);
+          if (snapped.distance < 500) {
+            snapLat = parseFloat(snapped.lat.toFixed(6));
+            snapLng = parseFloat(snapped.lng.toFixed(6));
+            if (clickMarker && map) clickMarker.setLatLng([snapLat, snapLng]);
+          }
+        } catch (_) {}
+        const payload = { ...pointSnapshot, lat: snapLat, lng: snapLng, user_id: currentUser?.id || null };
+        const res = await fetch(`${API_URL}/points`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
+        await loadDeliveryPoints();
+        if (data.id) {
+          activePointId = data.id;
+          setTimeout(() => {
+            const element = document.getElementById(`point-${data.id}`);
+            if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 100);
         }
-      } catch (_) { /* OSRM Nearest failed — use original coords */ }
-      const payload = { ...newPoint, user_id: currentUser?.id || null };
-      const res = await fetch(`${API_URL}/points`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
-      await loadDeliveryPoints();
-      if (data.id) {
-        activePointId = data.id;
-        setTimeout(() => {
-          const element = document.getElementById(`point-${data.id}`);
-          if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }, 100);
+        showAddForm = false;
+        if (clickMarker) clickMarker.remove();
+        newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
+        showNotification('เพิ่มจุดแวะสำเร็จ', 'success');
+      } catch (err) {
+        showNotification('เพิ่มไม่สำเร็จ', 'error');
+      } finally {
+        isAddingPoint = false;
       }
-      showAddForm = false;
-      if (clickMarker) clickMarker.remove();
-      newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
-      showNotification('เพิ่มจุดแวะสำเร็จ', 'success');
-    } catch (err) {
-      showNotification('เพิ่มไม่สำเร็จ', 'error');
-    } finally {
-      isAddingPoint = false;
-    }
+    });
   }
 
   async function deletePoint(id: number, name: string) {
@@ -4269,17 +4296,25 @@
   }
 
   // ==================== AI CHAT ACTIONS ====================
-  async function addPointFromAI(name: string, lat: number, lng: number, address: string) {
-    const payload = { name, address, lat, lng, priority: 3, user_id: currentUser?.id };
-    const res = await fetch(`${API_URL}/points`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+  function addPointFromAI(name: string, lat: number, lng: number, address: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      requestAddPointConfirm(name, address, lat, lng, 3, 'ai', async () => {
+        try {
+          const payload = { name, address, lat, lng, priority: 3, user_id: currentUser?.id };
+          const res = await fetch(`${API_URL}/points`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
+          await loadDeliveryPoints();
+          resolve(data);
+        } catch (err) {
+          reject(err);
+        }
+      });
     });
-    const data = await res.json();
-    if (!data || data.error || !res.ok) throw new Error(data?.error || 'เพิ่มไม่สำเร็จ');
-    await loadDeliveryPoints();
-    return data;
   }
 
   async function handleAIAction(e: CustomEvent<{type: string, params: Record<string,string>}>) {
@@ -8179,38 +8214,41 @@ out center body;`;
       closeQuickAdd();
       return;
     }
-    isQuickAdding = true;
-    try {
-      const payload = {
-        user_id: currentUser.id,
-        name: quickAddResult.name,
-        address: quickAddResult.address,
-        lat: quickAddResult.lat,
-        lng: quickAddResult.lng,
-        priority: 3
-      };
-      const res = await fetch(`${API_URL}/points`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+    const qr = quickAddResult;
+    closeQuickAdd();
+    requestAddPointConfirm(qr.name, qr.address, qr.lat, qr.lng, 3, 'quick', async () => {
+      isQuickAdding = true;
+      try {
+        const payload = {
+          user_id: currentUser!.id,
+          name: qr.name,
+          address: qr.address,
+          lat: qr.lat,
+          lng: qr.lng,
+          priority: 3
+        };
+        const res = await fetch(`${API_URL}/points`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (!res.ok) throw new Error('Failed to add point');
+        if (!res.ok) throw new Error('Failed to add point');
 
-      const data = await res.json();
-      if (data && !data.error) {
-        await loadDeliveryPoints();
-        showNotification(`เพิ่ม "${quickAddResult.name}" สำเร็จ`, 'success');
-        if (map && L) {
-          map.setView([quickAddResult.lat, quickAddResult.lng], 15, { animate: true });
+        const data = await res.json();
+        if (data && !data.error) {
+          await loadDeliveryPoints();
+          showNotification(`เพิ่ม "${qr.name}" สำเร็จ`, 'success');
+          if (map && L) {
+            map.setView([qr.lat, qr.lng], 15, { animate: true });
+          }
         }
+      } catch (err) {
+        showNotification('เพิ่มจุดไม่สำเร็จ', 'error');
+      } finally {
+        isQuickAdding = false;
       }
-    } catch (err) {
-      showNotification('เพิ่มจุดไม่สำเร็จ', 'error');
-    } finally {
-      isQuickAdding = false;
-      closeQuickAdd();
-    }
+    });
   }
 
   function closeQuickAdd() {
@@ -10129,6 +10167,24 @@ out center body;`;
     {/if}
   </div>
 </div>
+
+<!-- Confirm Add Point Modal -->
+{#if confirmAddPoint}
+  <div class="confirm-add-overlay" on:click|self={cancelAddPoint}>
+    <div class="confirm-add-card">
+      <div class="confirm-add-title">เพิ่มจุดแวะ?</div>
+      <div class="confirm-add-name">{confirmAddPoint.name}</div>
+      {#if confirmAddPoint.address && confirmAddPoint.address !== confirmAddPoint.name}
+        <div class="confirm-add-addr">{confirmAddPoint.address.length > 80 ? confirmAddPoint.address.slice(0, 80) + '...' : confirmAddPoint.address}</div>
+      {/if}
+      <div class="confirm-add-coord">{confirmAddPoint.lat.toFixed(5)}, {confirmAddPoint.lng.toFixed(5)}</div>
+      <div class="confirm-add-actions">
+        <button class="confirm-add-btn confirm-yes" on:click={executeConfirmedAdd}>เพิ่มเลย</button>
+        <button class="confirm-add-btn confirm-no" on:click={cancelAddPoint}>ยกเลิก</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- F18: Elevation Profile Panel -->
 {#if showElevation && elevationData.length > 0}
@@ -15783,6 +15839,77 @@ out center body;`;
   background: rgba(59, 130, 246, 0.15);
   white-space: nowrap;
 }
+
+/* ═══ Confirm Add Point ═══ */
+.confirm-add-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.confirm-add-card {
+  width: 300px;
+  max-width: 85vw;
+  background: rgba(26, 26, 46, 0.97);
+  border: 1px solid rgba(0, 255, 136, 0.25);
+  border-radius: 14px;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.2s ease;
+}
+.confirm-add-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #e4e4e7;
+  margin-bottom: 10px;
+}
+.confirm-add-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #4ade80;
+  margin-bottom: 4px;
+}
+.confirm-add-addr {
+  font-size: 12px;
+  color: #a1a1aa;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.confirm-add-coord {
+  font-size: 11px;
+  color: #71717a;
+  margin-bottom: 14px;
+}
+.confirm-add-actions {
+  display: flex;
+  gap: 8px;
+}
+.confirm-add-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.confirm-yes {
+  background: rgba(0, 255, 136, 0.15);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  color: #4ade80;
+}
+.confirm-yes:hover { background: rgba(0, 255, 136, 0.25); }
+.confirm-no {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #a1a1aa;
+}
+.confirm-no:hover { background: rgba(255, 255, 255, 0.1); color: #e4e4e7; }
 
 /* ═══ F18: Elevation Profile ═══ */
 .elevation-panel {
