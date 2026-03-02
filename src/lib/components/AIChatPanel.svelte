@@ -45,6 +45,10 @@
   function toggleAISpeak() {
     aiSpeakEnabled = !aiSpeakEnabled;
     saveTTSSetting();
+    // กดปิด → หยุดพูดทันที
+    if (!aiSpeakEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      speechSynthesis.cancel();
+    }
   }
 
   // Vision (B1)
