@@ -2,13 +2,33 @@ import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
 
-// ═══ Multi-provider fallback (shared logic) ═══
+// ═══ Multi-provider fallback with cooldown ═══
 
 interface AIProvider {
   name: string;
   url: string;
   key: string;
   model: string;
+}
+
+// In-memory cooldown tracker (provider name → expiry timestamp)
+const providerCooldowns: Map<string, number> = new Map();
+const DEFAULT_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+
+function parseCooldownFromError(errText: string): number {
+  const match = errText.match(/(?:retry.after|wait|try again in)\D*(\d+(?:\.\d+)?)\s*(?:s|sec|second|minute|m)/i);
+  if (match) {
+    const val = parseFloat(match[1]);
+    const unit = match[0].toLowerCase();
+    if (unit.includes('minute') || unit.includes(' m')) return val * 60 * 1000;
+    return val * 1000;
+  }
+  return DEFAULT_COOLDOWN_MS;
+}
+
+function setCooldown(providerName: string, durationMs: number) {
+  providerCooldowns.set(providerName, Date.now() + durationMs);
+  console.log(`[AI Route] ${providerName} cooldown set (${Math.round(durationMs / 1000)}s)`);
 }
 
 function getProviders(): AIProvider[] {
@@ -44,8 +64,31 @@ function getProviders(): AIProvider[] {
   return providers;
 }
 
+function getAvailableProviders(): AIProvider[] {
+  const all = getProviders();
+  const now = Date.now();
+  const available = all.filter(p => {
+    const expiry = providerCooldowns.get(p.name);
+    if (expiry && expiry > now) {
+      const remainSec = Math.round((expiry - now) / 1000);
+      console.log(`[AI Route] ${p.name} cooldown (${remainSec}s remaining), skipping`);
+      return false;
+    }
+    if (expiry) providerCooldowns.delete(p.name);
+    return true;
+  });
+
+  if (available.length === 0 && all.length > 0) {
+    console.log('[AI Route] All providers on cooldown — resetting and retrying all');
+    providerCooldowns.clear();
+    return all;
+  }
+
+  return available;
+}
+
 export const POST: RequestHandler = async ({ request }) => {
-  const providers = getProviders();
+  const providers = getAvailableProviders();
 
   if (providers.length === 0) {
     return json({ error: 'AI ไม่พร้อมใช้งาน — ไม่มี API key ที่ใช้ได้' }, { status: 503 });
@@ -91,58 +134,79 @@ ${pointsSummary}
       { role: 'user', content: userPrompt }
     ];
 
-    // ═══ Try each provider with fallback ═══
+    // ═══ Try each provider with fallback + timeout ═══
     let lastError = '';
 
     for (const provider of providers) {
       try {
         console.log(`[AI Route] Trying ${provider.name}...`);
 
-        const res = await fetch(provider.url, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${provider.key}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: provider.model,
-            messages: apiMessages,
-            temperature: 0.3,
-            max_tokens: 1500,
-            stream: false
-          })
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
 
-        if (!res.ok) {
-          const errText = await res.text();
-          console.warn(`[AI Route] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
-          lastError = `${provider.name}: ${res.status}`;
-          continue;
-        }
-
-        console.log(`[AI Route] ${provider.name} OK`);
-        const data = await res.json();
-        const content = data.choices?.[0]?.message?.content || '';
-
-        // Parse JSON from response (may be wrapped in markdown code block)
-        let parsed;
         try {
-          const jsonMatch = content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            parsed = JSON.parse(jsonMatch[0]);
-          } else {
-            parsed = JSON.parse(content);
-          }
-        } catch {
-          return json({
-            suggestedOrder: points.map((_: any, i: number) => i + 1),
-            reasoning: content,
-            clusters: [],
-            tips: []
+          const res = await fetch(provider.url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${provider.key}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: provider.model,
+              messages: apiMessages,
+              temperature: 0.3,
+              max_tokens: 1500,
+              stream: false
+            }),
+            signal: controller.signal
           });
-        }
 
-        return json(parsed);
+          clearTimeout(timeout);
+
+          if (!res.ok) {
+            const errText = await res.text();
+            console.warn(`[AI Route] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+            if (res.status === 429) {
+              const cooldownMs = parseCooldownFromError(errText);
+              setCooldown(provider.name, cooldownMs);
+            }
+            lastError = `${provider.name}: ${res.status}`;
+            continue;
+          }
+
+          console.log(`[AI Route] ${provider.name} OK`);
+          const data = await res.json();
+          const content = data.choices?.[0]?.message?.content || '';
+
+          // Parse JSON from response (may be wrapped in markdown code block)
+          let parsed;
+          try {
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              parsed = JSON.parse(jsonMatch[0]);
+            } else {
+              parsed = JSON.parse(content);
+            }
+          } catch {
+            return json({
+              suggestedOrder: points.map((_: any, i: number) => i + 1),
+              reasoning: content,
+              clusters: [],
+              tips: []
+            });
+          }
+
+          return json(parsed);
+        } catch (fetchErr: any) {
+          clearTimeout(timeout);
+          if (fetchErr.name === 'AbortError') {
+            console.warn(`[AI Route] ${provider.name} timeout (15s)`);
+            setCooldown(provider.name, 30000);
+            lastError = `${provider.name}: timeout`;
+            continue;
+          }
+          throw fetchErr;
+        }
       } catch (err: any) {
         console.warn(`[AI Route] ${provider.name} error:`, err.message);
         lastError = `${provider.name}: ${err.message}`;

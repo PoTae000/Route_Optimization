@@ -1,13 +1,36 @@
 import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
 
-// ═══ Multi-provider fallback system ═══
+// ═══ Multi-provider fallback system with cooldown ═══
 
 interface AIProvider {
   name: string;
   url: string;
   key: string;
   model: string;
+}
+
+// In-memory cooldown tracker (provider name → expiry timestamp)
+const providerCooldowns: Map<string, number> = new Map();
+const DEFAULT_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+
+function parseCooldownFromError(errText: string): number {
+  // Try to parse retry-after or wait time from error response
+  const match = errText.match(/(?:retry.after|wait|try again in)\D*(\d+(?:\.\d+)?)\s*(?:s|sec|second|minute|m)/i);
+  if (match) {
+    const val = parseFloat(match[1]);
+    const unit = match[0].toLowerCase();
+    if (unit.includes('minute') || unit.includes(' m')) return val * 60 * 1000;
+    return val * 1000;
+  }
+  return DEFAULT_COOLDOWN_MS;
+}
+
+function setCooldown(providerName: string, durationMs: number) {
+  const expiry = Date.now() + durationMs;
+  providerCooldowns.set(providerName, expiry);
+  const remainSec = Math.round(durationMs / 1000);
+  console.log(`[AI] ${providerName} cooldown set (${remainSec}s)`);
 }
 
 function getProviders(): AIProvider[] {
@@ -43,8 +66,33 @@ function getProviders(): AIProvider[] {
   return providers;
 }
 
+function getAvailableProviders(): AIProvider[] {
+  const all = getProviders();
+  const now = Date.now();
+  const available = all.filter(p => {
+    const expiry = providerCooldowns.get(p.name);
+    if (expiry && expiry > now) {
+      const remainSec = Math.round((expiry - now) / 1000);
+      console.log(`[AI] ${p.name} cooldown (${remainSec}s remaining), skipping`);
+      return false;
+    }
+    // Clean up expired cooldowns
+    if (expiry) providerCooldowns.delete(p.name);
+    return true;
+  });
+
+  // If all providers are on cooldown, reset and try all
+  if (available.length === 0 && all.length > 0) {
+    console.log('[AI] All providers on cooldown — resetting and retrying all');
+    providerCooldowns.clear();
+    return all;
+  }
+
+  return available;
+}
+
 export const POST: RequestHandler = async ({ request }) => {
-  const providers = getProviders();
+  const providers = getAvailableProviders();
 
   if (providers.length === 0) {
     return new Response(JSON.stringify({ error: 'AI ไม่พร้อมใช้งาน — ไม่มี API key ที่ใช้ได้' }), {
@@ -95,6 +143,8 @@ ${context.nearbyResults ? `- ผลลัพธ์ค้นหาล่าสุ
 8. แปลภาษา — ไทย-อังกฤษ หรือภาษาอื่นๆ
 9. เขียน — ช่วยเขียนข้อความ, อีเมล, แคปชั่น, สรุปข้อมูล
 10. ให้คำปรึกษา — เรื่องทั่วไป, การทำงาน, เทคโนโลยี
+11. วางแผนทริปท่องเที่ยว — จัดทริปรายวัน รวมที่เที่ยว ร้านอาหาร ที่พัก
+12. แนะนำเพลง/เพลย์ลิสต์ — เหมาะกับการเดินทาง
 
 วิธีตอบ:
 - ตอบเป็นภาษาไทย (ยกเว้นผู้ใช้ถามภาษาอื่น)
@@ -129,6 +179,7 @@ ACTION — สั่งการระบบ:
 <<ACTION:openGoogleMaps>> — เปิดเส้นทางใน Google Maps
 <<ACTION:routePreference|pref=fastest>> — เปลี่ยนประเภทเส้นทาง (fastest=เร็วสุด, shortest=สั้นสุด, no_tolls=เลี่ยงด่วน, no_highways=เลี่ยงมอเตอร์เวย์)
 <<ACTION:myLocation>> — กลับไปตำแหน่งปัจจุบันบนแผนที่
+<<ACTION:playlistSuggestion>> — แสดง playlist ที่แนะนำ (ใช้เมื่อแนะนำเพลง)
 
 ตัวอย่าง:
 ผู้ใช้: "หาเซเว่นใกล้ฉัน"
@@ -173,6 +224,48 @@ ACTION — สั่งการระบบ:
 ผู้ใช้: "กลับตำแหน่งฉัน" หรือ "ไปตำแหน่งปัจจุบัน"
 ตอบ: "กลับไปตำแหน่งปัจจุบันให้แล้วนะ <<ACTION:myLocation>>"
 
+=== วางแผนทริป (Trip Planner) ===
+เมื่อผู้ใช้ขอวางแผนทริป/เที่ยว ให้ตอบเป็นแผนรายวัน:
+- ใช้ ## วันที่ 1, ## วันที่ 2 เป็น heading
+- แต่ละจุดแนะนำ ให้ใส่ <<ACTION:searchAndAdd|query=ชื่อจริงสถานที่>> เพื่อให้ user กดเพิ่มจุดแวะได้
+- รวมที่เที่ยว ร้านอาหาร ที่พัก ในแต่ละวัน
+- ใส่คำอธิบายสั้นๆ แต่ละจุด
+
+ตัวอย่างวางแผนทริป:
+ผู้ใช้: "ไปเชียงใหม่ 2 วัน"
+ตอบ:
+## วันที่ 1 — เชียงใหม่เมืองเก่า
+
+**เช้า:** วัดพระสิงห์ — วัดสำคัญใจกลางเมืองเก่า
+<<ACTION:searchAndAdd|query=วัดพระสิงห์ เชียงใหม่>>
+
+**กลางวัน:** ร้านข้าวซอยแม่สาย — ข้าวซอยอร่อยขึ้นชื่อ
+<<ACTION:searchAndAdd|query=ร้านข้าวซอยแม่สาย เชียงใหม่>>
+
+**บ่าย:** วัดเจดีย์หลวง — เจดีย์โบราณที่ใหญ่ที่สุดในเชียงใหม่
+<<ACTION:searchAndAdd|query=วัดเจดีย์หลวง เชียงใหม่>>
+
+## วันที่ 2 — ดอยสุเทพ
+...
+
+=== แนะนำเพลง (Road DJ) ===
+เมื่อผู้ใช้ขอแนะนำเพลง/เพลย์ลิสต์สำหรับเดินทาง:
+- พิจารณาระยะทาง เวลาเดินทาง เวลาของวัน
+- แนะนำ 5-8 เพลง พร้อม YouTube search link
+- ใช้รูปแบบ: **ชื่อเพลง** - ศิลปิน [ฟัง](https://www.youtube.com/results?search_query=ชื่อเพลง+ศิลปิน)
+- ท้ายข้อความใส่ <<ACTION:playlistSuggestion>>
+
+ตัวอย่าง:
+ผู้ใช้: "แนะนำเพลง"
+ตอบ:
+เพลย์ลิสต์สำหรับทริปนี้:
+
+1. **ขับรถเล่น** - Hugo [ฟัง](https://www.youtube.com/results?search_query=ขับรถเล่น+Hugo)
+2. **ถนนสายไม่มีจุดหมาย** - เสือ ธนพล [ฟัง](https://www.youtube.com/results?search_query=ถนนสายไม่มีจุดหมาย+เสือธนพล)
+...
+
+<<ACTION:playlistSuggestion>>
+
 กฎสำคัญ:
 - ห้ามใช้ emoji ในคำตอบทุกกรณี
 - ใส่ ACTION tag เฉพาะเมื่อผู้ใช้สั่งให้ทำจริงๆ
@@ -194,50 +287,73 @@ ACTION — สั่งการระบบ:
       }))
     ];
 
-    // ═══ Try each provider with fallback ═══
+    // ═══ Try each provider with fallback + timeout ═══
     let lastError = '';
+    const nextProviders = getAvailableProviders();
+    const providersToTry = nextProviders.length > 0 ? nextProviders : providers;
 
-    for (const provider of providers) {
+    for (const provider of providersToTry) {
       try {
         console.log(`[AI] Trying ${provider.name} (${provider.model})...`);
 
-        const res = await fetch(provider.url, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${provider.key}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: provider.model,
-            messages: apiMessages,
-            temperature: 0.6,
-            max_tokens: 2048,
-            stream: true
-          })
-        });
+        // AbortController with 15s timeout per provider
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
 
-        if (res.ok) {
-          console.log(`[AI] ${provider.name} OK — streaming response`);
-          return new Response(res.body, {
+        try {
+          const res = await fetch(provider.url, {
+            method: 'POST',
             headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive'
-            }
+              'Authorization': `Bearer ${provider.key}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: provider.model,
+              messages: apiMessages,
+              temperature: 0.6,
+              max_tokens: 2048,
+              stream: true
+            }),
+            signal: controller.signal
           });
-        }
 
-        // Rate limit or error — try next provider
-        const errText = await res.text();
-        console.warn(`[AI] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+          clearTimeout(timeout);
 
-        if (res.status === 429) {
-          lastError = `${provider.name} ถูกจำกัดการใช้งาน`;
+          if (res.ok) {
+            console.log(`[AI] ${provider.name} OK — streaming response`);
+            return new Response(res.body, {
+              headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-AI-Provider': provider.name
+              }
+            });
+          }
+
+          // Rate limit or error — set cooldown and try next
+          const errText = await res.text();
+          console.warn(`[AI] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+
+          if (res.status === 429) {
+            const cooldownMs = parseCooldownFromError(errText);
+            setCooldown(provider.name, cooldownMs);
+            lastError = `${provider.name} ถูกจำกัดการใช้งาน`;
+            continue;
+          }
+
+          lastError = `${provider.name}: error ${res.status}`;
           continue;
+        } catch (fetchErr: any) {
+          clearTimeout(timeout);
+          if (fetchErr.name === 'AbortError') {
+            console.warn(`[AI] ${provider.name} timeout (15s)`);
+            setCooldown(provider.name, 30000); // 30s cooldown for timeout
+            lastError = `${provider.name}: timeout`;
+            continue;
+          }
+          throw fetchErr;
         }
-
-        lastError = `${provider.name}: error ${res.status}`;
-        continue;
       } catch (err: any) {
         console.warn(`[AI] ${provider.name} fetch error:`, err.message);
         lastError = `${provider.name}: ${err.message}`;
@@ -246,7 +362,8 @@ ACTION — สั่งการระบบ:
     }
 
     // All providers failed
-    const errorMsg = providers.length > 1
+    const allProviders = getProviders();
+    const errorMsg = allProviders.length > 1
       ? `AI ทุกระบบไม่พร้อมใช้งานชั่วคราว (${lastError}) กรุณารอสักครู่แล้วลองใหม่`
       : `AI ไม่พร้อมใช้งาน: ${lastError}`;
 

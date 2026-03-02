@@ -106,6 +106,8 @@ export interface AIRouteSuggestionData {
 export interface AIChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  imageBase64?: string;
+  hasImage?: boolean;
 }
 
 export interface AIChatContext {
@@ -121,4 +123,27 @@ export interface AIChatContext {
   currentLat?: number;
   currentLng?: number;
   nearbyResults?: string;
+}
+
+// Trip pattern for destination prediction (B4)
+export interface TripPattern {
+  dayOfWeek: number; // 0-6
+  hourRange: number; // 0-23
+  destination: { lat: number; lng: number; name: string };
+  count: number;
+  lastVisited: number; // timestamp
+}
+
+// Trip recap data (B5)
+export interface TripRecapData {
+  coords: [number, number][]; // [lat, lng] array
+  distance: number; // meters
+  duration: number; // ms
+  avgSpeed: number; // km/h
+  maxSpeed: number; // km/h
+  stopsCount: number;
+  deliveriesSuccess: number;
+  startTime: Date;
+  endTime: Date;
+  aiSummary?: string;
 }

@@ -13,7 +13,8 @@
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AIChatPanel from '$lib/components/AIChatPanel.svelte';
   import AIRouteSuggestion from '$lib/components/AIRouteSuggestion.svelte';
-  import type { AIRouteSuggestionData, AIChatContext } from '$lib/types';
+  import TripRecap from '$lib/components/TripRecap.svelte';
+  import type { AIRouteSuggestionData, AIChatContext, TripRecapData, TripPattern } from '$lib/types';
   import { callOSRMDirect, callOSRMTable, callOSRMNearest, callOSRMMatch } from '$lib/utils/osrm';
 
   // Silence all console output in production
@@ -88,6 +89,7 @@
     if (batteryInterval) { clearInterval(batteryInterval); batteryInterval = null; }
     if (oilPriceInterval) { clearInterval(oilPriceInterval); oilPriceInterval = null; }
     if (navigationInterval) { clearInterval(navigationInterval); navigationInterval = null; }
+    if (proactiveInterval) { clearInterval(proactiveInterval); proactiveInterval = null; }
     // Remove event listeners
     if (browser) {
       window.removeEventListener('keydown', handleKeyboardShortcuts);
@@ -1464,6 +1466,167 @@
   let isAIPlanning = false;
   let aiChatOpen = false;
   let aiChatPanelRef: AIChatPanel;
+
+  // ═══ B2: Proactive AI alerts ═══
+  let proactiveInterval: ReturnType<typeof setInterval> | null = null;
+  let proactiveLastShown: Record<string, number> = {};
+  let proactiveToast: { show: boolean; message: string; chatPrompt: string } = { show: false, message: '', chatPrompt: '' };
+
+  const proactiveRules = [
+    {
+      id: 'rest',
+      check: () => isNavigating && navigationStartTime && (Date.now() - navigationStartTime.getTime() > 2 * 60 * 60 * 1000),
+      message: 'ขับมา 2 ชั่วโมงแล้ว พักสักหน่อยไหม?',
+      chatPrompt: 'แนะนำจุดพักรถใกล้ฉันหน่อย ขับมานานแล้ว',
+      cooldown: 30 * 60 * 1000
+    },
+    {
+      id: 'meal',
+      check: () => {
+        const h = new Date().getHours();
+        return isNavigating && ((h >= 11 && h <= 13) || (h >= 17 && h <= 19));
+      },
+      message: 'ใกล้เวลาอาหาร หาร้านกินไหม?',
+      chatPrompt: 'หาร้านอาหารใกล้ฉันหน่อย',
+      cooldown: 60 * 60 * 1000
+    },
+    {
+      id: 'fuel',
+      check: () => isNavigating && vehicleType === 'ev' && batteryLevel < 30,
+      message: 'แบตเตอรี่ต่ำ หาที่ชาร์จไหม?',
+      chatPrompt: 'หาสถานีชาร์จรถไฟฟ้าใกล้ฉัน',
+      cooldown: 15 * 60 * 1000
+    }
+  ];
+
+  function checkProactiveAlerts() {
+    const now = Date.now();
+    for (const rule of proactiveRules) {
+      const lastShown = proactiveLastShown[rule.id] || 0;
+      if (now - lastShown < rule.cooldown) continue;
+      if (rule.check()) {
+        proactiveLastShown[rule.id] = now;
+        proactiveToast = { show: true, message: rule.message, chatPrompt: rule.chatPrompt };
+        setTimeout(() => { proactiveToast = { ...proactiveToast, show: false }; }, 8000);
+        break; // only one alert at a time
+      }
+    }
+  }
+
+  function handleProactiveClick() {
+    const prompt = proactiveToast.chatPrompt;
+    proactiveToast = { ...proactiveToast, show: false };
+    if (aiChatPanelRef && prompt) {
+      aiChatPanelRef.triggerMessage(prompt);
+    }
+  }
+
+  // ═══ B4: Destination prediction ═══
+  let predictedDestination: { name: string; lat: number; lng: number } | null = null;
+
+  function recordTripPattern(destName: string, destLat: number, destLng: number) {
+    try {
+      const uid = currentUser?.id || 'guest';
+      const key = `tripPatterns_${uid}`;
+      const raw = localStorage.getItem(key);
+      let patterns: TripPattern[] = raw ? JSON.parse(raw) : [];
+      const now = new Date();
+      const dayOfWeek = now.getDay();
+      const hourRange = now.getHours();
+
+      // Find existing pattern
+      const existing = patterns.find(p =>
+        p.dayOfWeek === dayOfWeek &&
+        Math.abs(p.hourRange - hourRange) <= 1 &&
+        p.destination.name === destName
+      );
+      if (existing) {
+        existing.count++;
+        existing.lastVisited = Date.now();
+      } else {
+        patterns.push({
+          dayOfWeek,
+          hourRange,
+          destination: { lat: destLat, lng: destLng, name: destName },
+          count: 1,
+          lastVisited: Date.now()
+        });
+      }
+      // Keep max 50
+      patterns = patterns.sort((a, b) => b.lastVisited - a.lastVisited).slice(0, 50);
+      localStorage.setItem(key, JSON.stringify(patterns));
+    } catch {}
+  }
+
+  function getPredictedDestination(): { name: string; lat: number; lng: number } | null {
+    try {
+      const uid = currentUser?.id || 'guest';
+      const key = `tripPatterns_${uid}`;
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const patterns: TripPattern[] = JSON.parse(raw);
+      const now = new Date();
+      const dayOfWeek = now.getDay();
+      const hourRange = now.getHours();
+
+      const matches = patterns.filter(p =>
+        p.dayOfWeek === dayOfWeek &&
+        Math.abs(p.hourRange - hourRange) <= 2 &&
+        p.count >= 2
+      ).sort((a, b) => b.count - a.count);
+
+      if (matches.length > 0) return matches[0].destination;
+      return null;
+    } catch { return null; }
+  }
+
+  // ═══ B5: Trip Recap ═══
+  let tripRecordCoords: [number, number][] = [];
+  let showTripRecap = false;
+  let tripRecapData: TripRecapData | null = null;
+
+  function recordTripCoord() {
+    if (!isNavigating || !currentLocation) return;
+    tripRecordCoords.push([currentLocation.lat, currentLocation.lng]);
+  }
+
+  async function generateTripRecapAI(stats: string): Promise<string> {
+    try {
+      const res = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: `สรุปทริปนี้สั้นๆ 2-3 ประโยค จากข้อมูลนี้: ${stats}` }],
+          context: {}
+        })
+      });
+      if (!res.ok) return '';
+      const reader = res.body?.getReader();
+      if (!reader) return '';
+      const decoder = new TextDecoder();
+      let result = '';
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) result += delta;
+          } catch {}
+        }
+      }
+      return result.replace(/<<ACTION:[^>]+>>/g, '').trim();
+    } catch { return ''; }
+  }
 
   // Save/Restore route state across page refresh
   function saveRouteState() {
@@ -4180,6 +4343,9 @@
           }
           break;
         }
+        case 'playlistSuggestion':
+          showNotification('เพลย์ลิสต์แนะนำพร้อมแล้ว', 'success');
+          break;
       }
     } catch (err: any) {
       showNotification(`ดำเนินการไม่สำเร็จ: ${err.message}`, 'error');
@@ -4489,7 +4655,7 @@
       updateNavigationInfo();
       updateETA();
       if (_navIntervalTick % 3 === 0) updateFuelEstimate();  // every 6s
-      if (_navIntervalTick % 5 === 0) updateStatistics();     // every 10s
+      if (_navIntervalTick % 5 === 0) { updateStatistics(); recordTripCoord(); } // every 10s + B5: record coords
       // detectCurvesOnRoute: only when moved 50+ route points
       if (Math.abs(lastRouteIndex - _lastCurveRouteIdx) >= 50) {
         _lastCurveRouteIdx = lastRouteIndex;
@@ -4511,6 +4677,17 @@
     }
 
     lastDeliveryUndo = null;
+
+    // B2: Start proactive AI alerts
+    if (proactiveInterval) clearInterval(proactiveInterval);
+    proactiveInterval = setInterval(checkProactiveAlerts, 5 * 60 * 1000);
+
+    // B5: Start recording trip coords
+    tripRecordCoords = [];
+    if (currentLocation) tripRecordCoords.push([currentLocation.lat, currentLocation.lng]);
+
+    // B4: Load prediction on mount
+    predictedDestination = getPredictedDestination();
 
     setTimeout(() => { map.invalidateSize(); }, 100);
   }
@@ -4628,6 +4805,52 @@
       map.setView([currentLocation.lat, currentLocation.lng], 16);
     }
     showNotification('หยุดนำทางแล้ว', 'success');
+
+    // B2: Stop proactive alerts
+    if (proactiveInterval) { clearInterval(proactiveInterval); proactiveInterval = null; }
+
+    // B5: Show Trip Recap if drove > 2 minutes
+    if (navigationStartTime && tripRecordCoords.length > 5) {
+      const duration = Date.now() - navigationStartTime.getTime();
+      if (duration > 2 * 60 * 1000) {
+        // Calculate stats
+        let totalDist = 0;
+        for (let i = 1; i < tripRecordCoords.length; i++) {
+          const [lat1, lng1] = tripRecordCoords[i - 1];
+          const [lat2, lng2] = tripRecordCoords[i];
+          const R = 6371000;
+          const dLat = (lat2 - lat1) * Math.PI / 180;
+          const dLng = (lng2 - lng1) * Math.PI / 180;
+          const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+          totalDist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+        const avgSpd = totalDist > 0 ? (totalDist / 1000) / (duration / 3600000) : 0;
+        const successCount = deliveryHistory.filter(d => d.status === 'success').length;
+
+        tripRecapData = {
+          coords: tripRecordCoords,
+          distance: totalDist,
+          duration,
+          avgSpeed: avgSpd,
+          maxSpeed: maxSpeed,
+          stopsCount: allDeliveryPoints.length,
+          deliveriesSuccess: successCount,
+          startTime: navigationStartTime,
+          endTime: new Date()
+        };
+
+        // Get AI summary in background
+        const statsText = `ระยะทาง ${(totalDist / 1000).toFixed(1)} กม., เวลา ${Math.round(duration / 60000)} นาที, ความเร็วเฉลี่ย ${avgSpd.toFixed(0)} กม./ชม., ส่งสำเร็จ ${successCount} จุด`;
+        generateTripRecapAI(statsText).then(summary => {
+          if (summary && tripRecapData) {
+            tripRecapData = { ...tripRecapData, aiSummary: summary };
+          }
+        });
+
+        showTripRecap = true;
+      }
+    }
+    tripRecordCoords = [];
   }
 
   // ===== Smooth 60fps interpolation + route prediction (better than Google Maps) =====
@@ -7156,7 +7379,10 @@ out center body;`;
       };
       deliveryHistory = [...deliveryHistory, record];
       completedDeliveries++;
-      
+
+      // B4: Record trip pattern for prediction
+      recordTripPattern(deliveredPoint.name, deliveredPoint.lat, deliveredPoint.lng);
+
       const pointIdToRemove = deliveredPoint.id;
       optimizedRoute.optimized_order = optimizedRoute.optimized_order.filter((p: any) => p.id !== pointIdToRemove);
       deliveryPoints = deliveryPoints.filter((p: any) => p.id !== pointIdToRemove);
@@ -8111,6 +8337,9 @@ out center body;`;
 
       // Check AI availability
       fetch('/api/ai/chat').then(r => r.json()).then(d => { aiAvailable = d.available === true; }).catch(() => {});
+
+      // B4: Load destination prediction
+      predictedDestination = getPredictedDestination();
 
       // Restore custom start point marker (page refresh)
       if (useCustomStartPoint && customStartPoint && map && L) {
@@ -9463,8 +9692,27 @@ out center body;`;
 </div>
 
 <!-- AI Chat Panel (floating) -->
-{#if aiAvailable && !isNavigating}
-  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} userId={currentUser?.id || 'guest'} />
+{#if aiAvailable}
+  <AIChatPanel bind:this={aiChatPanelRef} context={aiChatContext} bind:isOpen={aiChatOpen} on:action={handleAIAction} userId={currentUser?.id || 'guest'} {predictedDestination} />
+{/if}
+
+<!-- B2: Proactive AI Toast -->
+{#if proactiveToast.show}
+  <div class="ai-proactive-toast" on:click={handleProactiveClick}>
+    <div class="proactive-icon">AI</div>
+    <div class="proactive-text">{proactiveToast.message}</div>
+    <div class="proactive-action">ถาม AI</div>
+  </div>
+{/if}
+
+<!-- B5: Trip Recap -->
+{#if tripRecapData}
+  <TripRecap
+    data={tripRecapData}
+    bind:show={showTripRecap}
+    on:close={() => { showTripRecap = false; tripRecapData = null; }}
+    on:notification={(e) => showNotification(e.detail.message, e.detail.type)}
+  />
 {/if}
 
 <!-- AI Route Suggestion Modal -->
@@ -14987,6 +15235,44 @@ out center body;`;
 .car-mode .map-nav-btn svg {
   width: 20px;
   height: 20px;
+}
+
+/* B2: Proactive AI Toast */
+.ai-proactive-toast {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(30, 58, 95, 0.95);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 15px rgba(59, 130, 246, 0.15);
+  z-index: 1600;
+  cursor: pointer;
+  animation: proactiveSlide 0.3s ease;
+  max-width: calc(100vw - 32px);
+}
+@keyframes proactiveSlide { from { transform: translateX(-50%) translateY(20px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+.proactive-icon {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 800; color: #60a5fa; flex-shrink: 0;
+}
+.proactive-text {
+  font-size: 13px; color: #e4e4e7; flex: 1;
+}
+.proactive-action {
+  font-size: 12px; font-weight: 600; color: #60a5fa;
+  padding: 4px 10px; border-radius: 6px;
+  background: rgba(59, 130, 246, 0.15);
+  white-space: nowrap;
 }
 
 </style>

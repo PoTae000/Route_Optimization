@@ -12,6 +12,7 @@
   };
 
   export let userId: string | number = 'guest';
+  export let predictedDestination: { name: string; lat: number; lng: number } | null = null;
 
   const dispatch = createEventDispatcher();
 
@@ -21,10 +22,34 @@
   let isStreaming = false;
   let messagesContainer: HTMLElement;
   let inputElement: HTMLInputElement;
+  let currentProvider = '';
+  let activeAbortController: AbortController | null = null;
+  let lastUserId: string | number = userId;
+
+  // Vision (B1)
+  let pendingImage: { base64: string; mimeType: string; preview: string } | null = null;
+  let fileInput: HTMLInputElement;
 
   // Track actions per message index
   let messageActions: Record<number, { type: string; params: Record<string, string> }[]> = {};
   let executedActions: Set<string> = new Set();
+
+  // ═══ A3: Reactive userId — reload messages when user changes ═══
+  $: if (userId !== lastUserId) {
+    // Cancel any active stream
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+    isStreaming = false;
+    // Clear and reload for new user
+    messages = [];
+    messageActions = {};
+    executedActions = new Set();
+    lastUserId = userId;
+    loadMessages();
+    if (messages.length > 0) scrollToBottom();
+  }
 
   // ═══ Feature 3: Chat history persistence ═══
 
@@ -34,7 +59,13 @@
 
   function saveMessages() {
     try {
-      const capped = messages.slice(-100);
+      // Strip base64 from images before saving (B1: save storage)
+      const capped = messages.slice(-100).map(m => {
+        if (m.imageBase64) {
+          return { ...m, imageBase64: undefined, hasImage: true };
+        }
+        return m;
+      });
       const data = {
         messages: capped,
         messageActions,
@@ -131,6 +162,8 @@
     { label: 'คำนวณเส้นทาง', text: 'คำนวณเส้นทางให้หน่อย' },
     { label: 'เริ่มนำทาง', text: 'เริ่มนำทางเลย' },
     { label: 'ประหยัดน้ำมัน', text: 'ให้คำแนะนำการขับขี่เพื่อประหยัดน้ำมัน' },
+    { label: 'แผนเที่ยว', text: 'ช่วยวางแผนทริปเที่ยวให้หน่อย' },
+    { label: 'แนะนำเพลง', text: 'แนะนำเพลย์ลิสต์สำหรับทริปนี้' },
     { label: 'โรงพยาบาล', text: 'หาโรงพยาบาลใกล้ฉัน' },
     { label: 'ที่จอดรถ', text: 'หาที่จอดรถใกล้ฉัน' },
   ];
@@ -166,7 +199,7 @@
     const icons: Record<string, string> = {
       searchAndAdd: '+',
       addPoint: '+',
-      searchNearby: '📍',
+      searchNearby: 'N',
       navigate: '>',
       stopNav: '||',
       calcRoute: '~',
@@ -185,7 +218,8 @@
       openGoogleMaps: 'G',
       routePreference: 'R',
       myLocation: 'L',
-      summary: 'i'
+      summary: 'i',
+      playlistSuggestion: 'M'
     };
     return icons[type] || '*';
   }
@@ -213,7 +247,8 @@
       openGoogleMaps: 'เปิด Google Maps',
       routePreference: `เปลี่ยนเส้นทาง ${action.params.pref || ''}`.trim(),
       myLocation: 'ตำแหน่งปัจจุบัน',
-      summary: 'สรุปสถานะ'
+      summary: 'สรุปสถานะ',
+      playlistSuggestion: 'เพลย์ลิสต์แนะนำ'
     };
     return labels[action.type] || action.type;
   }
@@ -233,28 +268,130 @@
     }
   }
 
+  // ═══ B1: Image handling ═══
+
+  function openImagePicker() {
+    fileInput?.click();
+  }
+
+  async function handleImageSelect(e: Event) {
+    const target = e.target as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) return;
+    if (file.size > 10_000_000) return; // 10MB raw limit
+
+    try {
+      const compressed = await compressImage(file);
+      pendingImage = compressed;
+    } catch (err) {
+      console.warn('Image compress error:', err);
+    }
+    // Reset input so same file can be selected again
+    target.value = '';
+  }
+
+  function compressImage(file: File): Promise<{ base64: string; mimeType: string; preview: string }> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxSize = 1024;
+          let w = img.width, h = img.height;
+          if (w > maxSize || h > maxSize) {
+            if (w > h) { h = Math.round(h * maxSize / w); w = maxSize; }
+            else { w = Math.round(w * maxSize / h); h = maxSize; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return reject(new Error('no canvas'));
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          const base64 = dataUrl.split(',')[1];
+          // Small preview for display
+          const previewCanvas = document.createElement('canvas');
+          const pw = 80, ph = Math.round(80 * h / w);
+          previewCanvas.width = pw;
+          previewCanvas.height = ph;
+          const pctx = previewCanvas.getContext('2d');
+          pctx?.drawImage(img, 0, 0, pw, ph);
+          const preview = previewCanvas.toDataURL('image/jpeg', 0.5);
+          resolve({ base64, mimeType: 'image/jpeg', preview });
+        };
+        img.onerror = reject;
+        img.src = reader.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function clearPendingImage() {
+    pendingImage = null;
+  }
+
+  // ═══ B2: Public trigger for proactive alerts ═══
+  export function triggerMessage(text: string) {
+    if (text) {
+      isOpen = true;
+      setTimeout(() => sendMessage(text), 200);
+    }
+  }
+
   async function sendMessage(text?: string) {
     const msg = text || inputText.trim();
     if (!msg || isStreaming) return;
 
+    const currentImage = pendingImage;
     inputText = '';
-    messages = [...messages, { role: 'user', content: msg }];
+    pendingImage = null;
+
+    // Add user message with optional image
+    const userMsg: AIChatMessage = { role: 'user', content: msg };
+    if (currentImage) {
+      userMsg.imageBase64 = currentImage.base64;
+      userMsg.hasImage = true;
+    }
+    messages = [...messages, userMsg];
     scrollToBottom();
 
     isStreaming = true;
+    currentProvider = '';
     // Add placeholder assistant message
     messages = [...messages, { role: 'assistant', content: '' }];
     scrollToBottom();
 
+    // Create abort controller for this request (A3: cancel on user switch)
+    const abortController = new AbortController();
+    activeAbortController = abortController;
+
     try {
-      const res = await fetch('/api/ai/chat', {
+      const endpoint = currentImage ? '/api/ai/vision' : '/api/ai/chat';
+      const body = currentImage
+        ? JSON.stringify({
+            message: msg,
+            image: { base64: currentImage.base64, mimeType: currentImage.mimeType },
+            context
+          })
+        : JSON.stringify({
+            messages: buildContextMessages(),
+            context
+          });
+
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: buildContextMessages(),
-          context
-        })
+        body,
+        signal: abortController.signal
       });
+
+      // A4: Parse provider from response header
+      const provider = res.headers.get('X-AI-Provider');
+      if (provider) currentProvider = provider;
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'ไม่สามารถเชื่อมต่อ AI ได้' }));
@@ -276,6 +413,9 @@
       let buffer = '';
 
       while (true) {
+        // A3: Check if aborted (user switched)
+        if (abortController.signal.aborted) break;
+
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -303,13 +443,21 @@
         }
       }
 
-      if (!assistantContent) {
+      if (!assistantContent && !abortController.signal.aborted) {
         messages = [...messages.slice(0, -1), { role: 'assistant', content: 'ไม่ได้รับคำตอบจาก AI' }];
       }
     } catch (err: any) {
-      messages = [...messages.slice(0, -1), { role: 'assistant', content: `เกิดข้อผิดพลาด: ${err.message || 'ไม่ทราบสาเหตุ'}` }];
+      if (err.name === 'AbortError') {
+        // Stream cancelled due to user switch — remove placeholder
+        messages = messages.slice(0, -1);
+      } else {
+        messages = [...messages.slice(0, -1), { role: 'assistant', content: `เกิดข้อผิดพลาด: ${err.message || 'ไม่ทราบสาเหตุ'}` }];
+      }
     } finally {
       isStreaming = false;
+      if (activeAbortController === abortController) {
+        activeAbortController = null;
+      }
 
       // Parse and execute actions from the last assistant message
       const lastMsg = messages[messages.length - 1];
@@ -345,6 +493,7 @@
     messages = [];
     messageActions = {};
     executedActions = new Set();
+    pendingImage = null;
     localStorage.removeItem(getChatKey());
   }
 
@@ -356,6 +505,16 @@
     scrollToBottom();
   }
 </script>
+
+<!-- Hidden file input for vision (B1) -->
+<input
+  bind:this={fileInput}
+  type="file"
+  accept="image/*"
+  capture="environment"
+  on:change={handleImageSelect}
+  style="display:none"
+/>
 
 <!-- Floating toggle button -->
 <button class="ai-chat-toggle" class:open={isOpen} on:click={togglePanel} title="AI ผู้ช่วย">
@@ -381,9 +540,9 @@
           <div class="ai-chat-name">ผู้ช่วยเส้นทาง</div>
           <div class="ai-chat-status">
             {#if isStreaming}
-              <span class="ai-typing">กำลังพิมพ์<span class="ai-dot">.</span><span class="ai-dot">.</span><span class="ai-dot">.</span></span>
+              <span class="ai-typing">กำลังพิมพ์{#if currentProvider} ({currentProvider}){/if}<span class="ai-dot">.</span><span class="ai-dot">.</span><span class="ai-dot">.</span></span>
             {:else}
-              <span>พร้อมช่วยเหลือ</span>
+              <span>พร้อมช่วยเหลือ{#if currentProvider} - {currentProvider}{/if}</span>
             {/if}
           </div>
         </div>
@@ -405,7 +564,16 @@
             </svg>
           </div>
           <p>สวัสดี! ฉันเป็นผู้ช่วย AI</p>
-          <p class="ai-welcome-sub">ถามได้ทุกเรื่อง! หาร้านใกล้ๆ, วางแผนเส้นทาง, ความรู้ทั่วไป</p>
+          <p class="ai-welcome-sub">ถามได้ทุกเรื่อง! หาร้านใกล้ๆ, วางแผนเส้นทาง, ส่งรูปถาม, แนะนำเพลง</p>
+
+          <!-- B4: Prediction chip -->
+          {#if predictedDestination}
+            <div class="ai-prediction-chip" on:click={() => dispatch('action', { type: 'searchAndAdd', params: { query: predictedDestination?.name || '' } })}>
+              <span class="prediction-label">ไป {predictedDestination.name} ไหม?</span>
+              <span class="prediction-arrow">></span>
+            </div>
+          {/if}
+
           <div class="ai-quick-chips">
             {#each quickChips as chip}
               <button class="ai-chip" on:click={() => sendMessage(chip.text)}>{chip.label}</button>
@@ -419,6 +587,16 @@
               <div class="ai-msg-avatar">AI</div>
             {/if}
             <div class="ai-msg-content">
+              <!-- B1: Show image thumbnail in user message -->
+              {#if msg.role === 'user' && (msg.imageBase64 || msg.hasImage)}
+                <div class="ai-msg-image">
+                  {#if msg.imageBase64}
+                    <img src="data:image/jpeg;base64,{msg.imageBase64}" alt="ภาพที่ส่ง" />
+                  {:else}
+                    <div class="ai-msg-image-placeholder">[รูปภาพ]</div>
+                  {/if}
+                </div>
+              {/if}
               <div class="ai-msg-bubble">
                 {#if msg.role === 'assistant'}
                   {@html renderMarkdown(stripActions(msg.content)) || '...'}{#if isStreaming && i === messages.length - 1}<span class="ai-cursor"></span>{/if}
@@ -451,16 +629,33 @@
       {/if}
     </div>
 
+    <!-- B1: Pending image preview -->
+    {#if pendingImage}
+      <div class="ai-pending-image">
+        <img src={pendingImage.preview} alt="preview" />
+        <button class="ai-pending-remove" on:click={clearPendingImage}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    {/if}
+
     <div class="ai-chat-input">
+      <!-- B1: Camera button -->
+      <button class="ai-camera-btn" on:click={openImagePicker} disabled={isStreaming} title="ส่งรูปถาม AI">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+      </button>
       <input
         bind:this={inputElement}
         bind:value={inputText}
         on:keydown={handleKeydown}
-        placeholder="ถามอะไรก็ได้... หาร้าน, ความรู้, สั่งนำทาง"
+        placeholder={pendingImage ? 'ถามเกี่ยวกับรูปนี้...' : 'ถามอะไรก็ได้... หาร้าน, ส่งรูป, วางแผนทริป'}
         disabled={isStreaming}
         autocomplete="off"
       />
-      <button class="ai-send-btn" on:click={() => sendMessage()} disabled={isStreaming || !inputText.trim()}>
+      <button class="ai-send-btn" on:click={() => sendMessage()} disabled={isStreaming || (!inputText.trim() && !pendingImage)}>
         <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
       </button>
     </div>
@@ -625,6 +820,25 @@
 .ai-welcome p { margin: 0; font-size: 14px; }
 .ai-welcome .ai-welcome-sub { font-size: 12px; color: #71717a; margin-top: 4px; }
 
+/* B4: Prediction chip */
+.ai-prediction-chip {
+  margin-top: 12px;
+  padding: 8px 16px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 12px;
+  color: #60a5fa;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+.ai-prediction-chip:hover { background: rgba(59, 130, 246, 0.2); border-color: rgba(59, 130, 246, 0.5); }
+.prediction-label { flex: 1; }
+.prediction-arrow { font-weight: 700; }
+
 .ai-quick-chips {
   display: flex;
   flex-wrap: wrap;
@@ -681,6 +895,27 @@
   font-weight: 800;
   color: #00ff88;
   flex-shrink: 0;
+}
+
+/* B1: Image in user message */
+.ai-msg-image {
+  max-width: 150px;
+  border-radius: 8px;
+  overflow: hidden;
+  align-self: flex-end;
+}
+.ai-msg-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.ai-msg-image-placeholder {
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  color: #71717a;
+  font-size: 12px;
 }
 
 .ai-msg-bubble {
@@ -756,6 +991,22 @@
   color: #4ade80;
 }
 
+/* B3: Heading styles for trip planner */
+.ai-msg-assistant .ai-msg-bubble :global(.md-h2) {
+  font-size: 15px;
+  font-weight: 700;
+  color: #4ade80;
+  margin: 10px 0 6px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0, 255, 136, 0.15);
+}
+.ai-msg-assistant .ai-msg-bubble :global(.md-h3) {
+  font-size: 13px;
+  font-weight: 600;
+  color: #a1a1aa;
+  margin: 6px 0 4px 0;
+}
+
 /* Action cards */
 .ai-action-cards {
   display: flex;
@@ -799,12 +1050,59 @@
   font-weight: 700;
 }
 
+/* B1: Pending image preview */
+.ai-pending-image {
+  position: relative;
+  padding: 6px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ai-pending-image img {
+  width: 60px;
+  height: 45px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 255, 136, 0.2);
+}
+.ai-pending-remove {
+  position: absolute;
+  top: 2px;
+  left: 68px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.8);
+  border: none;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .ai-chat-input {
   display: flex;
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
+
+/* B1: Camera button */
+.ai-camera-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #71717a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.ai-camera-btn:hover:not(:disabled) { color: #00ff88; border-color: rgba(0, 255, 136, 0.3); background: rgba(0, 255, 136, 0.08); }
+.ai-camera-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .ai-chat-input input {
   flex: 1;

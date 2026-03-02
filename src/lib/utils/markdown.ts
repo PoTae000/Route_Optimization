@@ -33,7 +33,7 @@ export function renderMarkdown(text: string): string {
   // Links [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 
-  // Process lines for lists
+  // Process lines for headings and lists
   const lines = html.split('\n');
   const result: string[] = [];
   let inUl = false;
@@ -41,6 +41,24 @@ export function renderMarkdown(text: string): string {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    // Headings: ## and ###
+    const h2Match = line.match(/^## (.+)/);
+    const h3Match = line.match(/^### (.+)/);
+
+    if (h2Match) {
+      if (inUl) { result.push('</ul>'); inUl = false; }
+      if (inOl) { result.push('</ol>'); inOl = false; }
+      result.push(`<div class="md-h2">${h2Match[1]}</div>`);
+      continue;
+    }
+    if (h3Match) {
+      if (inUl) { result.push('</ul>'); inUl = false; }
+      if (inOl) { result.push('</ol>'); inOl = false; }
+      result.push(`<div class="md-h3">${h3Match[1]}</div>`);
+      continue;
+    }
+
     const ulMatch = line.match(/^[\s]*[-*]\s+(.*)/);
     const olMatch = line.match(/^[\s]*\d+\.\s+(.*)/);
 
