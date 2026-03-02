@@ -395,7 +395,8 @@
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'ไม่สามารถเชื่อมต่อ AI ได้' }));
-        messages = [...messages.slice(0, -1), { role: 'assistant', content: `ขออภัย: ${err.error || 'เกิดข้อผิดพลาด'}` }];
+        const detail = err.details ? `\n\n(${err.details})` : '';
+        messages = [...messages.slice(0, -1), { role: 'assistant', content: `ขออภัย: ${err.error || 'เกิดข้อผิดพลาด'}${detail}` }];
         isStreaming = false;
         return;
       }

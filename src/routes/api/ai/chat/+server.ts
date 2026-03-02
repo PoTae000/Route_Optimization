@@ -288,7 +288,7 @@ ACTION — สั่งการระบบ:
     ];
 
     // ═══ Try each provider with fallback + timeout ═══
-    let lastError = '';
+    const errors: string[] = [];
     const nextProviders = getAvailableProviders();
     const providersToTry = nextProviders.length > 0 ? nextProviders : providers;
 
@@ -333,41 +333,42 @@ ACTION — สั่งการระบบ:
 
           // Rate limit or error — set cooldown and try next
           const errText = await res.text();
-          console.warn(`[AI] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+          console.warn(`[AI] ${provider.name} failed (${res.status}):`, errText.slice(0, 300));
 
           if (res.status === 429) {
             const cooldownMs = parseCooldownFromError(errText);
             setCooldown(provider.name, cooldownMs);
-            lastError = `${provider.name} ถูกจำกัดการใช้งาน`;
+            errors.push(`${provider.name}: rate-limited (429)`);
             continue;
           }
 
-          lastError = `${provider.name}: error ${res.status}`;
+          errors.push(`${provider.name}: HTTP ${res.status} — ${errText.slice(0, 100)}`);
           continue;
         } catch (fetchErr: any) {
           clearTimeout(timeout);
           if (fetchErr.name === 'AbortError') {
             console.warn(`[AI] ${provider.name} timeout (15s)`);
-            setCooldown(provider.name, 30000); // 30s cooldown for timeout
-            lastError = `${provider.name}: timeout`;
+            setCooldown(provider.name, 30000);
+            errors.push(`${provider.name}: timeout 15s`);
             continue;
           }
           throw fetchErr;
         }
       } catch (err: any) {
         console.warn(`[AI] ${provider.name} fetch error:`, err.message);
-        lastError = `${provider.name}: ${err.message}`;
+        errors.push(`${provider.name}: ${err.message}`);
         continue;
       }
     }
 
-    // All providers failed
-    const allProviders = getProviders();
-    const errorMsg = allProviders.length > 1
-      ? `AI ทุกระบบไม่พร้อมใช้งานชั่วคราว (${lastError}) กรุณารอสักครู่แล้วลองใหม่`
-      : `AI ไม่พร้อมใช้งาน: ${lastError}`;
+    // All providers failed — show ALL errors
+    const errorDetail = errors.join(' | ');
+    console.error(`[AI] All providers failed: ${errorDetail}`);
 
-    return new Response(JSON.stringify({ error: errorMsg }), {
+    return new Response(JSON.stringify({
+      error: `AI ทุกระบบไม่พร้อมชั่วคราว กรุณารอสักครู่แล้วลองใหม่`,
+      details: errorDetail
+    }), {
       status: 429,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -380,10 +381,73 @@ ACTION — สั่งการระบบ:
   }
 };
 
-// GET for availability check
-export const GET: RequestHandler = async () => {
-  const available = getProviders().length > 0;
-  return new Response(JSON.stringify({ available }), {
+// GET for availability check + diagnostics
+export const GET: RequestHandler = async ({ url }) => {
+  const diagnose = url.searchParams.get('diagnose') === '1';
+  const allProviders = getProviders();
+
+  if (!diagnose) {
+    return new Response(JSON.stringify({ available: allProviders.length > 0 }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  // Diagnostic mode: test each provider with a tiny request
+  const results: { name: string; status: string; detail?: string }[] = [];
+
+  for (const provider of allProviders) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      const res = await fetch(provider.url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${provider.key}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: provider.model,
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 5,
+          stream: false
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        results.push({ name: provider.name, status: 'ok' });
+      } else {
+        const errText = await res.text();
+        results.push({
+          name: provider.name,
+          status: `error ${res.status}`,
+          detail: errText.slice(0, 200)
+        });
+      }
+    } catch (err: any) {
+      results.push({
+        name: provider.name,
+        status: err.name === 'AbortError' ? 'timeout' : 'fetch_error',
+        detail: err.message
+      });
+    }
+  }
+
+  // Also show cooldown state
+  const cooldowns: Record<string, number> = {};
+  const now = Date.now();
+  for (const [name, expiry] of providerCooldowns) {
+    if (expiry > now) cooldowns[name] = Math.round((expiry - now) / 1000);
+  }
+
+  return new Response(JSON.stringify({
+    providers: results,
+    cooldowns,
+    total: allProviders.length
+  }, null, 2), {
     headers: { 'Content-Type': 'application/json' }
   });
 };
