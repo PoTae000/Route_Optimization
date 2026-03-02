@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
 
-  const API_URL = 'https://backendrouteoptimization-production.up.railway.app/api';
+  const API_URL = 'https://api.suepskun.online/api';
 
   let username = '';
   let password = '';

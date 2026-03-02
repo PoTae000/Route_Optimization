@@ -9,5 +9,9 @@ export default defineConfig({
 	},
 	ssr: {
 		noExternal: ['leaflet-rotate']
-	}
+	},
+	server: {
+		host: true,
+		allowedHosts: ['suepskun.online']
+  }
 });

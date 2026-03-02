@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
 
-  const API_URL = 'https://backendrouteoptimization-production.up.railway.app/api';
+  const API_URL = 'https://api.suepskun.online/api';
 
   let currentUser: any = null;
 

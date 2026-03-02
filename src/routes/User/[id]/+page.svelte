@@ -152,7 +152,7 @@
   let optimizedRoute: any = null;
   let routeLayer: any = null;
   let markers: any[] = [];
-  const API_URL = 'https://backendrouteoptimization-production.up.railway.app/api';
+  const API_URL = 'https://api.suepskun.online/api';
 
   let newPoint = { name: '', address: '', lat: 13.7563, lng: 100.5018, priority: 3 };
   let isOptimizing = false;
