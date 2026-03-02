@@ -3947,27 +3947,59 @@
             bank: '["amenity"="bank"]'
           };
           const osmTag = tagMap[nearbyType] || `["amenity"="${nearbyType}"]`;
-          let nameFilter = '';
-          if (nearbyKeyword) {
-            nameFilter = `["name"~"${nearbyKeyword}",i]`;
+
+          // สร้าง query ที่ค้นหาจาก name หรือ brand (7-Eleven ใน OSM ไทยใช้ brand เป็นหลัก)
+          function buildOverpassQuery(tag: string, keyword: string, r: number) {
+            if (keyword) {
+              // ค้นหาจาก name OR brand
+              const nameQ = `${tag}["name"~"${keyword}",i]`;
+              const brandQ = `${tag}["brand"~"${keyword}",i]`;
+              return `[out:json][timeout:15];(node${nameQ}(around:${r},${lat},${lng});way${nameQ}(around:${r},${lat},${lng});node${brandQ}(around:${r},${lat},${lng});way${brandQ}(around:${r},${lat},${lng}););out center 15;`;
+            }
+            return `[out:json][timeout:15];(node${tag}(around:${r},${lat},${lng});way${tag}(around:${r},${lat},${lng}););out center 15;`;
           }
 
           try {
-            // ค้นหาทั้ง node, way, relation + ใช้ out center เพื่อให้ way/relation มีพิกัดกลาง
-            const query = `[out:json][timeout:10];(node${osmTag}${nameFilter}(around:${radius},${lat},${lng});way${osmTag}${nameFilter}(around:${radius},${lat},${lng});relation${osmTag}${nameFilter}(around:${radius},${lat},${lng}););out center 10;`;
-            const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+            // ลองค้นหาด้วย keyword ก่อน
+            let query = buildOverpassQuery(osmTag, nearbyKeyword, radius);
+            let ovRes = await fetch('https://overpass-api.de/api/interpreter', {
               method: 'POST',
               body: 'data=' + encodeURIComponent(query)
             });
-            const ovData = await ovRes.json();
-            const elements = (ovData.elements || []).filter((el: any) => {
-              // node มี lat/lon ตรง, way/relation มี center.lat/center.lon
+            let ovData = await ovRes.json();
+            let elements = (ovData.elements || []).filter((el: any) => {
               return (el.lat && el.lon) || (el.center?.lat && el.center?.lon);
             }).map((el: any) => ({
               ...el,
               lat: el.lat || el.center?.lat,
               lon: el.lon || el.center?.lon
             }));
+
+            // ถ้าหาไม่เจอด้วย keyword → retry โดยไม่ใส่ keyword (หาแค่ type) + ขยายรัศมี
+            if (elements.length === 0 && nearbyKeyword) {
+              query = buildOverpassQuery(osmTag, '', radius * 2);
+              ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+                method: 'POST',
+                body: 'data=' + encodeURIComponent(query)
+              });
+              ovData = await ovRes.json();
+              elements = (ovData.elements || []).filter((el: any) => {
+                return (el.lat && el.lon) || (el.center?.lat && el.center?.lon);
+              }).map((el: any) => ({
+                ...el,
+                lat: el.lat || el.center?.lat,
+                lon: el.lon || el.center?.lon
+              }));
+            }
+
+            // deduplicate โดยใช้พิกัด (node กับ way อาจซ้ำกัน)
+            const seen = new Set<string>();
+            elements = elements.filter((el: any) => {
+              const key = `${el.lat.toFixed(5)},${el.lon.toFixed(5)}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
 
             if (elements.length === 0) {
               showNotification(`ไม่พบ ${nearbyKeyword || nearbyType} ใกล้เคียง`, 'warning');
