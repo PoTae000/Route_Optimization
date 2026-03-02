@@ -4000,6 +4000,10 @@
 
             // deduplicate โดยใช้พิกัด (node กับ way อาจซ้ำกัน)
             const seen = new Set<string>();
+            // เพิ่มพิกัดจุดแวะที่มีอยู่แล้วเข้า seen เพื่อไม่แสดงซ้ำ
+            for (const dp of deliveryPoints) {
+              if (dp.lat && dp.lng) seen.add(`${Number(dp.lat).toFixed(5)},${Number(dp.lng).toFixed(5)}`);
+            }
             elements = elements.filter((el: any) => {
               const key = `${el.lat.toFixed(5)},${el.lon.toFixed(5)}`;
               if (seen.has(key)) return false;
@@ -4084,6 +4088,14 @@
           await addPointFromAI(nr.name, nr.lat, nr.lon, nr.name);
           showNotification(`เพิ่มจุด "${nr.name}" สำเร็จ`, 'success');
           if (map) map.setView([nr.lat, nr.lon], 15, { animate: true });
+
+          // ลบ markers ค้นหาออกจากแผนที่ และเคลียร์ผลลัพธ์
+          if ((window as any).__nearbyMarkers) {
+            (window as any).__nearbyMarkers.forEach((m: any) => m.remove());
+            (window as any).__nearbyMarkers = [];
+          }
+          lastNearbyResults = [];
+          lastNearbyResultsText = '';
           break;
         }
         case 'vehicle':
@@ -13084,7 +13096,7 @@ out center body;`;
 /* Floating Route Preferences - Left side top */
 .map-prefs-float {
   position: absolute;
-  bottom: 16px;
+  bottom: 26px;
   left: 16px;
   top: auto;
   z-index: 1000;
@@ -13628,7 +13640,7 @@ out center body;`;
 /* ==================== RESPONSIVE - FLOATING PANELS ==================== */
 @media (max-width: 1024px) {
   .map-search-float { width: 340px; top: 12px; right: 12px; }
-  .map-prefs-float { top: auto; bottom: 14px; left: 12px; padding: 6px; }
+  .map-prefs-float { top: auto; bottom: 24px; left: 12px; padding: 6px; }
   .float-pref-chip { font-size: 10px; padding: 4px 8px; }
   .float-toggle-chip { width: 28px; height: 28px; font-size: 12px; }
 }
@@ -13637,7 +13649,7 @@ out center body;`;
   .map-search-float { left: 10px; right: 10px; width: auto; top: 10px; padding: 8px 10px; }
   .map-prefs-float {
     top: auto;
-    bottom: 10px;
+    bottom: 20px;
     left: 50%;
     right: auto;
     transform: translateX(-50%);
@@ -13664,7 +13676,7 @@ out center body;`;
   .map-search-float { left: 8px; right: 8px; width: auto; top: 8px; padding: 6px 8px; }
   .map-search-float .search-input { padding: 8px 32px 8px 30px; font-size: 12px; }
   .map-prefs-float {
-    bottom: 6px;
+    bottom: 16px;
     left: 50%;
     right: auto;
     transform: translateX(-50%);
