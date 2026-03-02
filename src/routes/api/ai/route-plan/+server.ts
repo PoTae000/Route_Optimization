@@ -48,7 +48,7 @@ function getProviders(): AIProvider[] {
       name: 'Cerebras',
       url: 'https://api.cerebras.ai/v1/chat/completions',
       key: env.CEREBRAS_API_KEY,
-      model: 'llama-3.3-70b'
+      model: 'llama3.1-8b'
     });
   }
 
