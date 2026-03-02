@@ -652,6 +652,29 @@
     localStorage.removeItem(getChatKey());
   }
 
+  // Public: show/update search progress in chat (live updating)
+  export function updateSearchProgress(text: string) {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'assistant' && lastMsg.content.startsWith('[ค้นหา')) {
+      messages = [...messages.slice(0, -1), { role: 'assistant', content: text }];
+    } else {
+      messages = [...messages, { role: 'assistant', content: text }];
+    }
+    scrollToBottom();
+  }
+
+  // Public: finalize search progress → replace with final message + save
+  export function finalizeSearchProgress(text: string) {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'assistant' && lastMsg.content.startsWith('[ค้นหา')) {
+      messages = [...messages.slice(0, -1), { role: 'assistant', content: text }];
+    } else {
+      messages = [...messages, { role: 'assistant', content: text }];
+    }
+    saveMessages();
+    scrollToBottom();
+  }
+
   // Public: inject nearby search results as assistant message
   export function injectNearbyResults(resultLines: string) {
     const content = `พบสถานที่ใกล้เคียง:\n${resultLines}\n\nบอกได้เลยว่าอยากเพิ่มจุดไหน เช่น "เพิ่มจุดที่ 1"`;

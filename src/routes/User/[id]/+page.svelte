@@ -4368,14 +4368,36 @@
             return null;
           };
 
-          // Search all in parallel (but stagger to avoid rate limit)
+          // Search sequentially with progress updates in chat
           const results: { name: string; address: string; lat: number; lng: number }[] = [];
           for (let i = 0; i < queries.length; i++) {
+            const progressLines = queries.map((q, j) => {
+              if (j < i) {
+                const found = results.find(r => r.name.includes(q.split(' ')[0]) || q.includes(r.name.split(',')[0]));
+                return `${j + 1}. ${q} -- พบแล้ว`;
+              } else if (j === i) {
+                return `${j + 1}. ${q} -- กำลังค้นหา...`;
+              } else {
+                return `${j + 1}. ${q} -- รอค้นหา`;
+              }
+            });
+            if (aiChatPanelRef) aiChatPanelRef.updateSearchProgress(`[ค้นหาจุดแวะ ${i + 1}/${queries.length}]\n\n${progressLines.join('\n')}`);
+
             const result = await searchOne(queries[i]);
             if (result) results.push(result);
             // Small delay to avoid Nominatim rate limit
             if (i < queries.length - 1) await new Promise(r => setTimeout(r, 300));
           }
+
+          // Final progress message
+          const finalLines = queries.map((q, j) => {
+            const matched = results.find(r => {
+              const qFirst = q.split(' ')[0];
+              return r.name.includes(qFirst) || q.includes(r.name.split(',')[0]);
+            });
+            return `${j + 1}. ${q} -- ${matched ? 'พบแล้ว' : 'ไม่พบ'}`;
+          });
+          if (aiChatPanelRef) aiChatPanelRef.finalizeSearchProgress(`[ค้นหาจุดแวะเสร็จ ${results.length}/${queries.length} จุด]\n\n${finalLines.join('\n')}\n\nเลือกจุดที่ต้องการเพิ่มได้เลย`);
 
           if (results.length > 0) {
             batchConfirmPoints = results.map(r => ({ ...r, selected: true }));
