@@ -1,12 +1,54 @@
 import { json } from '@sveltejs/kit';
-import { GROQ_API_KEY } from '$env/static/private';
+import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// ═══ Multi-provider fallback (shared logic) ═══
+
+interface AIProvider {
+  name: string;
+  url: string;
+  key: string;
+  model: string;
+}
+
+function getProviders(): AIProvider[] {
+  const providers: AIProvider[] = [];
+
+  if (env.GROQ_API_KEY && env.GROQ_API_KEY !== 'gsk_YOUR_API_KEY_HERE') {
+    providers.push({
+      name: 'Groq',
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      key: env.GROQ_API_KEY,
+      model: 'llama-3.3-70b-versatile'
+    });
+  }
+
+  if (env.CEREBRAS_API_KEY) {
+    providers.push({
+      name: 'Cerebras',
+      url: 'https://api.cerebras.ai/v1/chat/completions',
+      key: env.CEREBRAS_API_KEY,
+      model: 'llama-3.3-70b'
+    });
+  }
+
+  if (env.GEMINI_API_KEY) {
+    providers.push({
+      name: 'Gemini',
+      url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      key: env.GEMINI_API_KEY,
+      model: 'gemini-2.0-flash'
+    });
+  }
+
+  return providers;
+}
 
 export const POST: RequestHandler = async ({ request }) => {
-  if (!GROQ_API_KEY || GROQ_API_KEY === 'gsk_YOUR_API_KEY_HERE') {
-    return json({ error: 'AI ไม่พร้อมใช้งาน (ไม่มี API key)' }, { status: 503 });
+  const providers = getProviders();
+
+  if (providers.length === 0) {
+    return json({ error: 'AI ไม่พร้อมใช้งาน — ไม่มี API key ที่ใช้ได้' }, { status: 503 });
   }
 
   try {
@@ -44,52 +86,72 @@ ${pointsSummary}
 
 กรุณาวิเคราะห์และแนะนำลำดับการส่งที่ดีที่สุด`;
 
-    const res = await fetch(GROQ_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.3,
-        max_tokens: 1500,
-        stream: false
-      })
-    });
+    const apiMessages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error('Groq API error:', res.status, errText);
-      return json({ error: `AI error: ${res.status}` }, { status: 502 });
-    }
+    // ═══ Try each provider with fallback ═══
+    let lastError = '';
 
-    const data = await res.json();
-    const content = data.choices?.[0]?.message?.content || '';
+    for (const provider of providers) {
+      try {
+        console.log(`[AI Route] Trying ${provider.name}...`);
 
-    // Parse JSON from response (may be wrapped in markdown code block)
-    let parsed;
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsed = JSON.parse(jsonMatch[0]);
-      } else {
-        parsed = JSON.parse(content);
+        const res = await fetch(provider.url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${provider.key}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: provider.model,
+            messages: apiMessages,
+            temperature: 0.3,
+            max_tokens: 1500,
+            stream: false
+          })
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          console.warn(`[AI Route] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+          lastError = `${provider.name}: ${res.status}`;
+          continue;
+        }
+
+        console.log(`[AI Route] ${provider.name} OK`);
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || '';
+
+        // Parse JSON from response (may be wrapped in markdown code block)
+        let parsed;
+        try {
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            parsed = JSON.parse(jsonMatch[0]);
+          } else {
+            parsed = JSON.parse(content);
+          }
+        } catch {
+          return json({
+            suggestedOrder: points.map((_: any, i: number) => i + 1),
+            reasoning: content,
+            clusters: [],
+            tips: []
+          });
+        }
+
+        return json(parsed);
+      } catch (err: any) {
+        console.warn(`[AI Route] ${provider.name} error:`, err.message);
+        lastError = `${provider.name}: ${err.message}`;
+        continue;
       }
-    } catch {
-      return json({
-        suggestedOrder: points.map((_: any, i: number) => i + 1),
-        reasoning: content,
-        clusters: [],
-        tips: []
-      });
     }
 
-    return json(parsed);
+    // All providers failed
+    return json({ error: `AI ทุกระบบไม่พร้อม: ${lastError}` }, { status: 502 });
   } catch (err: any) {
     console.error('AI route plan error:', err);
     return json({ error: err.message || 'AI error' }, { status: 500 });
@@ -98,6 +160,6 @@ ${pointsSummary}
 
 // GET for availability check
 export const GET: RequestHandler = async () => {
-  const available = !!GROQ_API_KEY && GROQ_API_KEY !== 'gsk_YOUR_API_KEY_HERE';
+  const available = getProviders().length > 0;
   return json({ available });
 };

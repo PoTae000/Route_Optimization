@@ -1,11 +1,53 @@
-import { GROQ_API_KEY } from '$env/static/private';
+import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// ═══ Multi-provider fallback system ═══
+
+interface AIProvider {
+  name: string;
+  url: string;
+  key: string;
+  model: string;
+}
+
+function getProviders(): AIProvider[] {
+  const providers: AIProvider[] = [];
+
+  if (env.GROQ_API_KEY && env.GROQ_API_KEY !== 'gsk_YOUR_API_KEY_HERE') {
+    providers.push({
+      name: 'Groq',
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      key: env.GROQ_API_KEY,
+      model: 'llama-3.3-70b-versatile'
+    });
+  }
+
+  if (env.CEREBRAS_API_KEY) {
+    providers.push({
+      name: 'Cerebras',
+      url: 'https://api.cerebras.ai/v1/chat/completions',
+      key: env.CEREBRAS_API_KEY,
+      model: 'llama-3.3-70b'
+    });
+  }
+
+  if (env.GEMINI_API_KEY) {
+    providers.push({
+      name: 'Gemini',
+      url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      key: env.GEMINI_API_KEY,
+      model: 'gemini-2.0-flash'
+    });
+  }
+
+  return providers;
+}
 
 export const POST: RequestHandler = async ({ request }) => {
-  if (!GROQ_API_KEY || GROQ_API_KEY === 'gsk_YOUR_API_KEY_HERE') {
-    return new Response(JSON.stringify({ error: 'AI ไม่พร้อมใช้งาน' }), {
+  const providers = getProviders();
+
+  if (providers.length === 0) {
+    return new Response(JSON.stringify({ error: 'AI ไม่พร้อมใช้งาน — ไม่มี API key ที่ใช้ได้' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -21,7 +63,6 @@ export const POST: RequestHandler = async ({ request }) => {
       });
     }
 
-    // Keep more history for better context
     const trimmedMessages = messages.slice(-20);
 
     const contextInfo = context
@@ -145,68 +186,73 @@ ACTION — สั่งการระบบ:
 - ตอบได้ทุกเรื่อง ไม่จำกัดแค่เรื่องเส้นทาง
 - ใช้ข้อมูล "แผนที่กำลังดูบริเวณ" และ "ขอบแผนที่" เพื่อเข้าใจว่าผู้ใช้กำลังดูแผนที่ตรงไหน${contextInfo}`;
 
-    const res = await fetch(GROQ_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...trimmedMessages.map((m: any) => ({
-            role: m.role === 'user' ? 'user' : 'assistant',
-            content: m.content
-          }))
-        ],
-        temperature: 0.6,
-        max_tokens: 2048,
-        stream: true
-      })
-    });
+    const apiMessages = [
+      { role: 'system', content: systemPrompt },
+      ...trimmedMessages.map((m: any) => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content
+      }))
+    ];
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error('Groq chat error:', res.status, errText);
+    // ═══ Try each provider with fallback ═══
+    let lastError = '';
 
-      // Parse rate limit error for user-friendly message
-      if (res.status === 429) {
-        let waitMsg = 'AI ถูกจำกัดการใช้งานชั่วคราว กรุณารอสักครู่แล้วลองใหม่';
-        try {
-          const errJson = JSON.parse(errText);
-          const msg = errJson?.error?.message || '';
-          const timeMatch = msg.match(/try again in (\d+h)?(\d+m)?(\d+(?:\.\d+)?s)?/);
-          if (timeMatch) {
-            const hours = timeMatch[1] ? parseInt(timeMatch[1]) : 0;
-            const mins = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
-            const secs = timeMatch[3] ? Math.ceil(parseFloat(timeMatch[3])) : 0;
-            const parts: string[] = [];
-            if (hours > 0) parts.push(`${hours} ชั่วโมง`);
-            if (mins > 0) parts.push(`${mins} นาที`);
-            if (secs > 0 && hours === 0) parts.push(`${secs} วินาที`);
-            waitMsg = `AI ใช้งานครบโควต้าแล้ว กรุณารออีก ${parts.join(' ')} แล้วลองใหม่`;
-          }
-        } catch {}
-        return new Response(JSON.stringify({ error: waitMsg }), {
-          status: 429,
-          headers: { 'Content-Type': 'application/json' }
+    for (const provider of providers) {
+      try {
+        console.log(`[AI] Trying ${provider.name} (${provider.model})...`);
+
+        const res = await fetch(provider.url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${provider.key}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: provider.model,
+            messages: apiMessages,
+            temperature: 0.6,
+            max_tokens: 2048,
+            stream: true
+          })
         });
-      }
 
-      return new Response(JSON.stringify({ error: `AI error: ${res.status}` }), {
-        status: 502,
-        headers: { 'Content-Type': 'application/json' }
-      });
+        if (res.ok) {
+          console.log(`[AI] ${provider.name} OK — streaming response`);
+          return new Response(res.body, {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive'
+            }
+          });
+        }
+
+        // Rate limit or error — try next provider
+        const errText = await res.text();
+        console.warn(`[AI] ${provider.name} failed (${res.status}):`, errText.slice(0, 200));
+
+        if (res.status === 429) {
+          lastError = `${provider.name} ถูกจำกัดการใช้งาน`;
+          continue;
+        }
+
+        lastError = `${provider.name}: error ${res.status}`;
+        continue;
+      } catch (err: any) {
+        console.warn(`[AI] ${provider.name} fetch error:`, err.message);
+        lastError = `${provider.name}: ${err.message}`;
+        continue;
+      }
     }
 
-    // Pipe the SSE stream directly
-    return new Response(res.body, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      }
+    // All providers failed
+    const errorMsg = providers.length > 1
+      ? `AI ทุกระบบไม่พร้อมใช้งานชั่วคราว (${lastError}) กรุณารอสักครู่แล้วลองใหม่`
+      : `AI ไม่พร้อมใช้งาน: ${lastError}`;
+
+    return new Response(JSON.stringify({ error: errorMsg }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' }
     });
   } catch (err: any) {
     console.error('AI chat error:', err);
@@ -219,7 +265,7 @@ ACTION — สั่งการระบบ:
 
 // GET for availability check
 export const GET: RequestHandler = async () => {
-  const available = !!GROQ_API_KEY && GROQ_API_KEY !== 'gsk_YOUR_API_KEY_HERE';
+  const available = getProviders().length > 0;
   return new Response(JSON.stringify({ available }), {
     headers: { 'Content-Type': 'application/json' }
   });
