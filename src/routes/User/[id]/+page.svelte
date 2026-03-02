@@ -2081,6 +2081,24 @@
     if (optimizedRoute) optimizeRoute();
   }
 
+  // ═══ Nominatim: pick best result (prefer POI over road/boundary) ═══
+  function pickBestNominatimResult(results: any[]): any {
+    if (results.length === 0) return null;
+    if (results.length === 1) return results[0];
+    const classScore: Record<string, number> = {
+      tourism: 10, amenity: 9, leisure: 8, historic: 8, shop: 7,
+      natural: 7, building: 6, craft: 5, office: 5,
+      place: 3, landuse: 2, highway: 1, boundary: 1, waterway: 1
+    };
+    let best = results[0];
+    let bestScore = classScore[results[0].class] ?? 4;
+    for (let i = 1; i < results.length; i++) {
+      const score = classScore[results[i].class] ?? 4;
+      if (score > bestScore) { best = results[i]; bestScore = score; }
+    }
+    return best;
+  }
+
   // ═══ Confirm before adding point ═══
   let confirmAddPoint: { name: string; address: string; lat: number; lng: number; priority: number; source: 'form' | 'ai' | 'quick'; onConfirm: () => Promise<void> } | null = null;
 
@@ -4307,26 +4325,26 @@
 
           const searchOne = async (q: string): Promise<{ name: string; address: string; lat: number; lng: number } | null> => {
             let found: { lat: number; lon: number; display_name: string } | null = null;
-            // Strategy 1: Nominatim TH
+            // Strategy 1: Nominatim TH — pick best POI result
             try {
-              const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=th`);
+              const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&countrycodes=th&addressdetails=1`);
               const d1 = await r1.json();
-              if (d1.length > 0) found = d1[0];
+              if (d1.length > 0) found = pickBestNominatimResult(d1);
             } catch {}
             // Strategy 2: Nominatim no country
             if (!found) {
               try {
-                const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5`);
+                const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&addressdetails=1`);
                 const d2 = await r2.json();
-                if (d2.length > 0) found = d2[0];
+                if (d2.length > 0) found = pickBestNominatimResult(d2);
               } catch {}
             }
             // Strategy 3: Append ประเทศไทย
             if (!found) {
               try {
-                const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=5`);
+                const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=10&addressdetails=1`);
                 const d3 = await r3.json();
-                if (d3.length > 0) found = d3[0];
+                if (d3.length > 0) found = pickBestNominatimResult(d3);
               } catch {}
             }
             // Strategy 4: Simplify query
@@ -4334,9 +4352,9 @@
               const simplified = q.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
               if (simplified !== q) {
                 try {
-                  const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=5&countrycodes=th`);
+                  const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1`);
                   const d4 = await r4.json();
-                  if (d4.length > 0) found = d4[0];
+                  if (d4.length > 0) found = pickBestNominatimResult(d4);
                 } catch {}
               }
             }
@@ -4401,6 +4419,8 @@
 
           if (results.length > 0) {
             batchConfirmPoints = results.map(r => ({ ...r, selected: true }));
+            // Hide AI chat so batch confirm modal is visible
+            aiChatOpen = false;
           } else {
             showNotification('ไม่พบจุดแวะที่ค้นหา', 'error');
           }
@@ -4413,28 +4433,28 @@
           // Multi-strategy search: try many approaches until one works
           let found: { lat: number; lon: number; display_name: string } | null = null;
 
-          // Strategy 1: Nominatim exact query (TH only, limit 5)
+          // Strategy 1: Nominatim exact query (TH only) — pick best POI result
           try {
-            const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=th`);
+            const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=10&countrycodes=th&addressdetails=1`);
             const d1 = await r1.json();
-            if (d1.length > 0) found = d1[0];
+            if (d1.length > 0) found = pickBestNominatimResult(d1);
           } catch {}
 
           // Strategy 2: Nominatim without country restriction
           if (!found) {
             try {
-              const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
+              const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=10&addressdetails=1`);
               const d2 = await r2.json();
-              if (d2.length > 0) found = d2[0];
+              if (d2.length > 0) found = pickBestNominatimResult(d2);
             } catch {}
           }
 
           // Strategy 3: Append "ประเทศไทย" to query
           if (!found) {
             try {
-              const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ' ประเทศไทย')}&limit=5`);
+              const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ' ประเทศไทย')}&limit=10&addressdetails=1`);
               const d3 = await r3.json();
-              if (d3.length > 0) found = d3[0];
+              if (d3.length > 0) found = pickBestNominatimResult(d3);
             } catch {}
           }
 
@@ -4443,9 +4463,9 @@
             const simplified = query.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
             if (simplified !== query) {
               try {
-                const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=5&countrycodes=th`);
+                const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1`);
                 const d4 = await r4.json();
-                if (d4.length > 0) found = d4[0];
+                if (d4.length > 0) found = pickBestNominatimResult(d4);
               } catch {}
             }
           }
