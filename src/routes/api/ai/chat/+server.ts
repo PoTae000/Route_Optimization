@@ -25,7 +25,7 @@ export const POST: RequestHandler = async ({ request }) => {
     const trimmedMessages = messages.slice(-20);
 
     const contextInfo = context
-      ? `\n\n📍 ข้อมูลระบบปัจจุบัน:
+      ? `\n\nข้อมูลระบบปัจจุบัน:
 - จุดแวะทั้งหมด: ${context.totalPoints ?? 0} จุด
 - ไปแล้ว: ${context.completedPoints ?? 0} จุด
 - เหลือ: ${context.remainingPoints ?? 0} จุด
@@ -35,7 +35,9 @@ ${context.routeDistance ? `- ระยะทางรวม: ${(context.routeDis
 ${context.routeDuration ? `- เวลาโดยประมาณ: ${Math.round(context.routeDuration / 60)} นาที` : ''}
 ${context.vehicleType ? `- ยานพาหนะ: ${context.vehicleType === 'ev' ? 'รถไฟฟ้า' : 'รถน้ำมัน'}` : ''}
 ${context.pointNames ? `- รายชื่อจุดแวะ: ${context.pointNames}` : ''}
-${context.currentLat && context.currentLng ? `- ตำแหน่ง GPS ปัจจุบัน: ${context.currentLat.toFixed(5)}, ${context.currentLng.toFixed(5)}` : ''}`
+${context.currentLat && context.currentLng ? `- ตำแหน่ง GPS ปัจจุบัน: ${context.currentLat.toFixed(5)}, ${context.currentLng.toFixed(5)}` : ''}
+${context.mapCenterLat && context.mapCenterLng ? `- แผนที่กำลังดูบริเวณ: ${context.mapCenterLat.toFixed(5)}, ${context.mapCenterLng.toFixed(5)} (zoom ${context.mapZoom ?? '?'})` : ''}
+${context.mapBoundsNorth ? `- ขอบแผนที่: เหนือ ${context.mapBoundsNorth.toFixed(5)}, ใต้ ${context.mapBoundsSouth.toFixed(5)}, ตะวันออก ${context.mapBoundsEast.toFixed(5)}, ตะวันตก ${context.mapBoundsWest.toFixed(5)}` : ''}`
       : '';
 
     const systemPrompt = `คุณคือ "ผู้ช่วย AI" อัจฉริยะ ในแอปนำทางและวางแผนเส้นทางของไทย
@@ -97,8 +99,11 @@ ACTION — สั่งการระบบ:
 - ห้ามใช้ emoji ในคำตอบทุกกรณี
 - ใส่ ACTION tag เฉพาะเมื่อผู้ใช้สั่งให้ทำจริงๆ
 - ถ้าแค่ถามข้อมูลทั่วไป ไม่ต้องใส่ ACTION
-- เมื่อผู้ใช้ขอ "หา...ใกล้ฉัน/ใกล้ๆ" ให้ใช้ searchNearby เสมอ
-- ตอบได้ทุกเรื่อง ไม่จำกัดแค่เรื่องเส้นทาง${contextInfo}`;
+- เมื่อผู้ใช้ขอ "หา...ใกล้ฉัน/ใกล้ๆ" ให้ใช้ searchNearby เสมอ เพราะจะค้นหาจากแผนที่จริง
+- ห้ามใช้ addPoint กับพิกัดที่เดาเอง ถ้าไม่รู้พิกัดแน่ชัด ให้ใช้ searchAndAdd แทนเสมอ (ระบบจะค้นหาพิกัดจริงจาก Nominatim)
+- ห้ามแต่งพิกัด lat/lng เอง เด็ดขาด ใช้ searchAndAdd หรือ searchNearby เท่านั้น
+- ตอบได้ทุกเรื่อง ไม่จำกัดแค่เรื่องเส้นทาง
+- ใช้ข้อมูล "แผนที่กำลังดูบริเวณ" และ "ขอบแผนที่" เพื่อเข้าใจว่าผู้ใช้กำลังดูแผนที่ตรงไหน${contextInfo}`;
 
     const res = await fetch(GROQ_URL, {
       method: 'POST',

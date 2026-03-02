@@ -487,19 +487,30 @@
   $: allDeliveryPoints = deliveryPoints;
 
   // AI Chat context (reactive - updates when points/route/nav changes)
-  $: aiChatContext = {
-    totalPoints: allDeliveryPoints.length,
-    completedPoints: deliveryHistory.filter((d: any) => d.status === 'success').length,
-    remainingPoints: allDeliveryPoints.length - deliveryHistory.filter((d: any) => d.status === 'success').length,
-    hasRoute: !!optimizedRoute,
-    isNavigating,
-    routeDistance: optimizedRoute?.distance,
-    routeDuration: optimizedRoute?.duration,
-    vehicleType,
-    pointNames: allDeliveryPoints.map((p: any) => p.name).join(', '),
-    currentLat: currentLocation?.lat,
-    currentLng: currentLocation?.lng
-  } as AIChatContext;
+  $: aiChatContext = (() => {
+    const bounds = map?.getBounds?.();
+    const center = map?.getCenter?.();
+    return {
+      totalPoints: allDeliveryPoints.length,
+      completedPoints: deliveryHistory.filter((d: any) => d.status === 'success').length,
+      remainingPoints: allDeliveryPoints.length - deliveryHistory.filter((d: any) => d.status === 'success').length,
+      hasRoute: !!optimizedRoute,
+      isNavigating,
+      routeDistance: optimizedRoute?.distance,
+      routeDuration: optimizedRoute?.duration,
+      vehicleType,
+      pointNames: allDeliveryPoints.map((p: any) => p.name).join(', '),
+      currentLat: currentLocation?.lat,
+      currentLng: currentLocation?.lng,
+      mapCenterLat: center?.lat,
+      mapCenterLng: center?.lng,
+      mapZoom: map?.getZoom?.(),
+      mapBoundsNorth: bounds?.getNorth?.(),
+      mapBoundsSouth: bounds?.getSouth?.(),
+      mapBoundsEast: bounds?.getEast?.(),
+      mapBoundsWest: bounds?.getWest?.()
+    } as AIChatContext;
+  })();
 
   // Resize map when settings/addForm opens/closes (sidebar hides/shows)
   $: if (browser && map) { showSettings; showAddForm; desktopSidebarCollapsed; mobileSidebarOpen; setTimeout(() => map?.invalidateSize(), 300); }
@@ -5937,16 +5948,7 @@
       const bearing = (map as any).getBearing?.() || 0;
       camAngle = bearing;
       camActive = Math.abs(bearing) > 0.5;
-      // Counter-rotate ตัวหนังสือ/label/popup ไม่ให้กลับหัวตอนหมุนแผนที่
-      counterRotateMapLabels(bearing);
     });
-  }
-
-  function counterRotateMapLabels(bearing: number) {
-    // ใช้ CSS custom property --map-counter-rotate เพื่อไม่ override transform เดิม
-    const mapEl = document.getElementById('map');
-    if (!mapEl) return;
-    mapEl.style.setProperty('--map-counter-rotate', `${-bearing}deg`);
   }
 
   // Patch leaflet-rotate: pinch-zoom ห้ามหมุนเด็ดขาด, สองนิ้วหมุนถึงจะหมุนได้
@@ -9884,7 +9886,7 @@ out center body;`;
   }
   :global(.custom-start-pulse-2) { animation-delay: 1s; }
   :global(.custom-start-label) {
-    position: absolute; top: -28px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
+    position: absolute; top: -28px; left: 50%; transform: translateX(-50%) scale(var(--start-label-scale, 1));
     transform-origin: bottom center;
     background: rgba(0,255,136,0.9); color: #0a0a0f;
     font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
@@ -10899,7 +10901,6 @@ out center body;`;
   :global(.leaflet-overlay-pane path) { shape-rendering: geometricPrecision; stroke-linecap: round; stroke-linejoin: round; }
   :global(.leaflet-fade-anim .leaflet-tile) { will-change: transform, opacity; transition: opacity 0.08s linear !important; }
   :global(.leaflet-fade-anim .leaflet-popup) { transition: none !important; }
-  :global(.leaflet-popup) { transform: rotate(var(--map-counter-rotate, 0deg)); }
   .map-info { position: absolute; bottom: 24px; left: 16px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; font-size: 13px; color: #a1a1aa; z-index: 999; white-space: nowrap; }
   .map-info svg { width: 18px; height: 18px; color: #00ff88; }
 
@@ -11006,8 +11007,8 @@ out center body;`;
     border: 3px solid rgba(255, 255, 255, 0.5); position: relative;
     transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
     text-shadow: 0 1px 3px rgba(0,0,0,0.5);
-    transform: scale(var(--marker-scale, 1)) rotate(var(--map-counter-rotate, 0deg));
-    transform-origin: center center;
+    transform: scale(var(--marker-scale, 1));
+    transform-origin: center bottom;
   }
   :global(.marker-pin:hover) { filter: brightness(1.15); }
   :global(.marker-pin.draggable) { border-color: #fb923c; cursor: grab; animation: drag-pulse 1.5s ease-in-out infinite; }
