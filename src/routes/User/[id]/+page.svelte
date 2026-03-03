@@ -131,6 +131,11 @@
     turnInstructions = [];
     alerts = [];
     selectedPoints = [];
+    tripMode = false;
+    tripActiveDay = 1;
+    tripDayMap = {};
+    tripRoutes = {};
+    tripTotalDays = 0;
     // Clear all user-specific localStorage keys (BEFORE nulling currentUser)
     const userId = currentUser?.id || 'guest';
     currentUser = null;
@@ -172,6 +177,13 @@
   let desktopSidebarCollapsed = false;
   let isDragMode = false;
   let lastDragUndo: { pointId: number; pointIndex: number; name: string; oldName: string; oldLat: number; oldLng: number; oldAddress?: string } | null = null;
+
+  // ═══ Trip Mode (day-separated points) ═══
+  let tripMode = false;
+  let tripActiveDay = 1;
+  let tripDayMap: Record<number, number> = {};  // pointId → dayNumber
+  let tripRoutes: Record<number, any> = {};     // day → route cache
+  let tripTotalDays = 0;
 
   // Reorder mode (drag to reorder in sidebar)
   let isReorderMode = false;
@@ -460,12 +472,14 @@
     }
   });
 
-  // perf: alias only (no copy)
-  $: filteredPoints = deliveryPoints;
+  // perf: alias only (no copy) — trip mode filters by active day
+  $: filteredPoints = tripMode
+    ? deliveryPoints.filter(p => tripDayMap[p.id] === tripActiveDay)
+    : deliveryPoints;
 
   // perf: pre-compute point distances (avoid Haversine in #each template per GPS update)
   $: pointDistances = currentLocation
-    ? deliveryPoints.map(p => getDistance(currentLocation.lat, currentLocation.lng, p.lat, p.lng))
+    ? filteredPoints.map(p => getDistance(currentLocation.lat, currentLocation.lng, p.lat, p.lng))
     : [];
 
   $: {
@@ -489,8 +503,18 @@
     }
   }
 
-  // perf: direct alias instead of .map(spread) - User page has no customer system
-  $: allDeliveryPoints = deliveryPoints;
+  // perf: direct alias — trip mode filters by active day (all downstream code auto day-aware)
+  $: allDeliveryPoints = tripMode
+    ? deliveryPoints.filter(p => tripDayMap[p.id] === tripActiveDay)
+    : deliveryPoints;
+
+  // Trip mode: day counts for tabs
+  $: tripDayCounts = tripMode
+    ? Array.from({ length: tripTotalDays }, (_, i) => ({
+        day: i + 1,
+        count: deliveryPoints.filter(p => tripDayMap[p.id] === (i + 1)).length
+      }))
+    : [];
 
   // Nearby search results for AI reference
   let lastNearbyResults: {index: number; name: string; lat: number; lon: number; distance: string}[] = [];
@@ -1939,7 +1963,10 @@
     if (optimizedRoute) return; // route markers already displayed
     markers.forEach(m => m.remove());
     markers = [];
-    deliveryPoints.forEach((point, i) => {
+    const pointsToDisplay = tripMode
+      ? deliveryPoints.filter(p => tripDayMap[p.id] === tripActiveDay)
+      : deliveryPoints;
+    pointsToDisplay.forEach((point, i) => {
       const colors = getPriorityGradient(point.priority);
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
@@ -2130,6 +2157,7 @@
     if (selected.length === 0) return;
     batchConfirmLoading = true;
     let addedCount = 0;
+    const addedMappings: { lat: number; lng: number; day: number }[] = [];
     for (const pt of selected) {
       try {
         const payload = { name: pt.name, address: pt.address, lat: pt.lat, lng: pt.lng, priority: 3, user_id: currentUser?.id };
@@ -2139,10 +2167,21 @@
           body: JSON.stringify(payload)
         });
         const data = await res.json();
-        if (data && !data.error && res.ok) addedCount++;
+        if (data && !data.error && res.ok) {
+          addedCount++;
+          addedMappings.push({ lat: pt.lat, lng: pt.lng, day: pt.day });
+        }
       } catch {}
     }
     await loadDeliveryPoints();
+    // Map added points to their trip day
+    for (const m of addedMappings) {
+      const match = deliveryPoints.find(p =>
+        !tripDayMap[p.id] &&
+        Math.abs(p.lat - m.lat) < 0.0001 && Math.abs(p.lng - m.lng) < 0.0001
+      );
+      if (match) tripDayMap[match.id] = m.day;
+    }
     // Remove added day's points
     batchConfirmPoints = batchConfirmPoints.filter(p => p.day !== batchConfirmActiveDay);
     batchConfirmDays = [...new Set(batchConfirmPoints.map(p => p.day))].sort((a, b) => a - b);
@@ -2152,8 +2191,16 @@
     if (batchConfirmDays.length > 0) {
       batchConfirmActiveDay = batchConfirmDays[0];
     } else {
-      // All done — close modal
+      // All done — activate trip mode if multi-day
       batchConfirmPoints = [];
+      const uniqueDays = [...new Set(Object.values(tripDayMap))];
+      if (uniqueDays.length >= 1) {
+        tripMode = true;
+        tripTotalDays = Math.max(...uniqueDays);
+        tripActiveDay = 1;
+        saveTripState();
+        displayPoints();
+      }
     }
   }
 
@@ -2249,6 +2296,16 @@
         routeAlternatives = [];
         showRouteSelector = false;
         showRouteComparison = false;
+      }
+      // Trip mode: remove from day map
+      if (tripMode) {
+        delete tripDayMap[id];
+        const remaining = deliveryPoints.filter(p => tripDayMap[p.id]);
+        if (remaining.length === 0) {
+          exitTripMode();
+        } else {
+          saveTripState();
+        }
       }
       showNotification('ลบสำเร็จ', 'success');
     } catch (err) {
@@ -3119,6 +3176,11 @@
       }
     }
     saveRouteState();
+    // Trip mode: auto-cache route for current day
+    if (tripMode) {
+      tripRoutes[tripActiveDay] = { optimizedRoute, routeAlternatives, selectedRouteIndex };
+      saveTripState();
+    }
     // Clear old incidents when route changes
     if (trafficIncidents.length > 0) {
       trafficIncidents = [];
@@ -3870,6 +3932,145 @@
   // Helper function to get user-specific localStorage key
   function getUserKey(key: string): string {
     return `${key}_${currentUser?.id || 'guest'}`;
+  }
+
+  // ═══ Trip Mode Persistence ═══
+  function saveTripState() {
+    if (!browser) return;
+    try {
+      localStorage.setItem(getUserKey('tripMode'), JSON.stringify(tripMode));
+      localStorage.setItem(getUserKey('tripDayMap'), JSON.stringify(tripDayMap));
+      localStorage.setItem(getUserKey('tripActiveDay'), JSON.stringify(tripActiveDay));
+      localStorage.setItem(getUserKey('tripTotalDays'), JSON.stringify(tripTotalDays));
+      // Save route cache (strip heavy data)
+      const lightRoutes: Record<number, any> = {};
+      for (const [day, r] of Object.entries(tripRoutes)) {
+        if (r?.optimizedRoute) {
+          lightRoutes[Number(day)] = {
+            optimizedRoute: r.optimizedRoute,
+            routeAlternatives: (r.routeAlternatives || []).map((alt: any) => ({
+              index: alt.index, geometry: alt.geometry,
+              distance: alt.distance, duration: alt.duration,
+              hasTolls: alt.hasTolls, tollEstimate: alt.tollEstimate,
+              label: alt.label, color: alt.color, excludeUsed: alt.excludeUsed,
+              _turns: alt._turns || extractTurnInstructions(alt)
+            })),
+            selectedRouteIndex: r.selectedRouteIndex
+          };
+        }
+      }
+      localStorage.setItem(getUserKey('tripRoutes'), JSON.stringify(lightRoutes));
+    } catch (_) {}
+  }
+
+  function loadTripState() {
+    if (!browser) return;
+    try {
+      const mode = localStorage.getItem(getUserKey('tripMode'));
+      if (!mode || mode === 'false') return;
+      tripMode = JSON.parse(mode);
+      if (!tripMode) return;
+      const dayMap = localStorage.getItem(getUserKey('tripDayMap'));
+      if (dayMap) tripDayMap = JSON.parse(dayMap);
+      const activeDay = localStorage.getItem(getUserKey('tripActiveDay'));
+      if (activeDay) tripActiveDay = JSON.parse(activeDay);
+      const totalDays = localStorage.getItem(getUserKey('tripTotalDays'));
+      if (totalDays) tripTotalDays = JSON.parse(totalDays);
+      const routes = localStorage.getItem(getUserKey('tripRoutes'));
+      if (routes) tripRoutes = JSON.parse(routes);
+      // Re-display points for active day
+      setTimeout(() => displayPoints(), 200);
+    } catch (_) {
+      tripMode = false;
+    }
+  }
+
+  function clearTripState() {
+    tripMode = false;
+    tripActiveDay = 1;
+    tripDayMap = {};
+    tripRoutes = {};
+    tripTotalDays = 0;
+    if (!browser) return;
+    localStorage.removeItem(getUserKey('tripMode'));
+    localStorage.removeItem(getUserKey('tripDayMap'));
+    localStorage.removeItem(getUserKey('tripActiveDay'));
+    localStorage.removeItem(getUserKey('tripTotalDays'));
+    localStorage.removeItem(getUserKey('tripRoutes'));
+  }
+
+  function switchTripDay(day: number) {
+    if (day === tripActiveDay) return;
+    if (isNavigating) {
+      showNotification('หยุดนำทางก่อนเปลี่ยนวัน', 'warning');
+      return;
+    }
+    // Save current day's route
+    if (optimizedRoute) {
+      tripRoutes[tripActiveDay] = {
+        optimizedRoute,
+        routeAlternatives: routeAlternatives.map((alt: any) => ({
+          index: alt.index, geometry: alt.geometry,
+          distance: alt.distance, duration: alt.duration,
+          hasTolls: alt.hasTolls, tollEstimate: alt.tollEstimate,
+          label: alt.label, color: alt.color, excludeUsed: alt.excludeUsed,
+          _turns: alt._turns || extractTurnInstructions(alt)
+        })),
+        selectedRouteIndex
+      };
+    }
+    // Clear current route layers
+    clearAlternativeRouteLayers();
+    clearTrafficLayers();
+    if (routeLayer) { try { map.removeLayer(routeLayer); } catch (_) {} routeLayer = null; }
+    markers.forEach(m => { try { m.remove(); } catch (_) {} });
+    markers = [];
+    // Switch day
+    tripActiveDay = day;
+    // Restore cached route for new day
+    const cached = tripRoutes[day];
+    if (cached?.optimizedRoute) {
+      optimizedRoute = cached.optimizedRoute;
+      routeAlternatives = cached.routeAlternatives || [];
+      selectedRouteIndex = cached.selectedRouteIndex || 0;
+      if (optimizedRoute?.route?.geometry?.coordinates) {
+        cachedRouteCoords = optimizedRoute.route.geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number]);
+        lastRouteIndex = 0;
+      }
+      displayOptimizedRoute();
+      if (routeAlternatives.length > 1 && _lastStartPoint && _lastSortedPoints.length > 0) {
+        displayFadedAlternatives(_lastStartPoint, _lastSortedPoints);
+      }
+    } else {
+      optimizedRoute = null;
+      routeAlternatives = [];
+      displayPoints();
+    }
+    // Fit map to day's points
+    const dayPoints = deliveryPoints.filter(p => tripDayMap[p.id] === day);
+    if (dayPoints.length > 0 && map) {
+      const bounds = dayPoints.map(p => [p.lat, p.lng] as [number, number]);
+      try { map.fitBounds(bounds, { padding: [60, 60], maxZoom: 14 }); } catch (_) {}
+    }
+    saveTripState();
+  }
+
+  function exitTripMode() {
+    if (isNavigating) {
+      showNotification('หยุดนำทางก่อนออกโหมดทริป', 'warning');
+      return;
+    }
+    // Clear route + trip state
+    clearAlternativeRouteLayers();
+    clearTrafficLayers();
+    if (routeLayer) { try { map.removeLayer(routeLayer); } catch (_) {} routeLayer = null; }
+    markers.forEach(m => { try { m.remove(); } catch (_) {} });
+    markers = [];
+    optimizedRoute = null;
+    routeAlternatives = [];
+    clearTripState();
+    displayPoints();
+    showNotification('ออกจากโหมดทริปแล้ว', 'success');
   }
 
   function toggleRoutePreference(pref: typeof routePreference) {
@@ -9032,6 +9233,9 @@ out center body;`;
         showNotification('กู้คืนเส้นทางที่คำนวณไว้แล้ว', 'success');
       }
 
+      // Restore trip mode state
+      loadTripState();
+
       // Keyboard shortcuts
       window.addEventListener('keydown', handleKeyboardShortcuts);
 
@@ -9525,7 +9729,7 @@ out center body;`;
           </div>
         {:else}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-          <span>{allDeliveryPoints.length} จุดแวะ</span>
+          <span>{#if tripMode}วัน {tripActiveDay}: {/if}{allDeliveryPoints.length} จุดแวะ</span>
         {/if}
       </button>
       <div class="sidebar-header">
@@ -9617,7 +9821,7 @@ out center body;`;
         </div>
         {/if}
         <button class="btn btn-primary" on:click={optimizeRoute} disabled={isOptimizing || allDeliveryPoints.length < 1 || ((showStartPointPicker || useCustomStartPoint) && !customStartPoint)} title="คำนวณเส้นทาง [R]">
-          {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>{:else if (showStartPointPicker || useCustomStartPoint) && !customStartPoint}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg><span>เลือกจุดเริ่มต้นก่อน</span>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด)</span>{/if}
+          {#if isOptimizing}<div class="spinner"></div><span>กำลังคำนวณ...</span>{:else if (showStartPointPicker || useCustomStartPoint) && !customStartPoint}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg><span>เลือกจุดเริ่มต้นก่อน</span>{:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>คำนวณเส้นทาง ({allDeliveryPoints.length} จุด{#if tripMode} วันที่ {tripActiveDay}{/if})</span>{/if}
         </button>
         {#if optimizedRoute}
           <button class="btn btn-navigate" on:click={startNavigation} title="เริ่มนำทาง [N]"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg><span>เริ่มนำทาง</span></button>
@@ -9687,8 +9891,26 @@ out center body;`;
         {/if}
       </div>
 
+      {#if tripMode}
+        <div class="trip-mode-bar">
+          <div class="trip-header">
+            <span class="trip-label">โหมดทริป</span>
+            <span class="trip-sub">{tripTotalDays} วัน</span>
+            <button class="trip-exit-btn" on:click={exitTripMode} title="ออกโหมดทริป">✕</button>
+          </div>
+          <div class="trip-day-tabs">
+            {#each tripDayCounts as { day, count }}
+              <button class="trip-day-tab" class:active={tripActiveDay === day} on:click={() => switchTripDay(day)}>
+                วัน {day} <span class="trip-day-count">{count}</span>
+                {#if tripRoutes[day]?.optimizedRoute}<span class="trip-routed">✓</span>{/if}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <div class="tabs">
-        <button class="tab" class:active={activeTab === 'points' && mobileContentExpanded} on:click={() => { if (activeTab === 'points' && mobileContentExpanded) { mobileContentExpanded = false; } else { activeTab = 'points'; mobileContentExpanded = true; } }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดแวะ ({deliveryPoints.length})<svg class="tab-chevron" class:tab-chevron-up={activeTab === 'points' && mobileContentExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button class="tab" class:active={activeTab === 'points' && mobileContentExpanded} on:click={() => { if (activeTab === 'points' && mobileContentExpanded) { mobileContentExpanded = false; } else { activeTab = 'points'; mobileContentExpanded = true; } }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>จุดแวะ ({filteredPoints.length}){#if tripMode} <span style="font-size:10px;opacity:0.6">วัน {tripActiveDay}</span>{/if}<svg class="tab-chevron" class:tab-chevron-up={activeTab === 'points' && mobileContentExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>
         <button class="tab" class:active={activeTab === 'route' && mobileContentExpanded} on:click={() => { if (activeTab === 'route' && mobileContentExpanded) { mobileContentExpanded = false; } else { activeTab = 'route'; mobileContentExpanded = true; } }} disabled={!optimizedRoute}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l5.447 2.724A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>เส้นทาง<svg class="tab-chevron" class:tab-chevron-up={activeTab === 'route' && mobileContentExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>
       </div>
 
@@ -16249,6 +16471,94 @@ out center body;`;
   position: absolute;
   right: -2px;
   bottom: -2px;
+}
+
+/* ═══ Trip Mode Bar ═══ */
+.trip-mode-bar {
+  padding: 10px 14px;
+  background: rgba(0, 255, 136, 0.04);
+  border-bottom: 1px solid rgba(0, 255, 136, 0.12);
+}
+.trip-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.trip-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #4ade80;
+}
+.trip-sub {
+  font-size: 11px;
+  color: #71717a;
+  background: rgba(0, 255, 136, 0.08);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.trip-exit-btn {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 100, 100, 0.2);
+  background: rgba(255, 100, 100, 0.06);
+  color: #f87171;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.trip-exit-btn:hover {
+  background: rgba(255, 100, 100, 0.15);
+  border-color: rgba(255, 100, 100, 0.4);
+}
+.trip-day-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.trip-day-tab {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 20px;
+  border: 1px solid rgba(0, 255, 136, 0.15);
+  background: rgba(0, 255, 136, 0.04);
+  color: #a1a1aa;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.trip-day-tab:hover {
+  background: rgba(0, 255, 136, 0.1);
+  color: #e4e4e7;
+}
+.trip-day-tab.active {
+  background: rgba(0, 255, 136, 0.15);
+  border-color: #00ff88;
+  color: #00ff88;
+  font-weight: 600;
+}
+.trip-day-count {
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1px 6px;
+  border-radius: 8px;
+  min-width: 16px;
+  text-align: center;
+}
+.trip-day-tab.active .trip-day-count {
+  background: rgba(0, 255, 136, 0.2);
+  color: #4ade80;
+}
+.trip-routed {
+  font-size: 10px;
+  color: #4ade80;
 }
 
 </style>
