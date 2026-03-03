@@ -4331,8 +4331,9 @@
               const d1 = await r1.json();
               if (d1.length > 0) found = pickBestNominatimResult(d1);
             } catch {}
-            // Strategy 2: Nominatim no country
+            // Strategy 2: Nominatim no country (with rate limit delay)
             if (!found) {
+              await new Promise(r => setTimeout(r, 1000));
               try {
                 const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&addressdetails=1`);
                 const d2 = await r2.json();
@@ -4341,16 +4342,18 @@
             }
             // Strategy 3: Append ประเทศไทย
             if (!found) {
+              await new Promise(r => setTimeout(r, 1000));
               try {
                 const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=10&addressdetails=1`);
                 const d3 = await r3.json();
                 if (d3.length > 0) found = pickBestNominatimResult(d3);
               } catch {}
             }
-            // Strategy 4: Simplify query
+            // Strategy 4: Simplify query — remove จังหวัด/อำเภอ etc.
             if (!found) {
               const simplified = q.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
               if (simplified !== q) {
+                await new Promise(r => setTimeout(r, 1000));
                 try {
                   const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1`);
                   const d4 = await r4.json();
@@ -4358,13 +4361,24 @@
                 } catch {}
               }
             }
-            // Strategy 5: Overpass API
+            // Strategy 5: Drop last word (often province) — try core name
+            if (!found) {
+              const words = q.split(/\s+/);
+              if (words.length > 1) {
+                const coreQuery = words.slice(0, -1).join(' ');
+                await new Promise(r => setTimeout(r, 1000));
+                try {
+                  const r5 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(coreQuery)}&limit=10&countrycodes=th&addressdetails=1`);
+                  const d5 = await r5.json();
+                  if (d5.length > 0) found = pickBestNominatimResult(d5);
+                } catch {}
+              }
+            }
+            // Strategy 6: Overpass API — Thailand-wide bbox, first keyword
             if (!found) {
               try {
-                const nameQuery = q.replace(/["\\]/g, '');
-                const searchLat = currentLocation?.lat || (map ? map.getCenter().lat : 13.75);
-                const searchLng = currentLocation?.lng || (map ? map.getCenter().lng : 100.5);
-                const ovQuery = `[out:json][timeout:10];(node["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng});way["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng}););out center 1;`;
+                const nameQuery = q.replace(/["\\]/g, '').split(/\s+/)[0];
+                const ovQuery = `[out:json][timeout:10][bbox:5.5,97.3,20.5,105.7];(node["name"~"${nameQuery}",i];way["name"~"${nameQuery}",i];);out center 1;`;
                 const ovRes = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(ovQuery) });
                 const ovData = await ovRes.json();
                 const el = ovData.elements?.[0];
@@ -4383,11 +4397,11 @@
 
           // Search sequentially with progress updates in chat
           const results: { name: string; address: string; lat: number; lng: number }[] = [];
+          const foundStatus: boolean[] = [];
           for (let i = 0; i < queries.length; i++) {
             const progressLines = queries.map((q, j) => {
               if (j < i) {
-                const found = results.find(r => r.name.includes(q.split(' ')[0]) || q.includes(r.name.split(',')[0]));
-                return `${j + 1}. ${q} -- พบแล้ว`;
+                return `${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว ✓' : 'ไม่พบ ✗'}`;
               } else if (j === i) {
                 return `${j + 1}. ${q} -- กำลังค้นหา...`;
               } else {
@@ -4398,17 +4412,14 @@
 
             const result = await searchOne(queries[i]);
             if (result) results.push(result);
+            foundStatus.push(!!result);
             // Small delay to avoid Nominatim rate limit
             if (i < queries.length - 1) await new Promise(r => setTimeout(r, 1100));
           }
 
           // Final progress message
           const finalLines = queries.map((q, j) => {
-            const matched = results.find(r => {
-              const qFirst = q.split(' ')[0];
-              return r.name.includes(qFirst) || q.includes(r.name.split(',')[0]);
-            });
-            return `${j + 1}. ${q} -- ${matched ? 'พบแล้ว' : 'ไม่พบ'}`;
+            return `${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว ✓' : 'ไม่พบ ✗'}`;
           });
           if (aiChatPanelRef) aiChatPanelRef.finalizeSearchProgress(`[ค้นหาจุดแวะเสร็จ ${results.length}/${queries.length} จุด]\n\n${finalLines.join('\n')}\n\nเลือกจุดที่ต้องการเพิ่มได้เลย`);
 
@@ -4435,8 +4446,9 @@
             if (d1.length > 0) found = pickBestNominatimResult(d1);
           } catch {}
 
-          // Strategy 2: Nominatim without country restriction
+          // Strategy 2: Nominatim without country restriction (with rate limit delay)
           if (!found) {
+            await new Promise(r => setTimeout(r, 1000));
             try {
               const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=10&addressdetails=1`);
               const d2 = await r2.json();
@@ -4446,6 +4458,7 @@
 
           // Strategy 3: Append "ประเทศไทย" to query
           if (!found) {
+            await new Promise(r => setTimeout(r, 1000));
             try {
               const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ' ประเทศไทย')}&limit=10&addressdetails=1`);
               const d3 = await r3.json();
@@ -4453,10 +4466,11 @@
             } catch {}
           }
 
-          // Strategy 4: Simplify query — take first part before space/comma, search broader
+          // Strategy 4: Simplify query — remove จังหวัด/อำเภอ etc.
           if (!found) {
             const simplified = query.replace(/\s+(จังหวัด|อำเภอ|ตำบล|เขต|แขวง).*/g, '').trim();
             if (simplified !== query) {
+              await new Promise(r => setTimeout(r, 1000));
               try {
                 const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1`);
                 const d4 = await r4.json();
@@ -4465,13 +4479,25 @@
             }
           }
 
-          // Strategy 5: Overpass API — search by name tag (catches POIs that Nominatim misses)
+          // Strategy 5: Drop last word (often province) — try core name
+          if (!found) {
+            const words = query.split(/\s+/);
+            if (words.length > 1) {
+              const coreQuery = words.slice(0, -1).join(' ');
+              await new Promise(r => setTimeout(r, 1000));
+              try {
+                const r5 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(coreQuery)}&limit=10&countrycodes=th&addressdetails=1`);
+                const d5 = await r5.json();
+                if (d5.length > 0) found = pickBestNominatimResult(d5);
+              } catch {}
+            }
+          }
+
+          // Strategy 6: Overpass API — Thailand-wide bbox, first keyword
           if (!found) {
             try {
-              const nameQuery = query.replace(/["\\]/g, '');
-              const searchLat = currentLocation?.lat || (map ? map.getCenter().lat : 13.75);
-              const searchLng = currentLocation?.lng || (map ? map.getCenter().lng : 100.5);
-              const ovQuery = `[out:json][timeout:10];(node["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng});way["name"~"${nameQuery}",i](around:100000,${searchLat},${searchLng}););out center 1;`;
+              const nameQuery = query.replace(/["\\]/g, '').split(/\s+/)[0];
+              const ovQuery = `[out:json][timeout:10][bbox:5.5,97.3,20.5,105.7];(node["name"~"${nameQuery}",i];way["name"~"${nameQuery}",i];);out center 1;`;
               const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
                 method: 'POST',
                 body: 'data=' + encodeURIComponent(ovQuery)
