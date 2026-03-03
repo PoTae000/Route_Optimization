@@ -2120,12 +2120,14 @@
   }
 
   // ═══ Batch Confirm for Trip Planning ═══
-  let batchConfirmPoints: { name: string; address: string; lat: number; lng: number; selected: boolean }[] = [];
+  let batchConfirmPoints: { name: string; address: string; lat: number; lng: number; selected: boolean; day: number }[] = [];
   let batchConfirmLoading = false;
+  let batchConfirmActiveDay = 1;
+  let batchConfirmDays: number[] = [];
 
   async function executeBatchConfirm() {
-    const selected = batchConfirmPoints.filter(p => p.selected);
-    if (selected.length === 0) { batchConfirmPoints = []; return; }
+    const selected = batchConfirmPoints.filter(p => p.selected && p.day === batchConfirmActiveDay);
+    if (selected.length === 0) return;
     batchConfirmLoading = true;
     let addedCount = 0;
     for (const pt of selected) {
@@ -2141,9 +2143,18 @@
       } catch {}
     }
     await loadDeliveryPoints();
-    batchConfirmPoints = [];
+    // Remove added day's points
+    batchConfirmPoints = batchConfirmPoints.filter(p => p.day !== batchConfirmActiveDay);
+    batchConfirmDays = [...new Set(batchConfirmPoints.map(p => p.day))].sort((a, b) => a - b);
     batchConfirmLoading = false;
-    showNotification(`เพิ่ม ${addedCount} จุดแวะสำเร็จ`, 'success');
+    showNotification(`เพิ่ม ${addedCount} จุดแวะ วันที่ ${batchConfirmActiveDay} สำเร็จ`, 'success');
+    // If other days remain, switch to next day
+    if (batchConfirmDays.length > 0) {
+      batchConfirmActiveDay = batchConfirmDays[0];
+    } else {
+      // All done — close modal
+      batchConfirmPoints = [];
+    }
   }
 
   function cancelBatchConfirm() {
@@ -2157,11 +2168,11 @@
   }
 
   function selectAllBatch() {
-    batchConfirmPoints = batchConfirmPoints.map(p => ({ ...p, selected: true }));
+    batchConfirmPoints = batchConfirmPoints.map(p => p.day === batchConfirmActiveDay ? { ...p, selected: true } : p);
   }
 
   function deselectAllBatch() {
-    batchConfirmPoints = batchConfirmPoints.map(p => ({ ...p, selected: false }));
+    batchConfirmPoints = batchConfirmPoints.map(p => p.day === batchConfirmActiveDay ? { ...p, selected: false } : p);
   }
 
   let isAddingPoint = false;
@@ -4321,30 +4332,35 @@
           // Batch search all queries in parallel, then show one confirm modal
           const queries = (params.queries || '').split('|||').filter(Boolean);
           if (queries.length === 0) break;
+          const daysArr = (params.days || '').split('|||');
+          const fbLats = (params.fallbackLats || '').split('|||');
+          const fbLngs = (params.fallbackLngs || '').split('|||');
           showNotification(`กำลังค้นหา ${queries.length} จุดแวะ...`, 'success');
 
-          const searchOne = async (q: string): Promise<{ name: string; address: string; lat: number; lng: number } | null> => {
+          const searchOne = async (q: string, fbLat: string, fbLng: string): Promise<{ name: string; address: string; lat: number; lng: number } | null> => {
             let found: { lat: number; lon: number; display_name: string } | null = null;
-            // Strategy 1: Nominatim TH — pick best POI result
+            const hasCoords = fbLat && fbLng && !isNaN(parseFloat(fbLat)) && !isNaN(parseFloat(fbLng));
+            const vbParam = hasCoords ? `&viewbox=${parseFloat(fbLng) - 0.5},${parseFloat(fbLat) + 0.5},${parseFloat(fbLng) + 0.5},${parseFloat(fbLat) - 0.5}&bounded=1` : '';
+            // Strategy 1: Nominatim TH + viewbox — pick best POI result
             try {
-              const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&countrycodes=th&addressdetails=1`);
+              const r1 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&countrycodes=th&addressdetails=1${vbParam}`);
               const d1 = await r1.json();
               if (d1.length > 0) found = pickBestNominatimResult(d1);
             } catch {}
-            // Strategy 2: Nominatim no country (with rate limit delay)
+            // Strategy 2: Nominatim no country + viewbox (with rate limit delay)
             if (!found) {
               await new Promise(r => setTimeout(r, 1000));
               try {
-                const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&addressdetails=1`);
+                const r2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=10&addressdetails=1${vbParam}`);
                 const d2 = await r2.json();
                 if (d2.length > 0) found = pickBestNominatimResult(d2);
               } catch {}
             }
-            // Strategy 3: Append ประเทศไทย
+            // Strategy 3: Append ประเทศไทย + viewbox
             if (!found) {
               await new Promise(r => setTimeout(r, 1000));
               try {
-                const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=10&addressdetails=1`);
+                const r3 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' ประเทศไทย')}&limit=10&addressdetails=1${vbParam}`);
                 const d3 = await r3.json();
                 if (d3.length > 0) found = pickBestNominatimResult(d3);
               } catch {}
@@ -4355,30 +4371,32 @@
               if (simplified !== q) {
                 await new Promise(r => setTimeout(r, 1000));
                 try {
-                  const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1`);
+                  const r4 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(simplified)}&limit=10&countrycodes=th&addressdetails=1${vbParam}`);
                   const d4 = await r4.json();
                   if (d4.length > 0) found = pickBestNominatimResult(d4);
                 } catch {}
               }
             }
-            // Strategy 5: Drop last word (often province) — try core name
+            // Strategy 5: Drop last word (often province) — try core name + viewbox
             if (!found) {
               const words = q.split(/\s+/);
               if (words.length > 1) {
                 const coreQuery = words.slice(0, -1).join(' ');
                 await new Promise(r => setTimeout(r, 1000));
                 try {
-                  const r5 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(coreQuery)}&limit=10&countrycodes=th&addressdetails=1`);
+                  const r5 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(coreQuery)}&limit=10&countrycodes=th&addressdetails=1${vbParam}`);
                   const d5 = await r5.json();
                   if (d5.length > 0) found = pickBestNominatimResult(d5);
                 } catch {}
               }
             }
-            // Strategy 6: Overpass API — Thailand-wide bbox, first keyword
+            // Strategy 6: Overpass API — use AI coords radius or Thailand-wide bbox
             if (!found) {
               try {
                 const nameQuery = q.replace(/["\\]/g, '').split(/\s+/)[0];
-                const ovQuery = `[out:json][timeout:10][bbox:5.5,97.3,20.5,105.7];(node["name"~"${nameQuery}",i];way["name"~"${nameQuery}",i];);out center 1;`;
+                const ovBbox = hasCoords ? '' : '[bbox:5.5,97.3,20.5,105.7]';
+                const ovArea = hasCoords ? `(around:50000,${parseFloat(fbLat)},${parseFloat(fbLng)})` : '';
+                const ovQuery = `[out:json][timeout:10]${ovBbox};(node["name"~"${nameQuery}",i]${ovArea};way["name"~"${nameQuery}",i]${ovArea};);out center 1;`;
                 const ovRes = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(ovQuery) });
                 const ovData = await ovRes.json();
                 const el = ovData.elements?.[0];
@@ -4389,6 +4407,10 @@
                 }
               } catch {}
             }
+            // Strategy 7: Fallback — use AI coordinates directly (100% success)
+            if (!found && hasCoords) {
+              return { name: q.split(',')[0].trim(), address: q, lat: parseFloat(fbLat), lng: parseFloat(fbLng) };
+            }
             if (found) {
               return { name: found.display_name.split(',')[0], address: found.display_name, lat: parseFloat(String(found.lat)), lng: parseFloat(String(found.lon)) };
             }
@@ -4396,22 +4418,24 @@
           };
 
           // Search sequentially with progress updates in chat
-          const results: { name: string; address: string; lat: number; lng: number }[] = [];
+          const results: { name: string; address: string; lat: number; lng: number; day: number }[] = [];
           const foundStatus: boolean[] = [];
           for (let i = 0; i < queries.length; i++) {
+            const dayNum = parseInt(daysArr[i]) || 1;
             const progressLines = queries.map((q, j) => {
+              const dLabel = `[วันที่ ${parseInt(daysArr[j]) || 1}]`;
               if (j < i) {
-                return `${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว ✓' : 'ไม่พบ ✗'}`;
+                return `${dLabel} ${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว' : 'ใช้พิกัด AI'} ✓`;
               } else if (j === i) {
-                return `${j + 1}. ${q} -- กำลังค้นหา...`;
+                return `${dLabel} ${j + 1}. ${q} -- กำลังค้นหา...`;
               } else {
-                return `${j + 1}. ${q} -- รอค้นหา`;
+                return `${dLabel} ${j + 1}. ${q} -- รอค้นหา`;
               }
             });
             if (aiChatPanelRef) aiChatPanelRef.updateSearchProgress(`[ค้นหาจุดแวะ ${i + 1}/${queries.length}]\n\n${progressLines.join('\n')}`);
 
-            const result = await searchOne(queries[i]);
-            if (result) results.push(result);
+            const result = await searchOne(queries[i], fbLats[i] || '', fbLngs[i] || '');
+            if (result) results.push({ ...result, day: dayNum });
             foundStatus.push(!!result);
             // Small delay to avoid Nominatim rate limit
             if (i < queries.length - 1) await new Promise(r => setTimeout(r, 1100));
@@ -4419,12 +4443,15 @@
 
           // Final progress message
           const finalLines = queries.map((q, j) => {
-            return `${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว ✓' : 'ไม่พบ ✗'}`;
+            const dLabel = `[วันที่ ${parseInt(daysArr[j]) || 1}]`;
+            return `${dLabel} ${j + 1}. ${q} -- ${foundStatus[j] ? 'พบแล้ว' : 'ใช้พิกัด AI'} ✓`;
           });
           if (aiChatPanelRef) aiChatPanelRef.finalizeSearchProgress(`[ค้นหาจุดแวะเสร็จ ${results.length}/${queries.length} จุด]\n\n${finalLines.join('\n')}\n\nเลือกจุดที่ต้องการเพิ่มได้เลย`);
 
           if (results.length > 0) {
             batchConfirmPoints = results.map(r => ({ ...r, selected: true }));
+            batchConfirmDays = [...new Set(results.map(r => r.day))].sort((a, b) => a - b);
+            batchConfirmActiveDay = batchConfirmDays[0] || 1;
             // Hide AI chat so batch confirm modal is visible
             aiChatOpen = false;
           } else {
@@ -10356,29 +10383,40 @@ out center body;`;
 {#if batchConfirmPoints.length > 0}
   <div class="confirm-add-overlay" on:click|self={cancelBatchConfirm}>
     <div class="batch-confirm-card">
-      <div class="batch-confirm-title">เพิ่มจุดแวะทริป ({batchConfirmPoints.filter(p => p.selected).length}/{batchConfirmPoints.length})</div>
+      <div class="batch-confirm-title">เพิ่มจุดแวะทริป</div>
+      {#if batchConfirmDays.length > 1}
+        <div class="batch-day-tabs">
+          {#each batchConfirmDays as day}
+            <button class="batch-day-tab" class:active={batchConfirmActiveDay === day} on:click={() => batchConfirmActiveDay = day}>
+              วันที่ {day} ({batchConfirmPoints.filter(p => p.day === day).length})
+            </button>
+          {/each}
+        </div>
+      {/if}
       <div class="batch-confirm-actions-top">
         <button class="batch-sel-btn" on:click={selectAllBatch}>เลือกทั้งหมด</button>
         <button class="batch-sel-btn" on:click={deselectAllBatch}>ไม่เลือกทั้งหมด</button>
       </div>
       <div class="batch-confirm-list">
         {#each batchConfirmPoints as pt, i}
-          <div class="batch-point-row" class:deselected={!pt.selected} on:click={() => toggleBatchPoint(i)}>
-            <div class="batch-check" class:checked={pt.selected}>
-              {#if pt.selected}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="12" height="12"><path d="M5 13l4 4L19 7"/></svg>
-              {/if}
+          {#if pt.day === batchConfirmActiveDay}
+            <div class="batch-point-row" class:deselected={!pt.selected} on:click={() => toggleBatchPoint(i)}>
+              <div class="batch-check" class:checked={pt.selected}>
+                {#if pt.selected}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="12" height="12"><path d="M5 13l4 4L19 7"/></svg>
+                {/if}
+              </div>
+              <div class="batch-point-info">
+                <div class="batch-point-name">{pt.name}</div>
+                <div class="batch-point-coord">{pt.lat.toFixed(4)}, {pt.lng.toFixed(4)}</div>
+              </div>
             </div>
-            <div class="batch-point-info">
-              <div class="batch-point-name">{pt.name}</div>
-              <div class="batch-point-coord">{pt.lat.toFixed(4)}, {pt.lng.toFixed(4)}</div>
-            </div>
-          </div>
+          {/if}
         {/each}
       </div>
       <div class="confirm-add-actions">
-        <button class="confirm-add-btn confirm-yes" on:click={executeBatchConfirm} disabled={batchConfirmLoading || batchConfirmPoints.filter(p => p.selected).length === 0}>
-          {#if batchConfirmLoading}กำลังเพิ่ม...{:else}เพิ่ม {batchConfirmPoints.filter(p => p.selected).length} จุด{/if}
+        <button class="confirm-add-btn confirm-yes" on:click={executeBatchConfirm} disabled={batchConfirmLoading || batchConfirmPoints.filter(p => p.selected && p.day === batchConfirmActiveDay).length === 0}>
+          {#if batchConfirmLoading}กำลังเพิ่ม...{:else}เพิ่ม {batchConfirmPoints.filter(p => p.selected && p.day === batchConfirmActiveDay).length} จุด วันที่ {batchConfirmActiveDay}{/if}
         </button>
         <button class="confirm-add-btn confirm-no" on:click={cancelBatchConfirm} disabled={batchConfirmLoading}>ยกเลิก</button>
       </div>
@@ -16138,6 +16176,18 @@ out center body;`;
 .batch-point-info { flex: 1; min-width: 0; }
 .batch-point-name { font-size: 13px; color: #e4e4e7; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .batch-point-coord { font-size: 10px; color: #71717a; }
+
+/* Day tabs for trip planning */
+.batch-day-tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.batch-day-tab {
+  padding: 5px 14px; font-size: 12px; border-radius: 20px;
+  border: 1px solid rgba(0, 255, 136, 0.2); background: rgba(0, 255, 136, 0.05);
+  color: #a1a1aa; cursor: pointer; transition: all 0.2s;
+}
+.batch-day-tab:hover { background: rgba(0, 255, 136, 0.1); color: #e4e4e7; }
+.batch-day-tab.active {
+  background: rgba(0, 255, 136, 0.15); border-color: #00ff88; color: #00ff88;
+}
 
 /* ═══ F15: Hands-free Voice ═══ */
 .handsfree-indicator {

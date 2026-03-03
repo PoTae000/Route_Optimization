@@ -591,11 +591,14 @@
 
           if (searchAndAddActions.length > 1) {
             const queries = searchAndAddActions.map(a => a.params.query).filter(Boolean);
+            const days = searchAndAddActions.map(a => a.params.day || '1');
+            const fallbackLats = searchAndAddActions.map(a => a.params.lat || '');
+            const fallbackLngs = searchAndAddActions.map(a => a.params.lng || '');
             const batchKey = `${msgIdx}-batchSearchAndAdd-${queries.join('|')}`;
             if (!executedActions.has(batchKey)) {
               executedActions.add(batchKey);
               executedActions = executedActions;
-              dispatch('action', { type: 'batchSearchAndAdd', params: { queries: queries.join('|||') } });
+              dispatch('action', { type: 'batchSearchAndAdd', params: { queries: queries.join('|||'), days: days.join('|||'), fallbackLats: fallbackLats.join('|||'), fallbackLngs: fallbackLngs.join('|||') } });
             }
             // Mark individual searchAndAdd as executed so they don't fire separately
             for (const action of searchAndAddActions) {
