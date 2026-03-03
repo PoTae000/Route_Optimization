@@ -4375,11 +4375,6 @@
                 }
               } catch {}
             }
-            // Strategy 6: map center fallback
-            if (!found && map) {
-              const c = map.getCenter();
-              found = { lat: c.lat, lon: c.lng, display_name: q + ' (โดยประมาณ)' };
-            }
             if (found) {
               return { name: found.display_name.split(',')[0], address: found.display_name, lat: parseFloat(String(found.lat)), lng: parseFloat(String(found.lon)) };
             }
@@ -4404,7 +4399,7 @@
             const result = await searchOne(queries[i]);
             if (result) results.push(result);
             // Small delay to avoid Nominatim rate limit
-            if (i < queries.length - 1) await new Promise(r => setTimeout(r, 300));
+            if (i < queries.length - 1) await new Promise(r => setTimeout(r, 1100));
           }
 
           // Final progress message
@@ -4491,13 +4486,6 @@
                 }
               }
             } catch {}
-          }
-
-          // Strategy 6: Last resort — use map center with the query name so user can still add it
-          if (!found && map) {
-            const c = map.getCenter();
-            found = { lat: c.lat, lon: c.lng, display_name: query + ' (ตำแหน่งโดยประมาณ)' };
-            showNotification(`ไม่พบพิกัดแน่ชัดของ "${query}" — ใช้ตำแหน่งกลางแผนที่`, 'warning');
           }
 
           if (found) {
