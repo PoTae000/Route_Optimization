@@ -4787,6 +4787,12 @@
             if (currentUser?.id) delParams.append('user_id', String(currentUser.id));
             delParams.append('table', 'users');
             await fetch(`${API_URL}/points/${point.id}?${delParams}`, { method: 'DELETE' });
+            if (tripMode) {
+              delete tripDayMap[point.id];
+              const remaining = deliveryPoints.filter(p => p.id !== point.id && tripDayMap[p.id]);
+              if (remaining.length === 0) exitTripMode();
+              else saveTripState();
+            }
             await loadDeliveryPoints();
             if (optimizedRoute) { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; }
             showNotification(`ลบ "${point.name}" แล้ว`, 'success');
@@ -4803,6 +4809,7 @@
             dp.append('table', 'users');
             await fetch(`${API_URL}/points/${p.id}?${dp}`, { method: 'DELETE' });
           }
+          if (tripMode) exitTripMode();
           await loadDeliveryPoints();
           if (optimizedRoute) { clearRoute(); clearAlternativeRouteLayers(); routeAlternatives = []; showRouteSelector = false; }
           showNotification('ลบจุดแวะทั้งหมดแล้ว', 'success');
@@ -7152,6 +7159,13 @@
       } catch (_) {}
     }
     
+    // Trip mode: remove deleted points from day map
+    if (tripMode) {
+      for (const id of selectedPoints) delete tripDayMap[id];
+      const remaining = deliveryPoints.filter(p => tripDayMap[p.id]);
+      if (remaining.length === 0) exitTripMode();
+      else saveTripState();
+    }
     await loadDeliveryPoints();
     selectedPoints = [];
     isMultiSelectMode = false;
